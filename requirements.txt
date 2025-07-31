@@ -1,0 +1,9 @@
+Flask
+Flask-CORS
+python-dotenv
+openai
+pytesseract
+Pillow
+reportlab
+pandas
+openpyxl
