@@ -1,62 +1,7 @@
-import os
-import json
-from openai import OpenAI
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
-
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# Define your form columns here - customized for bedroom forms
-FORM_COLUMNS = [
-    "customer_name",
-    "address", 
-    "room",
-    "tel_mob_number",
-    "fitting_style",
-    "door_style",
-    "door_colour",
-    "end_panel_colour",
-    "plinth_filler_colour",
-    "worktop_colour",
-    "cabinet_colour",
-    "handles",
-    "survey_date",
-    "appt_date",
-    "pro_inst_date",
-    "comp_chk_date",
-    "date_deposit_paid",
-    "bedside_cabinets_qty",
-    "bedside_cabinets_type",  # floating/fitted/freestand
-    "dresser_desk",  # yes/no
-    "dresser_desk_qty_size",
-    "internal_mirror",  # yes/no
-    "internal_mirror_qty_size",
-    "mirror_colour",  # silver/bronze/grey
-    "mirror_qty",
-    "soffit_lights_type",  # spot/strip
-    "soffit_lights_colour",  # cool white/warm white
-    "soffit_lights_qty",
-    "gable_lights_profile_colour",  # black/white
-    "gable_lights_qty",
-    "carpet_protection",
-    "floor_tile_protection", 
-    "other_misc_accessories",
-    "customer_signature",
-    "signature_date"
-]
-
 def structure_data_with_openai(raw_text):
     """
     Use OpenAI API to structure raw text into predefined form columns
-    
-    Args:
-        raw_text (str): Raw text extracted from image
-        
-    Returns:
-        dict: Structured data with form columns as keys
+    ROBUST handling for blank forms with printed checkmarks
     """
     try:
         print(f"Processing text of length: {len(raw_text)}")
@@ -66,22 +11,20 @@ def structure_data_with_openai(raw_text):
         column_list = ", ".join(FORM_COLUMNS)
         
         prompt = f"""
-        You are tasked with extracting information from a kitchen form and organizing it into specific categories.
-        
-        Extract and categorize the following text into a JSON format using ONLY these column names:
-        {column_list}
-        
+        Extract data from this bedroom checklist form. Return ONLY valid JSON.
+
+        IMPORTANT: This appears to be a blank form template. All checkmarks (✓) are printed template elements, NOT user selections.
+
         Rules:
-        1. Only use the exact column names provided above
-        2. If information for a column is not found, set it to null
-        3. Extract the most relevant information for each column
-        4. Ensure the output is valid JSON
-        5. Do not add any additional fields beyond the specified columns
-        
-        Raw text from form:
+        1. Extract handwritten text for customer info and specifications
+        2. Set ALL checkbox fields to null (no user has made selections)
+        3. Return only JSON, no explanations
+
+        Fields to extract:
+        {column_list}
+
+        Raw text:
         {raw_text}
-        
-        Return only the JSON object, no additional text or formatting.
         """
 
         # Make API call to OpenAI
@@ -91,41 +34,81 @@ def structure_data_with_openai(raw_text):
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a data extraction expert. Return only valid JSON with the requested structure."
+                    "content": "Extract form data to JSON. This is a blank template - all checkmarks are printed elements, not user input. Set all boolean/checkbox fields to null."
                 },
                 {
                     "role": "user", 
                     "content": prompt
                 }
             ],
-            temperature=0.3,
-            max_tokens=1000
+            temperature=0.0,
+            max_tokens=1500
         )
 
-        # Extract the response content
         reply = response.choices[0].message.content.strip()
         print(f"OpenAI response: {reply}")
         
-        # Clean up the response (remove any markdown formatting)
+        # Clean up the response
         if reply.startswith('```json'):
             reply = reply[7:]
         if reply.endswith('```'):
             reply = reply[:-3]
         reply = reply.strip()
 
-        # Parse JSON response
         try:
             structured_data = json.loads(reply)
+            print("✓ JSON parsed successfully")
             
-            # Ensure all expected columns are present
+            # DEFINITIVE list of checkbox fields that MUST be null for blank forms
+            checkbox_fields = [
+                'bedside_cabinets_floating', 'bedside_cabinets_fitted', 'bedside_cabinets_freestand',
+                'dresser_desk_yes', 'dresser_desk_no', 'internal_mirror_yes', 'internal_mirror_no',
+                'mirror_silver', 'mirror_bronze', 'mirror_grey', 'soffit_lights_spot', 'soffit_lights_strip',
+                'soffit_lights_cool_white', 'soffit_lights_warm_white', 'gable_lights_black', 'gable_lights_white',
+                'carpet_protection', 'floor_tile_protection', 'no_floor'
+            ]
+            
+            # Template labels that should be null
+            template_labels = ['QTY', 'SIZE', 'CODE/QTY/SIZE', 'QTY/SIZE', 'COLOUR:', 'PROFILE COLOUR:', 'DATE:', 'Please sign here to confirm.']
+            
+            print("🔧 Starting post-processing...")
             final_data = {}
+            
             for column in FORM_COLUMNS:
-                final_data[column] = structured_data.get(column, None)
+                value = structured_data.get(column, None)
+                
+                if column in checkbox_fields:
+                    # FORCE all checkbox fields to null
+                    if value is not None:
+                        print(f"  🚫 FORCING {column}: '{value}' → null")
+                    final_data[column] = None
+                else:
+                    # Handle text fields
+                    if value and isinstance(value, str):
+                        # Check if it's a template label
+                        if value.strip().upper() in template_labels:
+                            print(f"  🏷️  Template label {column}: '{value}' → null")
+                            final_data[column] = None
+                        else:
+                            final_data[column] = value.strip()
+                    else:
+                        final_data[column] = value
+            
+            print("\n📋 Final processed data (non-null values only):")
+            for k, v in final_data.items():
+                if v is not None:
+                    print(f"  ✓ {k}: {v}")
+            
+            print(f"\n📊 Summary: {sum(1 for v in final_data.values() if v is not None)} fields with data, {sum(1 for v in final_data.values() if v is None)} fields null")
+            
+            # Store the latest structured data
+            global latest_structured_data
+            latest_structured_data = final_data
             
             return final_data
             
         except json.JSONDecodeError as e:
-            print(f"JSON parsing error: {e}")
+            print(f"❌ JSON parsing error: {e}")
             print(f"Raw response: {reply}")
             return {
                 "error": "Failed to parse JSON response",
@@ -134,18 +117,8 @@ def structure_data_with_openai(raw_text):
             }
             
     except Exception as e:
-        print(f"OpenAI API error: {str(e)}")
+        print(f"❌ OpenAI API error: {str(e)}")
         return {
             "error": f"OpenAI API error: {str(e)}",
-            "raw_text": raw_text[:500]  # Include first 500 chars for debugging
+            "raw_text": raw_text[:500]
         }
-
-def update_form_columns(new_columns):
-    """
-    Update the form columns list (useful for dynamic forms)
-    
-    Args:
-        new_columns (list): List of new column names
-    """
-    global FORM_COLUMNS
-    FORM_COLUMNS = new_columns
