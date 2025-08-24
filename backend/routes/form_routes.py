@@ -1,11 +1,15 @@
 # File: /backend/routes/form_routes.py
 from flask import request, jsonify
-from config import app, db
-from models import Customer
+from config import app
+from models import db
+from models import Customer, CustomerFormData
 import secrets
 import string
 import json
 from datetime import datetime, timedelta
+from flask_cors import CORS
+
+CORS(app, origins="*")
 
 # In-memory storage for form tokens (in production, use Redis or database)
 form_tokens = {}
@@ -15,14 +19,14 @@ def generate_secure_token(length=32):
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-@app.route('/generate-form-link', methods=['POST', 'OPTIONS'])
+@app.route('/generate-form-link', methods=['POST'])
 def generate_form_link():
     """Generate a secure form link for customers"""
     if request.method == 'OPTIONS':
         response = jsonify()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "Content-Type")
-        response.headers.add('Access-Control-Allow-Methods', "POST,OPTIONS")
+        
+        
+        
         return response
     
     try:
@@ -59,9 +63,9 @@ def validate_form_token(token):
     """Validate if a form token is still valid"""
     if request.method == 'OPTIONS':
         response = jsonify()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "Content-Type")
-        response.headers.add('Access-Control-Allow-Methods', "GET,OPTIONS")
+        
+        
+        
         return response
     
     try:
@@ -109,9 +113,9 @@ def submit_customer_form():
     """Handle customer form submission and create new customer"""
     if request.method == 'OPTIONS':
         response = jsonify()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "Content-Type")
-        response.headers.add('Access-Control-Allow-Methods', "POST,OPTIONS")
+        
+        
+        
         return response
     
     try:
@@ -119,86 +123,101 @@ def submit_customer_form():
         token = data.get('token')
         form_data = data.get('formData', {})
         
-        print(f"Received form submission for token: {token}")
-        
-        if not token or not form_data:
-            return jsonify({
+        if not form_data:
+            response = jsonify({
                 'success': False,
-                'error': 'Missing token or form data'
-            }), 400
+                'error': 'Missing form data'
+            })
             
-        # Validate token
-        if token not in form_tokens:
-            return jsonify({
-                'success': False,
-                'error': 'Invalid token'
-            }), 404
-            
-        token_data = form_tokens[token]
+            return response, 400
         
-        # Check if token has expired
-        if datetime.now() > token_data['expires_at']:
-            del form_tokens[token]
-            return jsonify({
-                'success': False,
-                'error': 'Token has expired'
-            }), 410
-            
-        # Check if token has already been used
-        if token_data['used']:
-            return jsonify({
-                'success': False,
-                'error': 'Token has already been used'
-            }), 410
-        
-        # Extract customer information
+        # Validate token if provided
+        if token:
+            if token not in form_tokens:
+                response = jsonify({
+                    'success': False,
+                    'error': 'Invalid token'
+                })
+                
+                return response, 404
+                
+            token_data = form_tokens[token]
+            if datetime.now() > token_data['expires_at']:
+                del form_tokens[token]
+                response = jsonify({
+                    'success': False,
+                    'error': 'Token has expired'
+                })
+                
+                return response, 410
+            if token_data['used']:
+                response = jsonify({
+                    'success': False,
+                    'error': 'Token has already been used'
+                })
+                
+                return response, 410
+
+        # Extract customer info
         customer_name = form_data.get('customer_name', '').strip()
         customer_phone = form_data.get('customer_phone', '').strip()
-        customer_email = form_data.get('customer_email', '').strip()
         customer_address = form_data.get('customer_address', '').strip()
-        
+
         if not customer_name:
-            return jsonify({
+            response = jsonify({
                 'success': False,
                 'error': 'Customer name is required'
-            }), 400
-        
-        # Create new customer
+            })
+            
+            return response, 400
+
+        if not customer_address:
+            response = jsonify({
+                'success': False,
+                'error': 'Customer address is required'
+            })
+            
+            return response, 400
+
+        # Create customer and save form data
         new_customer = Customer(
             name=customer_name,
             phone=customer_phone,
             address=customer_address,
-            status='New Lead'  # Default status for form submissions
+            status='New Lead'
         )
-        
-        # Add email field if your Customer model supports it
-        if hasattr(new_customer, 'email'):
-            new_customer.email = customer_email
-        
         db.session.add(new_customer)
+        db.session.flush()
+
+        customer_form_data = CustomerFormData(
+            customer_id=new_customer.id,
+            form_data=json.dumps(form_data),
+            token_used=token if token else '',
+            submitted_at=datetime.utcnow()
+        )
+        db.session.add(customer_form_data)
         db.session.commit()
-        
-        # Mark token as used
-        form_tokens[token]['used'] = True
-        
-        # Log the form data for reference
-        customer_id = new_customer.id
-        print(f"Created customer {customer_id} from form data")
-        print(f"Full form data: {json.dumps(form_data, indent=2)}")
-        
-        return jsonify({
+
+        if token and token in form_tokens:
+            form_tokens[token]['used'] = True
+
+        response = jsonify({
             'success': True,
-            'customer_id': customer_id,
+            'customer_id': new_customer.id,
             'message': 'Customer created successfully'
-        }), 201
+        })
         
+        return response, 201
+
     except Exception as e:
-        print(f"Error submitting customer form: {str(e)}")
         db.session.rollback()
-        return jsonify({
+        response = jsonify({
             'success': False,
             'error': f'Form submission failed: {str(e)}'
-        }), 500
+        })
+        
+        return response, 500
+
 
 @app.route('/cleanup-expired-tokens', methods=['POST'])
 def cleanup_expired_tokens():

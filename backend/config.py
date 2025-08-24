@@ -1,23 +1,4 @@
-# File: /backend/config.py
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-import os
-
-app = Flask(__name__)
-
-# Database configuration
-basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(basedir, "database.db")}'
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
-# Upload folder configuration
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
-
-# Create directories if they don't exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs('generated_pdfs', exist_ok=True)
-os.makedirs('generated_excel', exist_ok=True)
+# config.py - Configuration constants
 
 # File upload configuration
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp'}
@@ -106,9 +87,6 @@ DEFAULT_FORM_VALUES = {
     'gable_lights_colour': '',
     'gable_lights_qty': '',
 }
-
-# Initialize database
-db = SQLAlchemy(app)
 
 # Global variable for structured data (if needed for your existing code)
 latest_structured_data = {}

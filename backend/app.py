@@ -1,29 +1,51 @@
-# File: /backend/app.py
+# app.py - Updated to avoid circular imports
+
 from flask import Flask
 from flask_cors import CORS
-from config import app, db
+import os
+from database import db, init_db
 
-# Import models first
-from models import Customer, Job
+# Import configuration constants
+from config import *
 
-# Import all routes
-from routes import db_routes, file_routes, form_routes
+def create_app():
+    app = Flask(__name__)
+    
+    # Configure CORS
+    CORS(app, origins="*")
+    
+    # Database configuration
+    basedir = os.path.abspath(os.path.dirname(__file__))
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(basedir, "database.db")}'
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    
+    # Upload folder configuration
+    app.config['UPLOAD_FOLDER'] = 'uploads'
+    app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# Enable CORS for all routes
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
+    # Create directories if they don't exist
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    os.makedirs('generated_pdfs', exist_ok=True)
+    os.makedirs('generated_excel', exist_ok=True)
+    
+    # Initialize database
+    init_db(app)
+    
+    # Import and register blueprints (after app is created)
+    from routes.job_routes import job_bp
+    from routes.core_routes import core_bp
+    from routes.db_routes import db_bp
+    
+    app.register_blueprint(job_bp)
+    app.register_blueprint(core_bp)
+    app.register_blueprint(db_bp)
+    
+    return app
 
-# Add CORS headers to all responses
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+app = create_app()
 
 if __name__ == '__main__':
     with app.app_context():
+        # Create tables if they don't exist
         db.create_all()
-        print("Database tables created successfully!")
-    
-    print("Starting Flask server...")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=True)
