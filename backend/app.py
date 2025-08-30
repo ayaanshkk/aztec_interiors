@@ -10,6 +10,7 @@ from config import *
 
 def create_app():
     app = Flask(__name__)
+    app.config['SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'your-secret-key-change-in-production')
     
     # Configure CORS
     CORS(app, origins="*")
@@ -35,10 +36,16 @@ def create_app():
     from routes.job_routes import job_bp
     from routes.core_routes import core_bp
     from routes.db_routes import db_bp
+    from routes.appliance_routes import appliance_bp
+    from routes.auth_routes import auth_bp
+    from routes.form_routes import form_bp
     
     app.register_blueprint(job_bp)
     app.register_blueprint(core_bp)
     app.register_blueprint(db_bp)
+    app.register_blueprint(appliance_bp)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(form_bp)
     
     return app
 

@@ -1,4 +1,4 @@
-# db_routes.py - Fixed to use Blueprint
+# db_routes.py - Updated customer routes
 from flask import Blueprint, request, jsonify
 from database import db
 from models import Customer, CustomerFormData, Quotation, QuotationItem
@@ -8,7 +8,56 @@ from datetime import datetime
 # Create blueprint
 db_bp = Blueprint('database', __name__)
 
-@db_bp.route('/customers/<int:customer_id>', methods=['GET', 'PUT', 'DELETE'])
+@db_bp.route('/customers', methods=['GET', 'POST'])
+def handle_customers():
+    if request.method == 'POST':
+        data = request.json
+        
+        # Create new customer
+        customer = Customer(
+            name=data.get('name', ''),
+            date_of_measure=datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date() if data.get('date_of_measure') else None,
+            address=data.get('address', ''),
+            phone=data.get('phone', ''),
+            email=data.get('email', ''),
+            contact_made=data.get('contact_made', 'Unknown'),
+            preferred_contact_method=data.get('preferred_contact_method'),
+            marketing_opt_in=data.get('marketing_opt_in', False),
+            notes=data.get('notes', ''),
+            created_by=data.get('created_by', 'System'),  # You might want to get this from auth
+            status=data.get('status', 'Active')
+        )
+        
+        customer.save()  # This will auto-extract postcode
+        
+        return jsonify({
+            'id': customer.id,
+            'message': 'Customer created successfully'
+        }), 201
+    
+    # GET all customers
+    customers = Customer.query.order_by(Customer.created_at.desc()).all()
+    return jsonify([
+        {
+            'id': c.id,
+            'name': c.name,
+            'address': c.address,
+            'postcode': c.postcode,
+            'phone': c.phone,
+            'email': c.email,
+            'contact_made': c.contact_made,
+            'preferred_contact_method': c.preferred_contact_method,
+            'marketing_opt_in': c.marketing_opt_in,
+            'date_of_measure': c.date_of_measure.isoformat() if c.date_of_measure else None,
+            'status': c.status,
+            'notes': c.notes,
+            'created_at': c.created_at.isoformat() if c.created_at else None,
+            'created_by': c.created_by
+        }
+        for c in customers
+    ])
+
+@db_bp.route('/customers/<string:customer_id>', methods=['GET', 'PUT', 'DELETE'])
 def handle_single_customer(customer_id):
     customer = Customer.query.get_or_404(customer_id)
     
@@ -32,10 +81,19 @@ def handle_single_customer(customer_id):
             'id': customer.id,
             'name': customer.name,
             'address': customer.address,
+            'postcode': customer.postcode,
             'phone': customer.phone,
             'email': customer.email,
+            'contact_made': customer.contact_made,
+            'preferred_contact_method': customer.preferred_contact_method,
+            'marketing_opt_in': customer.marketing_opt_in,
+            'date_of_measure': customer.date_of_measure.isoformat() if customer.date_of_measure else None,
             'status': customer.status,
+            'notes': customer.notes,
             'created_at': customer.created_at.isoformat() if customer.created_at else None,
+            'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
+            'created_by': customer.created_by,
+            'updated_by': customer.updated_by,
             'form_submissions': form_submissions
         })
     
@@ -45,22 +103,19 @@ def handle_single_customer(customer_id):
         customer.address = data.get('address', customer.address)
         customer.phone = data.get('phone', customer.phone)
         customer.email = data.get('email', customer.email)
+        customer.contact_made = data.get('contact_made', customer.contact_made)
+        customer.preferred_contact_method = data.get('preferred_contact_method', customer.preferred_contact_method)
+        customer.marketing_opt_in = data.get('marketing_opt_in', customer.marketing_opt_in)
         customer.status = data.get('status', customer.status)
+        customer.notes = data.get('notes', customer.notes)
+        customer.updated_by = data.get('updated_by', 'System')
         
-        if 'form_submissions' in data and data['form_submissions']:
-            form_sub = data['form_submissions'][0]
-            if 'form_data' in form_sub:
-                form_entry = CustomerFormData.query.filter_by(customer_id=customer.id).order_by(CustomerFormData.id.asc()).first()
-                if form_entry:
-                    form_entry.form_data = json.dumps(form_sub['form_data'])
-                else:
-                    new_form = CustomerFormData(
-                        customer_id=customer.id,
-                        form_data=json.dumps(form_sub['form_data']),
-                        token_used='',
-                        submitted_at=datetime.utcnow()
-                    )
-                    db.session.add(new_form)
+        if data.get('date_of_measure'):
+            customer.date_of_measure = datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date()
+        
+        # Auto-extract postcode if address changed
+        if 'address' in data:
+            customer.postcode = customer.extract_postcode_from_address()
         
         db.session.commit()
         return jsonify({'message': 'Customer updated successfully'})
@@ -69,23 +124,30 @@ def handle_single_customer(customer_id):
         db.session.delete(customer)
         db.session.commit()
         return jsonify({'message': 'Customer deleted successfully'})
-    
-@db_bp.route('/customers', methods=['GET'])
-def get_customers():
-    customers = Customer.query.all()
-    return jsonify([
-        {
-            'id': c.id,
-            'name': c.name,
-            'address': c.address,
-            'phone': c.phone,
-            'email': c.email,
-            'status': c.status,
-            'created_at': c.created_at.isoformat() if c.created_at else None
-        }
-        for c in customers
-    ])
 
+@db_bp.route('/customers/<string:customer_id>/generate-form-link', methods=['POST'])
+def generate_customer_form_link(customer_id):
+    """Generate a form link for an existing customer"""
+    customer = Customer.query.get_or_404(customer_id)
+    data = request.json
+    form_type = data.get('formType', 'general')
+    
+    # Generate unique token for this form
+    import secrets
+    token = secrets.token_urlsafe(32)
+    
+    # Store the token with customer association
+    # You might want to create a FormToken model for this
+    # For now, we'll return the token
+    
+    return jsonify({
+        'token': token,
+        'customer_id': customer_id,
+        'form_type': form_type,
+        'message': f'Form link generated for customer {customer.name}'
+    })
+
+# Keep existing quotation routes unchanged
 @db_bp.route('/quotations', methods=['GET', 'POST'])
 def handle_quotations():
     if request.method == 'POST':
@@ -96,9 +158,8 @@ def handle_quotations():
             notes=data.get('notes')
         )
         db.session.add(quotation)
-        db.session.flush()  # get quotation.id before committing
+        db.session.flush()
 
-        # Add items
         for item in data.get('items', []):
             q_item = QuotationItem(
                 quotation_id=quotation.id,
@@ -112,8 +173,7 @@ def handle_quotations():
         db.session.commit()
         return jsonify({'id': quotation.id}), 201
 
-    # GET all quotations, optionally filtered by customer_id
-    customer_id = request.args.get('customer_id', type=int)
+    customer_id = request.args.get('customer_id', type=str)
     if customer_id:
         quotations = Quotation.query.filter_by(customer_id=customer_id).all()
     else:
@@ -168,7 +228,6 @@ def handle_single_quotation(quotation_id):
         quotation.total = data.get('total', quotation.total)
         quotation.notes = data.get('notes', quotation.notes)
 
-        # Replace items
         if 'items' in data:
             QuotationItem.query.filter_by(quotation_id=quotation.id).delete()
             for item in data['items']:
