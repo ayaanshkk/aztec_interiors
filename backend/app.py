@@ -33,14 +33,14 @@ def create_app():
     init_db(app)
     
     # Import and register blueprints (after app is created)
-    from routes.job_routes import job_bp
+    # from routes.job_routes import job_bp
     from routes.core_routes import core_bp
     from routes.db_routes import db_bp
     from routes.appliance_routes import appliance_bp
     from routes.auth_routes import auth_bp
     from routes.form_routes import form_bp
     
-    app.register_blueprint(job_bp)
+    # app.register_blueprint(job_bp)
     app.register_blueprint(core_bp)
     app.register_blueprint(db_bp)
     app.register_blueprint(appliance_bp)

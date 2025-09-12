@@ -1,203 +1,157 @@
-# migration_script.py - Database migration to update Customer model
-import uuid
-from datetime import datetime
-from app import app
-from database import db
-from models import Customer, Fitter, Salesperson, Team
-from flask import Flask
+# migration_fix_enum.py - Fixed version
 import os
+import sys
 
-def migrate_customer_table():
-    """
-    Migration script to update existing Customer table to new schema.
-    Run this script to migrate your existing data.
-    """
+# Add the parent directory to the path so we can import our modules
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app import create_app
+from database import db
+from models import Customer
+from sqlalchemy import text
+
+def fix_enum_values():
+    """Fix empty enum values in the database"""
+    app = create_app()
     
-    # Create Flask app context
-    app = Flask(__name__)
-    basedir = os.path.abspath(os.path.dirname(__file__))
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{os.path.join(basedir, "database.db")}'
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    
-    db.init_app(app)
+    with app.app_context():
+        print("Checking for customers with invalid preferred_contact_method values...")
+        
+        try:
+            # Method 1: Check current data using SQLAlchemy text()
+            result = db.session.execute(
+                text("SELECT id, name, preferred_contact_method FROM customers WHERE preferred_contact_method = '' OR preferred_contact_method IS NULL LIMIT 10")
+            )
+            
+            invalid_customers = result.fetchall()
+            print(f"Found {len(invalid_customers)} customers with invalid enum values (showing first 10)")
+            
+            if invalid_customers:
+                for customer in invalid_customers:
+                    print(f"Customer ID {customer[0]}: {customer[1]} - Contact method: '{customer[2]}'")
+            
+            # Get total count
+            count_result = db.session.execute(
+                text("SELECT COUNT(*) FROM customers WHERE preferred_contact_method = '' OR preferred_contact_method IS NULL")
+            )
+            total_invalid = count_result.scalar()
+            print(f"Total invalid records: {total_invalid}")
+            
+            if total_invalid > 0:
+                # Method 2: Fix the data
+                print(f"\nFixing {total_invalid} invalid enum values...")
+                
+                # Update empty strings and NULL values to a default
+                update_result = db.session.execute(
+                    text("UPDATE customers SET preferred_contact_method = 'Phone' WHERE preferred_contact_method = '' OR preferred_contact_method IS NULL")
+                )
+                
+                db.session.commit()
+                print(f"Updated {update_result.rowcount} customer records to use 'Phone' as default")
+                
+                # Verify the fix
+                verify_result = db.session.execute(
+                    text("SELECT COUNT(*) FROM customers WHERE preferred_contact_method = '' OR preferred_contact_method IS NULL")
+                )
+                remaining_invalid = verify_result.scalar()
+                print(f"Remaining invalid records: {remaining_invalid}")
+                
+                if remaining_invalid == 0:
+                    print("✓ All enum values fixed successfully!")
+                else:
+                    print(f"⚠ Warning: {remaining_invalid} records still have invalid values")
+            else:
+                print("✓ No invalid enum values found - database is clean!")
+                
+        except Exception as e:
+            print(f"Error during migration: {e}")
+            db.session.rollback()
+            return False
+            
+    return True
+
+def check_database_schema():
+    """Check if the preferred_contact_method column exists and its current state"""
+    app = create_app()
     
     with app.app_context():
         try:
-            # Add new columns to existing table
-            # Note: You might need to run these SQL commands directly depending on your database
-            
-            print("Starting Customer table migration...")
-            
-            # Add new columns (adjust SQL syntax based on your database - PostgreSQL, MySQL, SQLite)
-            migration_sql = """
-            -- Add new columns
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS date_of_measure DATE;
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS postcode VARCHAR(20);
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS contact_made VARCHAR(20) DEFAULT 'Unknown';
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS preferred_contact_method VARCHAR(20);
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS marketing_opt_in BOOLEAN DEFAULT FALSE;
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS notes TEXT;
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS created_by VARCHAR(200);
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_by VARCHAR(200);
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
-            
-            -- Update ID column to use UUIDs for new records (existing integer IDs will remain)
-            -- You might want to create a new UUID column and gradually migrate
-            ALTER TABLE customers ADD COLUMN IF NOT EXISTS uuid_id VARCHAR(36);
-            """
-            
-            # Execute the migration
-            db.engine.execute(migration_sql)
-            
-            # Update existing records with UUIDs and default values
-            customers = Customer.query.all()
-            for customer in customers:
-                if not hasattr(customer, 'uuid_id') or not customer.uuid_id:
-                    customer.uuid_id = str(uuid.uuid4())
-                if not hasattr(customer, 'created_by') or not customer.created_by:
-                    customer.created_by = 'Migration'
-                if not hasattr(customer, 'contact_made') or not customer.contact_made:
-                    customer.contact_made = 'Unknown'
-                
-                # Try to extract postcode from existing address
-                if customer.address and not (hasattr(customer, 'postcode') and customer.postcode):
-                    import re
-                    postcode_pattern = r'\b[A-Z]{1,2}[0-9][A-Z0-9]? ?[0-9][A-Z]{2}\b'
-                    match = re.search(postcode_pattern, customer.address.upper())
-                    if match:
-                        customer.postcode = match.group(0)
-            
-            db.session.commit()
-            print("Migration completed successfully!")
-            
-            # Print summary
-            total_customers = Customer.query.count()
-            print(f"Total customers in database: {total_customers}")
-            
-        except Exception as e:
-            print(f"Migration failed: {e}")
-            db.session.rollback()
-
-def create_form_token_table():
-    """
-    Create a new table to store form tokens for existing customers
-    """
-    create_table_sql = """
-    CREATE TABLE IF NOT EXISTS form_tokens (
-        id INTEGER PRIMARY KEY AUTO_INCREMENT,
-        customer_id VARCHAR(36) NOT NULL,
-        token VARCHAR(255) NOT NULL UNIQUE,
-        form_type VARCHAR(50) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        used_at TIMESTAMP NULL,
-        expires_at TIMESTAMP NULL,
-        is_active BOOLEAN DEFAULT TRUE,
-        FOREIGN KEY (customer_id) REFERENCES customers(id)
-    );
-    
-    CREATE INDEX idx_form_tokens_token ON form_tokens(token);
-    CREATE INDEX idx_form_tokens_customer_id ON form_tokens(customer_id);
-    """
-    
-    try:
-        db.engine.execute(create_table_sql)
-        print("Form tokens table created successfully!")
-    except Exception as e:
-        print(f"Failed to create form tokens table: {e}")
-
-def create_sample_data():
-    """Create sample data for testing"""
-    with app.app_context():
-        # Create tables
-        db.create_all()
-        
-        # Check if data already exists
-        if Customer.query.first():
-            print("Sample data already exists")
-            return
-        
-        # Create sample customers
-        customers = [
-            Customer(
-                name="John Smith",
-                email="john.smith@email.com",
-                phone="01234 567890",
-                address="123 Main Street, London, SW1A 1AA"
-            ),
-            Customer(
-                name="Sarah Johnson",
-                email="sarah.johnson@email.com",
-                phone="01234 567891",
-                address="456 Oak Avenue, Manchester, M1 1AA"
-            ),
-            Customer(
-                name="Mike Wilson",
-                email="mike.wilson@email.com",
-                phone="01234 567892",
-                address="789 Pine Road, Birmingham, B1 1AA"
+            # Check if the column exists and get some sample data
+            result = db.session.execute(
+                text("SELECT preferred_contact_method, COUNT(*) as count FROM customers GROUP BY preferred_contact_method LIMIT 10")
             )
-        ]
-        
-        for customer in customers:
-            db.session.add(customer)
-        
-        # Create sample teams
-        teams = [
-            Team(name="Kitchen Team A", specialty="Kitchen", active=True),
-            Team(name="Bedroom Team B", specialty="Bedroom", active=True),
-            Team(name="General Fitting Team", specialty="General", active=True)
-        ]
-        
-        for team in teams:
-            db.session.add(team)
-        
-        db.session.flush()  # Get team IDs
-        
-        # Create sample fitters
-        fitters = [
-            Fitter(name="Dave Matthews", team_id=teams[0].id, active=True),
-            Fitter(name="Tom Harris", team_id=teams[1].id, active=True),
-            Fitter(name="Steve Brown", team_id=teams[2].id, active=True),
-            Fitter(name="James Wilson", team_id=teams[0].id, active=True)
-        ]
-        
-        for fitter in fitters:
-            db.session.add(fitter)
-        
-        # Create sample salespeople
-        salespeople = [
-            Salesperson(name="John Smith", email="john@company.com", active=True),
-            Salesperson(name="Sarah Johnson", email="sarah@company.com", active=True),
-            Salesperson(name="Mike Wilson", email="mike@company.com", active=True)
-        ]
-        
-        for person in salespeople:
-            db.session.add(person)
-        
-        # Commit all changes
-        db.session.commit()
-        print("Sample data created successfully!")
-        print(f"Created {len(customers)} customers")
-        print(f"Created {len(teams)} teams")
-        print(f"Created {len(fitters)} fitters")
-        print(f"Created {len(salespeople)} salespeople")
+            
+            print("Current preferred_contact_method values in database:")
+            print("-" * 50)
+            for row in result:
+                contact_method = row[0] if row[0] is not None else 'NULL'
+                if row[0] == '':
+                    contact_method = 'EMPTY_STRING'
+                print(f"{contact_method}: {row[1]} records")
+                
+        except Exception as e:
+            print(f"Error checking database schema: {e}")
+            print("This might indicate the column doesn't exist or there's a database connection issue.")
 
-if __name__ == "__main__":
-    print("Customer Database Migration Tool")
+def create_backup():
+    """Create a backup of the customers table before making changes"""
+    app = create_app()
+    
+    with app.app_context():
+        try:
+            # For SQLite, we can create a backup table
+            db.session.execute(
+                text("CREATE TABLE customers_backup AS SELECT * FROM customers")
+            )
+            db.session.commit()
+            print("✓ Backup table 'customers_backup' created successfully")
+            return True
+        except Exception as e:
+            print(f"Failed to create backup: {e}")
+            return False
+
+def main():
+    """Main migration function"""
+    print("Database Enum Fix Migration Tool")
     print("=" * 40)
     
-    choice = input("Choose migration option:\n1. Migrate Customer table\n2. Create Form Tokens table\n3. Both\nEnter choice (1-3): ")
+    # Step 1: Check current database state
+    print("\n1. Checking current database state...")
+    check_database_schema()
     
-    if choice in ['1', '3']:
-        migrate_customer_table()
+    # Step 2: Ask user for confirmation
+    print("\n2. Migration Options:")
+    print("   a) Check database state only (safe)")
+    print("   b) Create backup and fix enum values")
+    print("   c) Fix enum values without backup (not recommended)")
     
-    if choice in ['2', '3']:
-        create_form_token_table()
+    choice = input("\nEnter your choice (a/b/c): ").lower().strip()
     
-    print("\nMigration completed!")
-    print("\nNext steps:")
-    print("1. Update your models.py with the new Customer model")
-    print("2. Update your routes with the new customer endpoints")
-    print("3. Replace your frontend components with the new versions")
-    print("4. Test the new workflow: Create customer -> Generate form link -> Submit form")
-    create_sample_data()
+    if choice == 'a':
+        print("Database check completed. No changes made.")
+        return
+    elif choice == 'b':
+        print("\n3. Creating backup...")
+        if not create_backup():
+            print("Backup failed. Aborting migration for safety.")
+            return
+        print("\n4. Fixing enum values...")
+        if fix_enum_values():
+            print("\n✓ Migration completed successfully!")
+        else:
+            print("\n✗ Migration failed. Check the error messages above.")
+    elif choice == 'c':
+        confirm = input("Are you sure you want to proceed without backup? (yes/no): ")
+        if confirm.lower() == 'yes':
+            print("\n3. Fixing enum values...")
+            if fix_enum_values():
+                print("\n✓ Migration completed successfully!")
+            else:
+                print("\n✗ Migration failed. Check the error messages above.")
+        else:
+            print("Migration cancelled.")
+    else:
+        print("Invalid choice. Exiting.")
+
+if __name__ == "__main__":
+    main()
