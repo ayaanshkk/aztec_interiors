@@ -307,4 +307,5 @@ if __name__ == '__main__':
     print("🔗 Form link endpoint: http://127.0.0.1:5000/generate-form-link")
     print("=" * 50)
     
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    debug_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    app.run(debug=debug_mode, host='127.0.0.1', port=5000)

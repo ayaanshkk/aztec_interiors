@@ -154,4 +154,6 @@ if __name__ == "__main__":
     print("=" * 60)
 
     port = int(os.getenv("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port, threaded=True)
+    debug_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    app.run(debug=debug_mode, host="0.0.0.0", port=port, threaded=True)
+
