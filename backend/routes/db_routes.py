@@ -214,42 +214,12 @@ def update_customer_stage(customer_id):
         if new_stage not in valid_stages:
             return jsonify({'error': 'Invalid stage'}), 400
 
-        # FIXED: Uses session.query
-        job_count = session.query(Job).filter_by(customer_id=customer_id).count()
-        has_linked_entity = (customer.projects and len(customer.projects) > 0) or job_count > 0
-
-        # ✅ CRITICAL FIX: Send notification for Accepted stage ALWAYS, then handle linked entity logic
-        if new_stage == 'Accepted':
-            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
-            
-            # Create and commit notification immediately for ALL customers
-            notification = ProductionNotification(
-                job_id=linked_job.id if linked_job else None,
-                customer_id=customer.id,
-                message=f"Customer '{customer.name}' moved to Accepted",
-                moved_by=updated_by_user
-            )
-            session.add(notification)
-            session.commit()  # ✅ Commit notification BEFORE checking linked entities
-            
-            current_app.logger.info(f"✅ Notification sent for customer {customer.name} moved to Accepted")
-            
-            # If a linked entity exists, return early (stage update suppressed)
-            if has_linked_entity:
-                return jsonify({
-                    'message': 'Customer stage sync suppressed; projects/jobs exist. Notification sent.',
-                    'notification_sent': True
-                }), 200
-        
-        # Check for existing jobs/projects (SUPPRESSION) - Only pure leads continue beyond this point for stage update
-        if has_linked_entity:
-            # For non-Accepted stages, suppress and return here.
-            return jsonify({'message': 'Customer stage sync suppressed; projects/jobs exist.'}), 200
-
         old_stage = customer.stage
         if old_stage == new_stage:
-            return jsonify({'message': 'Stage not changed'}), 200
+            return jsonify({'message': 'Stage not changed', 'stage_updated': False}), 200
 
+        # ✅ CRITICAL FIX: Update customer stage REGARDLESS of linked entities
+        # This allows customers to have independent stages from their jobs/projects
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
@@ -258,17 +228,32 @@ def update_customer_stage(customer_id):
         
         session.add(customer)
         
+        # Send notification if moving to Accepted
+        if new_stage == 'Accepted':
+            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
+            notification = ProductionNotification(
+                job_id=linked_job.id if linked_job else None,
+                customer_id=customer.id,
+                message=f"Customer '{customer.name}' moved to Accepted",
+                moved_by=updated_by_user
+            )
+            session.add(notification)
+            current_app.logger.info(f"✅ Notification will be sent for customer {customer.name} moved to Accepted")
+        
         # ✅ FIXED: Commit BEFORE refresh
         session.commit()
         
         # ✅ FIXED: Refresh AFTER commit to get the latest DB state
-        session.refresh(customer) 
+        session.refresh(customer)
+        
+        current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
         return jsonify({
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
             'new_stage': customer.stage,
+            'stage_updated': True,
             'notification_sent': new_stage == 'Accepted'
         }), 200
 
