@@ -219,7 +219,6 @@ def update_customer_stage(customer_id):
             return jsonify({'message': 'Stage not changed', 'stage_updated': False}), 200
 
         # ✅ CRITICAL FIX: Update customer stage REGARDLESS of linked entities
-        # This allows customers to have independent stages from their jobs/projects
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
@@ -243,8 +242,8 @@ def update_customer_stage(customer_id):
         # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
         session.commit()
         
-        # ✅ FIX: Refresh AFTER commit to get the latest DB state
-        session.refresh(customer)
+        # 🔑 FIX: Refresh AFTER commit to get the latest DB state
+        session.refresh(customer) 
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
@@ -252,7 +251,7 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage, # 🔑 FIX: Use customer.stage (refreshed value)
+            'new_stage': customer.stage, 
             'stage_updated': True,
             'notification_sent': new_stage == 'Accepted'
         }), 200
@@ -532,6 +531,11 @@ def get_pipeline_data():
         return jsonify({}), 200
     session = SessionLocal()
     try:
+        # 🔑 CRITICAL FIX: Ensure session cache is cleared before reading fresh data.
+        # This prevents reading a stale version of the stage, solving the "snap back" issue
+        # caused by the subsequent client-side refetch using old data.
+        session.expire_all() 
+        
         # 🔑 CRITICAL FIX: Use EAGER LOADING (selectinload) to fetch 
         # all customers and their related jobs and projects simultaneously.
         customers = session.query(Customer).options(
