@@ -240,10 +240,10 @@ def update_customer_stage(customer_id):
             session.add(notification)
             current_app.logger.info(f"✅ Notification will be sent for customer {customer.name} moved to Accepted")
         
-        # ✅ FIXED: Commit BEFORE refresh
+        # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
         session.commit()
         
-        # ✅ FIXED: Refresh AFTER commit to get the latest DB state
+        # ✅ FIX: Refresh AFTER commit to get the latest DB state
         session.refresh(customer)
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
@@ -252,7 +252,7 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage,
+            'new_stage': customer.stage, # 🔑 FIX: Use customer.stage (refreshed value)
             'stage_updated': True,
             'notification_sent': new_stage == 'Accepted'
         }), 200
@@ -502,16 +502,17 @@ def update_job_stage(job_id):
                 session.add(customer)
 
         session.add(job)
+        # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
         session.commit()
         
-        # CRITICAL FIX: Refresh the object to ensure the latest state is captured 
+        # 🔑 FIX: Refresh the object to ensure the latest state is captured 
         session.refresh(job) 
 
         return jsonify({
             'message': 'Stage updated successfully',
             'job_id': job.id,
             'old_stage': old_stage,
-            'new_stage': new_stage
+            'new_stage': job.stage # 🔑 FIX: Use job.stage (refreshed value)
         }), 200
 
     except Exception as e:
@@ -674,13 +675,13 @@ def handle_single_project(project_id):
                     customer.notes = (customer.notes or '') + note_entry_cust
                     session.add(customer)
 
+            # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
             session.commit()
             
-            # CRITICAL FIX: Refresh the object to ensure the latest state is captured 
-            # before the function returns (prevents stale data read).
+            # 🔑 FIX: Refresh the object to ensure the latest state is captured 
             session.refresh(project)
             
-            return jsonify({'message': 'Project updated successfully', 'id': project.id, 'new_stage': project.stage})
+            return jsonify({'message': 'Project updated successfully', 'id': project.id, 'new_stage': project.stage}) # 🔑 FIX: Use project.stage (refreshed value)
 
         elif request.method == 'DELETE':
             session.delete(project)
@@ -759,7 +760,7 @@ def update_project_stage(project_id):
             'message': 'Stage updated successfully',
             'project_id': project.id,
             'old_stage': old_stage,
-            'new_stage': new_stage
+            'new_stage': project.stage # 🔑 FIX: Use project.stage (refreshed value)
         }), 200
 
     except Exception as e:
