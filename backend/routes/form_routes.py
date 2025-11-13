@@ -1251,9 +1251,9 @@ def update_form_submission(submission_id):
             return jsonify({'error': 'Form submission not found'}), 404
 
         # Check permissions
-        # Allow edit if user is Manager, HR, Production, or the creator
+        # Allow edit if user is Manager, HR, Production, Sales, or the creator
         user_role = request.current_user.role
-        allowed_roles = ['Manager', 'HR', 'Production']
+        allowed_roles = ['Manager', 'HR', 'Production', 'Sales']  # ✅ Added 'Sales'
         is_creator = submission.created_by == request.current_user.id
         
         if user_role not in allowed_roles and not is_creator:
