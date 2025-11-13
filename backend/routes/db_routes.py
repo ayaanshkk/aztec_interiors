@@ -218,11 +218,11 @@ def update_customer_stage(customer_id):
         job_count = session.query(Job).filter_by(customer_id=customer_id).count()
         has_linked_entity = (customer.projects and len(customer.projects) > 0) or job_count > 0
 
-        # MODIFICATION 2: Send notification before the stage update is suppressed
+        # ✅ CRITICAL FIX: Send notification for Accepted stage ALWAYS, then handle linked entity logic
         if new_stage == 'Accepted':
             linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
             
-            # Send notification regardless of linked entity existence
+            # Create and commit notification immediately for ALL customers
             notification = ProductionNotification(
                 job_id=linked_job.id if linked_job else None,
                 customer_id=customer.id,
@@ -230,16 +230,20 @@ def update_customer_stage(customer_id):
                 moved_by=updated_by_user
             )
             session.add(notification)
+            session.commit()  # ✅ Commit notification BEFORE checking linked entities
             
-            # If a linked entity exists, commit the notification and return early.
+            current_app.logger.info(f"✅ Notification sent for customer {customer.name} moved to Accepted")
+            
+            # If a linked entity exists, return early (stage update suppressed)
             if has_linked_entity:
-                session.commit()
-                return jsonify({'message': 'Customer stage sync suppressed; projects/jobs exist. Notification sent.'}), 200
-            
+                return jsonify({
+                    'message': 'Customer stage sync suppressed; projects/jobs exist. Notification sent.',
+                    'notification_sent': True
+                }), 200
         
         # Check for existing jobs/projects (SUPPRESSION) - Only pure leads continue beyond this point for stage update
         if has_linked_entity:
-            # If it's Accepted, we already returned above. If it's any other stage, suppress and return here.
+            # For non-Accepted stages, suppress and return here.
             return jsonify({'message': 'Customer stage sync suppressed; projects/jobs exist.'}), 200
 
         old_stage = customer.stage
@@ -252,7 +256,6 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # The notification for 'Accepted' pure leads was added above and will be committed here.
         session.add(customer)
         
         # ✅ FIXED: Commit BEFORE refresh
@@ -265,7 +268,8 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage 
+            'new_stage': customer.stage,
+            'notification_sent': new_stage == 'Accepted'
         }), 200
 
     except Exception as e:
