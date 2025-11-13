@@ -204,9 +204,11 @@ def update_customer_stage(customer_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
+        # MODIFICATION 1: Update valid_stages to reflect front-end changes
         valid_stages = [
-            "Lead", "Survey", "Design", "Quote", "Consultation", "Quoted",
-            "Accepted", "OnHold", "Production", "Delivery", "Installation",
+            "Lead", "Survey", "Design", "Quote", 
+            "Accepted", "OnHold", "Ordered", # Removed "Consultation" and "Quoted", Added "Ordered"
+            "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
         if new_stage not in valid_stages:
@@ -214,7 +216,30 @@ def update_customer_stage(customer_id):
 
         # FIXED: Uses session.query
         job_count = session.query(Job).filter_by(customer_id=customer_id).count()
-        if (customer.projects and len(customer.projects) > 0) or job_count > 0:
+        has_linked_entity = (customer.projects and len(customer.projects) > 0) or job_count > 0
+
+        # MODIFICATION 2: Send notification before the stage update is suppressed
+        if new_stage == 'Accepted':
+            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
+            
+            # Send notification regardless of linked entity existence
+            notification = ProductionNotification(
+                job_id=linked_job.id if linked_job else None,
+                customer_id=customer.id,
+                message=f"Customer '{customer.name}' moved to Accepted",
+                moved_by=updated_by_user
+            )
+            session.add(notification)
+            
+            # If a linked entity exists, commit the notification and return early.
+            if has_linked_entity:
+                session.commit()
+                return jsonify({'message': 'Customer stage sync suppressed; projects/jobs exist. Notification sent.'}), 200
+            
+        
+        # Check for existing jobs/projects (SUPPRESSION) - Only pure leads continue beyond this point for stage update
+        if has_linked_entity:
+            # If it's Accepted, we already returned above. If it's any other stage, suppress and return here.
             return jsonify({'message': 'Customer stage sync suppressed; projects/jobs exist.'}), 200
 
         old_stage = customer.stage
@@ -227,18 +252,7 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # Notification if accepted
-        if new_stage == 'Accepted':
-            # FIXED: Uses session.query
-            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
-            notification = ProductionNotification(
-                job_id=linked_job.id if linked_job else None,
-                customer_id=customer.id,
-                message=f"Customer '{customer.name}' moved to Accepted",
-                moved_by=updated_by_user
-            )
-            session.add(notification)
-
+        # The notification for 'Accepted' pure leads was added above and will be committed here.
         session.add(customer)
         
         # ✅ FIXED: Commit BEFORE refresh
@@ -251,7 +265,7 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage  # ✅ Now this is guaranteed to be the DB value
+            'new_stage': customer.stage 
         }), 200
 
     except Exception as e:
@@ -456,9 +470,11 @@ def update_job_stage(job_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
+        # MODIFICATION 1: Update valid_stages to reflect front-end changes
         valid_stages = [
-            "Lead", "Survey", "Design", "Quote", "Consultation", "Quoted",
-            "Accepted", "OnHold", "Production", "Delivery", "Installation",
+            "Lead", "Survey", "Design", "Quote", 
+            "Accepted", "OnHold", "Ordered", # Removed "Consultation" and "Quoted", Added "Ordered"
+            "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
         if new_stage not in valid_stages:
@@ -473,6 +489,7 @@ def update_job_stage(job_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         job.notes = (job.notes or '') + note_entry
 
+        # Notification for Jobs (No change needed here, logic is sound for Jobs)
         if new_stage == 'Accepted':
             notification = ProductionNotification(
                 job_id=job.id,
@@ -499,7 +516,6 @@ def update_job_stage(job_id):
         session.commit()
         
         # CRITICAL FIX: Refresh the object to ensure the latest state is captured 
-        # before the function returns (prevents stale data read).
         session.refresh(job) 
 
         return jsonify({
