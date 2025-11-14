@@ -1,8 +1,7 @@
 # routes/appliance_routes.py
 from flask import Blueprint, request, jsonify, current_app
-# REMOVED: from ..database import db # <-- THIS CAUSED THE IMPORT ERROR
-from sqlalchemy import or_ # IMPORTED 'or_' for use in filtering
-from ..db import SessionLocal # IMPORTED SessionLocal for database transactions
+from sqlalchemy import or_
+from ..db import SessionLocal
 
 from ..models import Product, Brand, ApplianceCategory, DataImport, ProductQuoteItem
 from datetime import datetime
@@ -51,19 +50,47 @@ def serialize_product(product):
     }
 
 
+def safe_read_csv(file_path, **kwargs):
+    """
+    Safely read CSV with support for both old and new pandas versions
+    """
+    try:
+        # Try newer pandas syntax (>= 1.3.0)
+        return pd.read_csv(file_path, **kwargs, on_bad_lines='skip')
+    except TypeError:
+        # Fallback for pandas < 1.3.0
+        kwargs_old = {k: v for k, v in kwargs.items() if k not in ['on_bad_lines']}
+        return pd.read_csv(file_path, **kwargs_old, error_bad_lines=False, warn_bad_lines=False)
+
+
 def process_import_file(app, import_id, file_path, import_type):
     """
     This function runs in a background thread to process the import.
     It now handles the complex pivoted format for 'appliance_matrix'.
     """
     with app.app_context():
-        # NOTE: Using SessionLocal here to manage connections in a thread
         session = SessionLocal()
         import_record = session.get(DataImport, import_id)
         
         if not import_record:
+            app.logger.error(f"Import record {import_id} not found")
             session.close()
             return
+
+        app.logger.info(f"Starting import processing for {import_id}: {file_path} ({import_type})")
+
+        # Verify file exists
+        if not os.path.exists(file_path):
+            import_record.status = 'failed'
+            import_record.error_log = f"File not found: {file_path}"
+            import_record.completed_at = datetime.utcnow()
+            session.commit()
+            session.close()
+            app.logger.error(f"File not found: {file_path}")
+            return
+
+        file_size = os.path.getsize(file_path)
+        app.logger.info(f"Processing file: {file_path} ({file_size} bytes)")
 
         processed_count = 0
         failed_count = 0
@@ -77,8 +104,7 @@ def process_import_file(app, import_id, file_path, import_type):
                 if file_path.endswith(('.xlsx', '.xls')):
                     df_sniff = pd.read_excel(file_path, header=None)
                 else:
-                    # <-- FIX 1 -->
-                    df_sniff = pd.read_csv(file_path, header=None, encoding='utf-8', on_bad_lines='skip')
+                    df_sniff = safe_read_csv(file_path, header=None, encoding='utf-8')
 
                 # Find Brand
                 brand_name = "Unknown"
@@ -97,35 +123,29 @@ def process_import_file(app, import_id, file_path, import_type):
                 if not brand:
                     brand = Brand(name=brand_name, active=True)
                     session.add(brand)
-                    # Commit brand to get ID outside of main product loop
                     session.commit()
-                # Refresh session record
                 brand = session.query(Brand).filter_by(name=brand_name).first()
 
                 # 2. Reload DataFrame with correct header (row 5, index 4)
                 if file_path.endswith(('.xlsx', '.xls')):
                     df = pd.read_excel(file_path, header=4)
                 else:
-                    # <-- FIX 2 -->
-                    df = pd.read_csv(file_path, header=4, encoding='utf-8', on_bad_lines='skip')
+                    df = safe_read_csv(file_path, header=4, encoding='utf-8')
 
                 # 3. Iterate and process rows
                 for index, row in df.iterrows():
                     try:
                         product_name_category = str(row.iloc[0]).strip()
                         if pd.isna(product_name_category) or product_name_category == '':
-                            continue # Skip empty spacer rows
+                            continue
 
                         # Get or create Category
                         category = session.query(ApplianceCategory).filter_by(name=product_name_category).first()
                         if not category:
                             category = ApplianceCategory(name=product_name_category, active=True)
                             session.add(category)
-                            # Commit category to get ID
                             session.commit()
-                        # Refresh session record
                         category = session.query(ApplianceCategory).filter_by(name=product_name_category).first()
-
 
                         # Helper to process a single product entry
                         def process_entry(model_codes_str, series, price, tier, current_session):
@@ -163,7 +183,6 @@ def process_import_file(app, import_id, file_path, import_type):
                                     elif tier == 'high':
                                         product.high_tier_price = numeric_price
                                     
-                                    # Set base price to lowest found tier price
                                     if product.base_price is None or (numeric_price < product.base_price):
                                         product.base_price = numeric_price
                                         
@@ -179,84 +198,76 @@ def process_import_file(app, import_id, file_path, import_type):
                         # Process HIGH tier (cols 9, 10, 11)
                         processed_count += process_entry(row.iloc[9], row.iloc[10], row.iloc[11], 'high', session)
                         
-                        # Commit after each row (batch of 1-3 products)
                         session.commit()
 
                     except Exception as row_e:
                         session.rollback()
                         failed_count += 1
-                        error_log.append(f"Row {index + 6}: {str(row_e)}") # +6 = 1-based index + 5 header rows
+                        error_log.append(f"Row {index + 6}: {str(row_e)}")
+                        app.logger.error(f"Error processing row {index + 6}: {row_e}")
 
             # --- Logic for 'KBB Pricelist' (FLAT FORMAT) ---
             elif import_type == 'kbb_pricelist':
-                # This logic is for the KBB kitchen/bedroom files
                 if file_path.endswith(('.xlsx', '.xls')):
-                    df = pd.read_excel(file_path, header=2) # Header is on row 3 (index 2)
+                    df = pd.read_excel(file_path, header=2)
                 else:
-                    # <-- FIX 3 -->
-                    df = pd.read_csv(file_path, header=2, encoding='utf-8', on_bad_lines='skip')
+                    df = safe_read_csv(file_path, header=2, encoding='utf-8')
                 
-                # Clean column names
                 df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
                 
                 for index, row in df.iterrows():
                     try:
                         code = row.get('code')
                         if pd.isna(code):
-                            continue # Skip empty rows
+                            continue
                         
-                        # (KBB processing logic goes here)
+                        # KBB processing logic here
                         
                         processed_count += 1
                         
                     except Exception as row_e:
                         session.rollback()
                         failed_count += 1
-                        error_log.append(f"Row {index + 4}: {str(row_e)}") # +4 = 1-based + 3 header rows
+                        error_log.append(f"Row {index + 4}: {str(row_e)}")
+                        app.logger.error(f"Error processing row {index + 4}: {row_e}")
                 
                 session.commit()
 
-            # --- Import finished, update the job status ---
+            # Update status to completed
             import_record.status = 'completed'
             import_record.records_processed = processed_count
             import_record.records_failed = failed_count
             import_record.error_log = "\n".join(error_log)
-            session.commit()
+            app.logger.info(f"Import {import_id} completed: {processed_count} processed, {failed_count} failed")
             
         except Exception as e:
-            # Fatal error (e.g., file read error)
             session.rollback()
             import_record.status = 'failed'
             import_record.error_log = f"Fatal Error: {str(e)}"
-            session.commit()
+            app.logger.exception(f"Fatal error in import {import_id}: {e}")
         
         finally:
             import_record.completed_at = datetime.utcnow()
             session.commit()
             session.close()
 
+
 # Product endpoints
 @appliance_bp.route('/products', methods=['GET'])
 def get_products():
     """Get all products with filtering and search"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
-        # Query parameters
         search = request.args.get('search', '')
-        
-        # --- MODIFIED: Handle multiple brand_ids ---
         brand_ids = request.args.getlist('brand_id', type=int)
-        # --- END MODIFICATION ---
-        
         category_id = request.args.get('category_id', type=int)
         series = request.args.get('series')
-        tier = request.args.get('tier')  # low/mid/high
+        tier = request.args.get('tier')
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 50, type=int), 100)
         
-        # Build query - CHANGED: Use session.query(Product)
-        query = session.query(Product) 
+        query = session.query(Product)
         
         if active_only:
             query = query.filter(Product.active == True)
@@ -264,17 +275,15 @@ def get_products():
         if search:
             search_filter = f"%{search}%"
             query = query.filter(
-                or_( # Changed db.or_ to or_
+                or_(
                     Product.name.ilike(search_filter),
                     Product.model_code.ilike(search_filter),
                     Product.series.ilike(search_filter)
                 )
             )
         
-        # --- MODIFIED: Filter by list of brand_ids ---
         if brand_ids:
             query = query.filter(Product.brand_id.in_(brand_ids))
-        # --- END MODIFICATION ---
         
         if category_id:
             query = query.filter(Product.category_id == category_id)
@@ -282,19 +291,15 @@ def get_products():
         if series:
             query = query.filter(Product.series.ilike(f"%{series}%"))
         
-        # --- NEW: Added tier filtering logic ---
         if tier == 'low':
             query = query.filter(Product.low_tier_price.isnot(None))
         elif tier == 'mid':
             query = query.filter(Product.mid_tier_price.isnot(None))
         elif tier == 'high':
             query = query.filter(Product.high_tier_price.isnot(None))
-        # --- END NEW LOGIC ---
         
-        # Order by brand, then series, then model
         query = query.join(Brand).order_by(Brand.name, Product.series, Product.model_code)
         
-        # Paginate
         pagination = query.paginate(page=page, per_page=per_page, error_out=False)
         products = pagination.items
         
@@ -312,15 +317,15 @@ def get_products():
     except Exception as e:
         current_app.logger.error(f"Error fetching products: {e}")
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
+
 
 @appliance_bp.route('/products/<int:product_id>', methods=['GET'])
 def get_product(product_id):
     """Get a specific product by ID"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
-        # CHANGED: Use session.get for simple retrieval
         product = session.get(Product, product_id)
         if not product:
             session.close()
@@ -329,8 +334,9 @@ def get_product(product_id):
         return jsonify(serialize_product(product))
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
+
 
 @appliance_bp.route('/products', methods=['POST'])
 def create_product():
@@ -339,19 +345,16 @@ def create_product():
     try:
         data = request.get_json()
         
-        # Validate required fields
         required_fields = ['model_code', 'name', 'brand_id', 'category_id']
         for field in required_fields:
             if not data.get(field):
                 session.close()
                 return jsonify({'error': f'{field} is required'}), 400
         
-        # Check if model code already exists
         if session.query(Product).filter_by(model_code=data['model_code']).first():
             session.close()
             return jsonify({'error': 'Model code already exists'}), 400
         
-        # Create product
         product = Product(
             model_code=data['model_code'],
             name=data['name'],
@@ -387,12 +390,12 @@ def create_product():
     finally:
         session.close()
 
+
 @appliance_bp.route('/products/<int:product_id>', methods=['PUT'])
 def update_product(product_id):
     """Update an existing product"""
     session = SessionLocal()
     try:
-        # NOTE: Using session.get() here is safer/clearer than Product.query.get_or_404()
         product = session.get(Product, product_id)
         if not product:
             session.close()
@@ -400,7 +403,6 @@ def update_product(product_id):
 
         data = request.get_json()
         
-        # Update fields
         updatable_fields = [
             'name', 'description', 'series', 'base_price', 'low_tier_price',
             'mid_tier_price', 'high_tier_price', 'weight', 'pack_name',
@@ -412,7 +414,6 @@ def update_product(product_id):
             if field in data:
                 setattr(product, field, data[field])
         
-        # Handle JSON fields
         if 'dimensions' in data:
             product.dimensions = json.dumps(data['dimensions'])
         if 'color_options' in data:
@@ -428,6 +429,7 @@ def update_product(product_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
+
 
 @appliance_bp.route('/products/<int:product_id>', methods=['DELETE'])
 def delete_product(product_id):
@@ -451,15 +453,15 @@ def delete_product(product_id):
     finally:
         session.close()
 
+
 # Brand endpoints
 @appliance_bp.route('/brands', methods=['GET'])
 def get_brands():
     """Get all brands"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         
-        # CHANGED: Brand.query -> session.query(Brand)
         query = session.query(Brand)
         if active_only:
             query = query.filter(Brand.active == True)
@@ -476,8 +478,9 @@ def get_brands():
         } for b in brands])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
+
 
 @appliance_bp.route('/brands', methods=['POST'])
 def create_brand():
@@ -490,7 +493,6 @@ def create_brand():
             session.close()
             return jsonify({'error': 'Brand name is required'}), 400
         
-        # Check if brand already exists
         if session.query(Brand).filter_by(name=data['name']).first():
             session.close()
             return jsonify({'error': 'Brand already exists'}), 400
@@ -519,15 +521,15 @@ def create_brand():
     finally:
         session.close()
 
+
 # Category endpoints
 @appliance_bp.route('/categories', methods=['GET'])
 def get_categories():
     """Get all appliance categories"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
         active_only = request.args.get('active_only', 'true').lower() == 'true'
         
-        # CHANGED: ApplianceCategory.query -> session.query(ApplianceCategory)
         query = session.query(ApplianceCategory)
         if active_only:
             query = query.filter(ApplianceCategory.active == True)
@@ -543,8 +545,9 @@ def get_categories():
         } for c in categories])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
+
 
 @appliance_bp.route('/categories', methods=['POST'])
 def create_category():
@@ -557,7 +560,6 @@ def create_category():
             session.close()
             return jsonify({'error': 'Category name is required'}), 400
         
-        # Check if category already exists
         if session.query(ApplianceCategory).filter_by(name=data['name']).first():
             session.close()
             return jsonify({'error': 'Category already exists'}), 400
@@ -584,13 +586,12 @@ def create_category():
     finally:
         session.close()
 
-# Price tier endpoint
+
 @appliance_bp.route('/products/<int:product_id>/price/<tier>', methods=['GET'])
 def get_product_price_for_tier(product_id, tier):
     """Get product price for specific tier"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
-        # CHANGED: Use session.get for simple retrieval
         product = session.get(Product, product_id)
         if not product:
             session.close()
@@ -605,14 +606,14 @@ def get_product_price_for_tier(product_id, tier):
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
 
-# Search endpoint with autocomplete
+
 @appliance_bp.route('/products/search', methods=['GET'])
 def search_products():
     """Search products with autocomplete support"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
         query_text = request.args.get('q', '')
         limit = min(request.args.get('limit', 10, type=int), 50)
@@ -621,11 +622,10 @@ def search_products():
             return jsonify([])
         
         search_filter = f"%{query_text}%"
-        # CHANGED: Product.query -> session.query(Product)
         products = session.query(Product).filter(
             Product.active == True
         ).filter(
-            or_( # Changed db.or_ to or_
+            or_(
                 Product.name.ilike(search_filter),
                 Product.model_code.ilike(search_filter),
                 Product.series.ilike(search_filter)
@@ -645,10 +645,10 @@ def search_products():
         } for p in products])
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
 
-# Data import endpoints (for bulk import functionality)
+
 @appliance_bp.route('/import/upload', methods=['POST'])
 def upload_import_file():
     """Upload file for data import and start processing in background"""
@@ -677,26 +677,38 @@ def upload_import_file():
         upload_folder = current_app.config.get('UPLOAD_FOLDER', 'uploads')
         os.makedirs(upload_folder, exist_ok=True)
         file_path = os.path.join(upload_folder, filename)
-        file.save(file_path)
+        
+        try:
+            file.save(file_path)
+        except Exception as save_error:
+            current_app.logger.error(f"Error saving file: {save_error}")
+            session.close()
+            return jsonify({'error': f'Failed to save file: {str(save_error)}'}), 500
         
         # Create import record
         import_record = DataImport(
             filename=filename,
             import_type=import_type,
             imported_by=request.form.get('imported_by', 'System')
-            # Status will be 'processing' by default
         )
         session.add(import_record)
-        session.commit() # Commit to get the ID
+        session.commit()
 
-        # --- START THE BACKGROUND WORKER ---
-        # Note: Background worker logic uses its own SessionLocal internally
-        worker_thread = threading.Thread(
-            target=process_import_file,
-            args=(current_app._get_current_object(), import_record.id, file_path, import_type)
-        )
-        worker_thread.start()
-        # --- END BACKGROUND WORKER ---
+        # Start background worker
+        try:
+            worker_thread = threading.Thread(
+                target=process_import_file,
+                args=(current_app._get_current_object(), import_record.id, file_path, import_type)
+            )
+            worker_thread.daemon = True
+            worker_thread.start()
+        except Exception as thread_error:
+            current_app.logger.error(f"Error starting worker thread: {thread_error}")
+            import_record.status = 'failed'
+            import_record.error_log = f'Failed to start processing: {str(thread_error)}'
+            session.commit()
+            session.close()
+            return jsonify({'error': f'Failed to start processing: {str(thread_error)}'}), 500
 
         return jsonify({
             'import_id': import_record.id,
@@ -711,13 +723,12 @@ def upload_import_file():
     finally:
         session.close()
 
+
 @appliance_bp.route('/import/<int:import_id>/status', methods=['GET'])
 def get_import_status(import_id):
     """Get status of data import"""
-    session = SessionLocal() # NEW: Open session
+    session = SessionLocal()
     try:
-        # Using the simplified query syntax for read-only endpoint
-        # CHANGED: DataImport.query.get_or_404(import_id) -> session.get(DataImport, import_id)
         import_record = session.get(DataImport, import_id)
         
         if not import_record:
@@ -737,5 +748,5 @@ def get_import_status(import_id):
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally: # NEW: Ensure session closure
+    finally:
         session.close()
