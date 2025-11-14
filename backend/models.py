@@ -18,7 +18,7 @@ from .db import Base, SessionLocal  # ✅ use declarative Base from db.py
 
 JOB_STAGE_ENUM = Enum(
     'Lead', 'Quote', 'Consultation', 'Survey', 'Measure', 'Design', 'Quoted', 'Accepted',
-    'OnHold', 'Production', 'Delivery', 'Installation', 'Complete', 'Remedial', 'Cancelled',
+    'OnHold', 'Ordered', 'Production', 'Delivery', 'Installation', 'Complete', 'Remedial', 'Cancelled',
     name='job_stage_enum'
 )
 

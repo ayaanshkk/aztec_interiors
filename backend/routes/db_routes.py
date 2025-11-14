@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from flask import Blueprint, request, jsonify, current_app
 import json
 from datetime import datetime, date # Import date separately for explicit use
@@ -182,6 +183,99 @@ def handle_single_customer(customer_id):
 
 # ------------------ CUSTOMER STAGE ------------------
 
+PIPELINE_STAGE_ORDER = [
+    "Lead", "Survey", "Design", "Quote",
+    "Accepted", "OnHold", "Ordered",
+    "Production", "Delivery", "Installation",
+    "Complete", "Remedial", "Cancelled"
+]
+
+
+def _extract_stage_from_payload(data: dict) -> Optional[str]:
+    """Best-effort extraction of the intended pipeline stage from the request payload.
+
+    Historically the frontend sent a simple string field called ``stage`` but
+    some UI changes started providing additional metadata (for example
+    ``targetStage`` or destination column indexes).  When the UI bug reported in
+    the pipeline manifested, the backend was only reading the original ``stage``
+    field which, due to an indexing issue on the client, contained the stage of
+    the previous column (e.g. ``Design`` instead of ``Quote``).  By inspecting the
+    extended payload we can recover the actual intended target stage and keep the
+    server as the source of truth.
+
+    The helper considers a number of common shapes:
+
+    * Plain string values (``"Quote"``).
+    * Objects produced by select components (``{"label": "Quote", "value": "Quote"}``).
+    * Alternative keys such as ``targetStage``/``newStage``/``destinationStage``.
+    * Column indexes where the client only provides the destination column id.
+
+    The first recognised stage that matches the canonical ``PIPELINE_STAGE_ORDER``
+    list is returned.
+    """
+
+    if not isinstance(data, dict):
+        return None
+
+    candidates = []
+
+    def _add_candidate(value):
+        if value is None:
+            return
+        if isinstance(value, dict):
+            # Select inputs frequently send {label, value}
+            for key in ("value", "label", "stage"):
+                inner = value.get(key)
+                if isinstance(inner, str):
+                    candidates.append(inner.strip())
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                _add_candidate(item)
+        elif isinstance(value, str):
+            candidates.append(value.strip())
+        elif isinstance(value, (int, float)):
+            idx = int(value)
+            if 0 <= idx < len(PIPELINE_STAGE_ORDER):
+                candidates.append(PIPELINE_STAGE_ORDER[idx])
+
+    # Primary field used historically
+    _add_candidate(data.get('stage'))
+
+    # Alternative explicit keys the frontend may send
+    for key in (
+        'target_stage', 'targetStage',
+        'new_stage', 'newStage',
+        'destination_stage', 'destinationStage',
+        'pipeline_stage', 'pipelineStage',
+        'column_stage', 'columnStage'
+    ):
+        _add_candidate(data.get(key))
+
+    # Numeric column / index hints
+    for key in (
+        'stage_index', 'stageIndex',
+        'target_index', 'targetIndex',
+        'destination_index', 'destinationIndex',
+        'column_index', 'columnIndex'
+    ):
+        _add_candidate(data.get(key))
+
+    # Return the first recognised stage
+    seen = set()
+    for value in candidates:
+        if not isinstance(value, str):
+            continue
+        candidate = value.strip()
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in PIPELINE_STAGE_ORDER:
+            return candidate
+
+    return None
+
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
@@ -198,7 +292,7 @@ def update_customer_stage(customer_id):
 
         data = request.json
         updated_by_user = get_current_user_email(data)
-        new_stage = data.get('stage')
+        new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         
         if not new_stage:
@@ -210,7 +304,7 @@ def update_customer_stage(customer_id):
             "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
-        if new_stage not in valid_stages:
+        if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
         old_stage = customer.stage
@@ -447,7 +541,7 @@ def update_job_stage(job_id):
 
         data = request.json
         updated_by_user = get_current_user_email(data)
-        new_stage = data.get('stage')
+        new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
@@ -458,7 +552,8 @@ def update_job_stage(job_id):
             "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
-        if new_stage not in valid_stages:
+
+        if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
         old_stage = job.stage
@@ -542,6 +637,7 @@ def get_pipeline_data():
                     'id': f'job-{job.id}',
                     'type': 'job',
                     'customer': customer.to_dict(include_projects=False),
+                    'stage': job.stage,
                     'job': {
                         'id': job.id,
                         'customer_id': job.customer_id,
@@ -575,6 +671,7 @@ def get_pipeline_data():
                     'id': f'project-{project.id}',
                     'type': 'project',
                     'customer': customer.to_dict(include_projects=False),
+                    'stage': project.stage,
                     'job': { # Mapping Project to 'job' for frontend compatibility
                         'id': project.id,
                         'customer_id': customer.id,
@@ -601,6 +698,7 @@ def get_pipeline_data():
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
+                    'stage': customer.stage,
                     'customer': customer.to_dict(include_projects=False)
                 })
         
@@ -699,7 +797,7 @@ def update_project_stage(project_id):
 
         data = request.json
         updated_by_user = get_current_user_email(data)
-        new_stage = data.get('stage')
+        new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         
         if not new_stage:
@@ -711,7 +809,8 @@ def update_project_stage(project_id):
             "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
-        if new_stage not in valid_stages:
+
+        if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
         old_stage = project.stage
