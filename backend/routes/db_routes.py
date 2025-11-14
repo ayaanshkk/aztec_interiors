@@ -189,10 +189,12 @@ def update_customer_stage(customer_id):
         return jsonify({}), 200
     session = SessionLocal()
     try:
+        # CRITICAL FIX: Expire session cache to prevent stale reads
+        session.expire_all()
+        
         from sqlalchemy import text
         session.execute(text("SET LOCAL statement_timeout = '5000';"))
         
-        # FIXED: Uses session.query
         customer = session.query(Customer).filter_by(id=customer_id).first()
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
@@ -201,13 +203,13 @@ def update_customer_stage(customer_id):
         updated_by_user = get_current_user_email(data)
         new_stage = data.get('stage')
         reason = data.get('reason', 'Stage updated via drag and drop')
+        
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
-        # MODIFICATION 1: Update valid_stages to reflect front-end changes
         valid_stages = [
             "Lead", "Survey", "Design", "Quote", 
-            "Accepted", "OnHold", "Ordered", # Removed "Consultation" and "Quoted", Added "Ordered"
+            "Accepted", "OnHold", "Ordered",
             "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
@@ -216,9 +218,13 @@ def update_customer_stage(customer_id):
 
         old_stage = customer.stage
         if old_stage == new_stage:
-            return jsonify({'message': 'Stage not changed', 'stage_updated': False}), 200
+            return jsonify({
+                'message': 'Stage not changed', 
+                'stage_updated': False,
+                'customer_id': customer.id,
+                'new_stage': new_stage
+            }), 200
 
-        # ✅ CRITICAL FIX: Update customer stage REGARDLESS of linked entities
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
@@ -227,7 +233,6 @@ def update_customer_stage(customer_id):
         
         session.add(customer)
         
-        # Send notification if moving to Accepted
         if new_stage == 'Accepted':
             linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
             notification = ProductionNotification(
@@ -237,13 +242,12 @@ def update_customer_stage(customer_id):
                 moved_by=updated_by_user
             )
             session.add(notification)
-            current_app.logger.info(f"✅ Notification will be sent for customer {customer.name} moved to Accepted")
         
-        # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
         session.commit()
+        session.refresh(customer)
         
-        # 🔑 FIX: Refresh AFTER commit to get the latest DB state
-        session.refresh(customer) 
+        # CRITICAL: Expire again after commit to ensure fresh reads
+        session.expire_all()
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
@@ -251,7 +255,7 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage, 
+            'new_stage': customer.stage,
             'stage_updated': True,
             'notification_sent': new_stage == 'Accepted'
         }), 200
@@ -531,13 +535,9 @@ def get_pipeline_data():
         return jsonify({}), 200
     session = SessionLocal()
     try:
-        # 🔑 CRITICAL FIX: Ensure session cache is cleared before reading fresh data.
-        # This prevents reading a stale version of the stage, solving the "snap back" issue
-        # caused by the subsequent client-side refetch using old data.
-        session.expire_all() 
+        # CRITICAL FIX: Clear cache before reading
+        session.expire_all()
         
-        # 🔑 CRITICAL FIX: Use EAGER LOADING (selectinload) to fetch 
-        # all customers and their related jobs and projects simultaneously.
         customers = session.query(Customer).options(
             selectinload(Customer.jobs),
             selectinload(Customer.projects)
