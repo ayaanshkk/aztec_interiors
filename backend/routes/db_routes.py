@@ -283,9 +283,6 @@ def update_customer_stage(customer_id):
         return jsonify({}), 200
     session = SessionLocal()
     try:
-        # REMOVED: session.expire_all() from the start - not needed here
-        # REMOVED: SET LOCAL statement_timeout - this was causing the timeout
-        
         customer = session.query(Customer).filter_by(id=customer_id).first()
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
@@ -298,12 +295,6 @@ def update_customer_stage(customer_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
-        valid_stages = [
-            "Lead", "Survey", "Design", "Quote", 
-            "Accepted", "OnHold", "Ordered",
-            "Production", "Delivery", "Installation",
-            "Complete", "Remedial", "Cancelled"
-        ]
         if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
@@ -316,6 +307,7 @@ def update_customer_stage(customer_id):
                 'new_stage': new_stage
             }), 200
 
+        # Update customer stage
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
@@ -332,7 +324,14 @@ def update_customer_stage(customer_id):
             )
             session.add(notification)
         
+        # 🔑 CRITICAL FIX: Flush before commit
+        session.flush()
+        
+        # Commit the transaction
         session.commit()
+        
+        # 🔑 CRITICAL FIX: Refresh to get the latest state from DB
+        session.refresh(customer)
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
@@ -347,7 +346,9 @@ def update_customer_stage(customer_id):
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error updating customer stage: {e}")
+        current_app.logger.error(f"❌ Error updating customer stage: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -546,13 +547,6 @@ def update_job_stage(job_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
-        valid_stages = [
-            "Lead", "Survey", "Design", "Quote", 
-            "Accepted", "OnHold", "Ordered",
-            "Production", "Delivery", "Installation",
-            "Complete", "Remedial", "Cancelled"
-        ]
-
         if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
@@ -564,11 +558,13 @@ def update_job_stage(job_id):
                 'new_stage': new_stage
             }), 200
 
+        # Update job stage
         job.stage = new_stage
         job.updated_at = datetime.utcnow()
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         job.notes = (job.notes or '') + note_entry
 
+        # Add notification if moving to Accepted
         if new_stage == 'Accepted':
             notification = ProductionNotification(
                 job_id=job.id,
@@ -589,7 +585,12 @@ def update_job_stage(job_id):
                 customer.stage = new_stage
                 customer.updated_at = datetime.utcnow()
 
+        # 🔑 CRITICAL FIX: Flush, commit, then refresh
+        session.flush()
         session.commit()
+        session.refresh(job)
+
+        current_app.logger.info(f"✅ Job {job.id} stage updated from {old_stage} to {new_stage}")
 
         return jsonify({
             'message': 'Stage updated successfully',
@@ -600,7 +601,9 @@ def update_job_stage(job_id):
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error updating job stage: {e}")
+        current_app.logger.error(f"❌ Error updating job stage: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -615,7 +618,7 @@ def get_pipeline_data():
         return jsonify({}), 200
     session = SessionLocal()
     try:
-        # CRITICAL FIX: Clear cache before reading
+        # 🔑 CRITICAL FIX: Force fresh read from database
         session.expire_all()
         
         customers = session.query(Customer).options(
@@ -826,6 +829,10 @@ def update_project_stage(project_id):
         project.updated_at = datetime.utcnow()
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         project.notes = (project.notes or '') + note_entry
+
+        session.flush()
+        session.commit()
+        session.refresh(project)
 
         # Simplified customer sync
         customer = project.customer
