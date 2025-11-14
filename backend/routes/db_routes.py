@@ -189,11 +189,8 @@ def update_customer_stage(customer_id):
         return jsonify({}), 200
     session = SessionLocal()
     try:
-        # CRITICAL FIX: Expire session cache to prevent stale reads
-        session.expire_all()
-        
-        from sqlalchemy import text
-        session.execute(text("SET LOCAL statement_timeout = '5000';"))
+        # REMOVED: session.expire_all() from the start - not needed here
+        # REMOVED: SET LOCAL statement_timeout - this was causing the timeout
         
         customer = session.query(Customer).filter_by(id=customer_id).first()
         if not customer:
@@ -231,8 +228,6 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        session.add(customer)
-        
         if new_stage == 'Accepted':
             linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
             notification = ProductionNotification(
@@ -244,10 +239,6 @@ def update_customer_stage(customer_id):
             session.add(notification)
         
         session.commit()
-        session.refresh(customer)
-        
-        # CRITICAL: Expire again after commit to ensure fresh reads
-        session.expire_all()
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
@@ -255,7 +246,7 @@ def update_customer_stage(customer_id):
             'message': 'Stage updated successfully',
             'customer_id': customer.id,
             'old_stage': old_stage,
-            'new_stage': customer.stage,
+            'new_stage': new_stage,
             'stage_updated': True,
             'notification_sent': new_stage == 'Accepted'
         }), 200
@@ -450,7 +441,6 @@ def update_job_stage(job_id):
         return jsonify({}), 200
     session = SessionLocal()
     try:
-        # FIXED: Uses session.query
         job = session.query(Job).filter_by(id=job_id).first()
         if not job:
             return jsonify({'error': 'Job not found'}), 404
@@ -462,10 +452,9 @@ def update_job_stage(job_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
-        # MODIFICATION 1: Update valid_stages to reflect front-end changes
         valid_stages = [
             "Lead", "Survey", "Design", "Quote", 
-            "Accepted", "OnHold", "Ordered", # Removed "Consultation" and "Quoted", Added "Ordered"
+            "Accepted", "OnHold", "Ordered",
             "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
@@ -474,14 +463,17 @@ def update_job_stage(job_id):
 
         old_stage = job.stage
         if old_stage == new_stage:
-            return jsonify({'message': 'Stage not changed'}), 200
+            return jsonify({
+                'message': 'Stage not changed',
+                'job_id': job.id,
+                'new_stage': new_stage
+            }), 200
 
         job.stage = new_stage
         job.updated_at = datetime.utcnow()
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         job.notes = (job.notes or '') + note_entry
 
-        # Notification for Jobs (No change needed here, logic is sound for Jobs)
         if new_stage == 'Accepted':
             notification = ProductionNotification(
                 job_id=job.id,
@@ -491,31 +483,24 @@ def update_job_stage(job_id):
             )
             session.add(notification)
 
-        # FIXED: Uses session.query
+        # Simplified customer sync logic
         customer = session.query(Customer).filter_by(id=job.customer_id).first()
         if customer:
-            # FIXED: Uses session.query
             job_count = session.query(Job).filter_by(customer_id=job.customer_id).count()
-            total_linked = (len(customer.projects) if hasattr(customer.projects, '__len__') else 0) + job_count
+            project_count = session.query(Project).filter_by(customer_id=job.customer_id).count()
+            total_linked = job_count + project_count
+            
             if total_linked <= 1 and customer.stage != new_stage:
                 customer.stage = new_stage
                 customer.updated_at = datetime.utcnow()
-                note_entry_cust = f"\n[{datetime.utcnow().isoformat()}] Stage synced from {old_stage} to {new_stage} by {updated_by_user}. Reason: Linked job moved."
-                customer.notes = (customer.notes or '') + note_entry_cust
-                session.add(customer)
 
-        session.add(job)
-        # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
         session.commit()
-        
-        # 🔑 FIX: Refresh the object to ensure the latest state is captured 
-        session.refresh(job) 
 
         return jsonify({
             'message': 'Stage updated successfully',
             'job_id': job.id,
             'old_stage': old_stage,
-            'new_stage': job.stage # 🔑 FIX: Use job.stage (refreshed value)
+            'new_stage': new_stage
         }), 200
 
     except Exception as e:
@@ -721,8 +706,9 @@ def update_project_stage(project_id):
             return jsonify({'error': 'Stage is required'}), 400
 
         valid_stages = [
-            "Lead", "Survey", "Design", "Quote", "Consultation", "Quoted",
-            "Accepted", "OnHold", "Production", "Delivery", "Installation",
+            "Lead", "Survey", "Design", "Quote",
+            "Accepted", "OnHold", "Ordered",
+            "Production", "Delivery", "Installation",
             "Complete", "Remedial", "Cancelled"
         ]
         if new_stage not in valid_stages:
@@ -730,7 +716,11 @@ def update_project_stage(project_id):
 
         old_stage = project.stage
         if old_stage == new_stage:
-            return jsonify({'message': 'Stage not changed'}), 200
+            return jsonify({
+                'message': 'Stage not changed',
+                'project_id': project.id,
+                'new_stage': new_stage
+            }), 200
 
         project.stage = new_stage
         project.updated_by = updated_by_user
@@ -738,33 +728,24 @@ def update_project_stage(project_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         project.notes = (project.notes or '') + note_entry
 
-        # Option 1: Sync customer stage (only if this is the only linked entity)
+        # Simplified customer sync
         customer = project.customer
         if customer:
-            # Check for other jobs/projects linked to the customer
             job_count = session.query(Job).filter_by(customer_id=customer.id).count()
-            # Exclude the current project from the count of linked projects
-            total_linked = job_count + len([p for p in customer.projects if p.id != project.id])
+            other_projects = [p for p in customer.projects if p.id != project.id]
+            total_linked = job_count + len(other_projects)
 
             if total_linked == 0 and customer.stage != new_stage:
                 customer.stage = new_stage
                 customer.updated_at = datetime.utcnow()
-                note_entry_cust = f"\n[{datetime.utcnow().isoformat()}] Stage synced from {old_stage} to {new_stage} by {updated_by_user}. Reason: Linked project moved."
-                customer.notes = (customer.notes or '') + note_entry_cust
-                session.add(customer)
 
-        session.add(project)
         session.commit()
-        
-        # CRITICAL FIX: Refresh the object to ensure the latest state is captured 
-        # before the function returns (prevents stale data read).
-        session.refresh(project)
 
         return jsonify({
             'message': 'Stage updated successfully',
             'project_id': project.id,
             'old_stage': old_stage,
-            'new_stage': project.stage # 🔑 FIX: Use project.stage (refreshed value)
+            'new_stage': new_stage
         }), 200
 
     except Exception as e:
