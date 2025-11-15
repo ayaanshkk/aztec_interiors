@@ -9,7 +9,7 @@ from fpdf import FPDF
 from ..db import SessionLocal # Required for database access
 from functools import wraps
 from sqlalchemy.orm import joinedload 
-from .notifications import create_activity_notification
+from .notifications_route import create_activity_notification
 
 
 form_bp = Blueprint("form", __name__)

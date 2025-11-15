@@ -7,6 +7,42 @@ from sqlalchemy.exc import SQLAlchemyError
 
 notification_bp = Blueprint('notification', __name__)
 
+# ============================================================================
+# HELPER FUNCTION: Create Activity Notification
+# ============================================================================
+
+def create_activity_notification(session, message, job_id=None, customer_id=None, moved_by=None):
+    """
+    Helper function to create activity notifications for all staff members.
+    This centralizes notification creation for consistency.
+    
+    Args:
+        session: Active SQLAlchemy session
+        message: Notification message text
+        job_id: Optional job ID reference
+        customer_id: Optional customer ID reference
+        moved_by: Username or ID of person who performed the action
+    """
+    try:
+        notification = ProductionNotification(
+            job_id=job_id,
+            customer_id=customer_id,
+            message=message,
+            created_at=datetime.utcnow(),
+            moved_by=moved_by,
+            read=False
+        )
+        session.add(notification)
+        current_app.logger.info(f"Activity notification created: {message}")
+    except Exception as e:
+        current_app.logger.error(f"Failed to create activity notification: {e}")
+        raise
+
+
+# ============================================================================
+# GET ALL NOTIFICATIONS (for all authenticated users)
+# ============================================================================
+
 @notification_bp.route('/notifications/production', methods=['GET', 'OPTIONS'])
 @token_required
 def get_production_notifications():
@@ -153,7 +189,7 @@ def clear_all_notifications():
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error clearing all notifications: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e)}'), 500
     finally:
         session.close()
 
@@ -284,5 +320,57 @@ def get_notification_stats():
         session.rollback()
         current_app.logger.exception(f"Error fetching notification stats: {e}")
         return jsonify({'error': 'An unexpected error occurred'}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# LOG ACTIVITY ENDPOINT (for frontend to call when actions happen)
+# ============================================================================
+
+@notification_bp.route('/notifications/log-activity', methods=['POST', 'OPTIONS'])
+@token_required
+def log_activity():
+    """
+    Generic endpoint to log any activity as a notification.
+    Frontend can call this when important actions occur.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        data = request.get_json() or {}
+        
+        action_type = data.get('action_type')  # e.g., 'checklist_updated', 'customer_edited'
+        message = data.get('message')
+        job_id = data.get('job_id')
+        customer_id = data.get('customer_id')
+        
+        if not message:
+            return jsonify({'error': 'Message is required'}), 400
+        
+        # Get the user's name for "moved_by"
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        create_activity_notification(
+            session=session,
+            message=message,
+            job_id=job_id,
+            customer_id=customer_id,
+            moved_by=user_name
+        )
+        
+        session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Activity logged successfully'
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error logging activity: {e}")
+        return jsonify({'error': str(e)}), 500
     finally:
         session.close()
