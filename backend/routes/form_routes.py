@@ -1253,14 +1253,62 @@ def delete_form_submission(submission_id):
     finally:
         session.close() # 👈 Close session
 
+@form_bp.route('/form-submissions/<int:submission_id>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_form_submission(submission_id):
+    """Get a single form submission by ID"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        submission = session.get(CustomerFormData, submission_id)
+        if not submission:
+            return jsonify({'error': 'Form submission not found'}), 404
+        
+        # Check permissions - only allow viewing if:
+        # 1. User is Manager/HR/Sales (can view all)
+        # 2. User is the creator
+        # 3. User is Production (can view all)
+        user_role = request.current_user.role
+        allowed_roles = ['Manager', 'HR', 'Production', 'Sales']
+        is_creator = submission.created_by == request.current_user.id
+        
+        if user_role not in allowed_roles and not is_creator:
+            return jsonify({'error': 'You do not have permission to view this form'}), 403
+        
+        # Parse the form_data JSON string
+        form_data = json.loads(submission.form_data)
+        
+        # Get customer info
+        customer = session.get(Customer, submission.customer_id)
+        
+        return jsonify({
+            'id': submission.id,
+            'customer_id': submission.customer_id,
+            'customer_name': customer.name if customer else 'N/A',
+            'form_data': form_data,
+            'submitted_at': submission.submitted_at.isoformat() if submission.submitted_at else None,
+            'updated_at': submission.updated_at.isoformat() if submission.updated_at else None,
+            'approval_status': submission.approval_status,
+            'created_by': submission.created_by
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error fetching form submission {submission_id}: {e}")
+        return jsonify({'error': f'Failed to fetch form submission: {str(e)}'}), 500
+    finally:
+        session.close()
+
 # ===========================================================================
-# UPDATED FORM SUBMISSION UPDATE ROUTE (with activity logging)
+# UPDATED FORM SUBMISSION UPDATE ROUTE (with detailed checklist change tracking)
 # ===========================================================================
 
 @form_bp.route('/form-submissions/<int:submission_id>', methods=['PUT', 'OPTIONS'])
 @token_required
 def update_form_submission(submission_id):
-    """Update an existing form submission with activity logging"""
+    """Update an existing form submission with detailed change tracking and notifications"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -1291,23 +1339,44 @@ def update_form_submission(submission_id):
         submission.form_data = json.dumps(updated_form_data)
         submission.updated_at = datetime.utcnow()
         
-        # 🔔 CREATE ACTIVITY NOTIFICATION
+        # 🔔 CREATE ACTIVITY NOTIFICATION WITH DETAILED CHANGE TRACKING
         user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
-        
-        # Determine what type of form was updated
-        form_type = "Form"
-        if old_form_data.get('is_invoice'):
-            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
-        elif old_form_data.get('is_receipt'):
-            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
-        elif old_form_data.get('checklistType'):
-            form_type = f"{old_form_data.get('checklistType', '').title()} Checklist"
         
         # Get customer info
         customer = session.get(Customer, submission.customer_id)
         customer_name = customer.name if customer else old_form_data.get('customerName', 'N/A')
         
-        notification_message = f"✏️ {form_type} updated by {user_name} for customer: {customer_name}"
+        # Determine what type of form was updated and detect changes
+        notification_message = ""
+        
+        if old_form_data.get('is_invoice'):
+            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
+            notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
+            
+        elif old_form_data.get('is_receipt'):
+            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
+            notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
+            
+        elif old_form_data.get('checklistType'):
+            # DETAILED CHECKLIST CHANGE TRACKING
+            checklist_type = old_form_data.get('checklistType', '').title()
+            form_type = f"{checklist_type} Checklist"
+            
+            # Detect specific changes
+            changes = detect_checklist_changes(old_form_data, updated_form_data)
+            
+            if changes:
+                # Create detailed notification with changes
+                # For the main notification message, show first 2-3 changes
+                changes_preview = " | ".join(changes[:2])
+                if len(changes) > 2:
+                    changes_preview += f" (+{len(changes) - 2} more changes)"
+                
+                notification_message = f"✏️ {form_type} edited by {user_name} for {customer_name}. Changes: {changes_preview}"
+            else:
+                notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
+        else:
+            notification_message = f"✏️ Form updated by {user_name} for {customer_name}"
         
         create_activity_notification(
             session=session,
@@ -1332,3 +1401,104 @@ def update_form_submission(submission_id):
         return jsonify({'error': f'Failed to update form: {str(e)}'}), 500
     finally:
         session.close()
+
+# ============================================================================
+# HELPER FUNCTION: Detect Checklist Changes
+# ============================================================================
+
+def detect_checklist_changes(old_data, new_data):
+    """
+    Compare old and new checklist data and return a human-readable description of changes.
+    Returns a list of change descriptions.
+    """
+    changes = []
+    
+    # Check basic field changes
+    field_labels = {
+        'customerName': 'Customer Name',
+        'customerAddress': 'Customer Address',
+        'customerPhone': 'Customer Phone',
+        'date': 'Date',
+        'fitters': 'Fitters'
+    }
+    
+    for field, label in field_labels.items():
+        old_val = str(old_data.get(field, '')).strip()
+        new_val = str(new_data.get(field, '')).strip()
+        if old_val != new_val and (old_val or new_val):  # Only report if values are different and not both empty
+            if old_val and new_val:
+                changes.append(f"{label} changed from '{old_val}' to '{new_val}'")
+            elif new_val:
+                changes.append(f"{label} added: '{new_val}'")
+            else:
+                changes.append(f"{label} removed")
+    
+    # Check items changes
+    old_items = old_data.get('items', [])
+    new_items = new_data.get('items', [])
+    
+    # Filter out empty items for accurate counting
+    def is_non_empty_item(item):
+        return any([
+            item.get('item', '').strip(),
+            item.get('remedialAction', '').strip(),
+            item.get('colour', '').strip(),
+            item.get('size', '').strip(),
+            str(item.get('qty', '')).strip()
+        ])
+    
+    old_non_empty = [item for item in old_items if is_non_empty_item(item)]
+    new_non_empty = [item for item in new_items if is_non_empty_item(item)]
+    
+    # Report additions/removals
+    if len(new_non_empty) > len(old_non_empty):
+        diff = len(new_non_empty) - len(old_non_empty)
+        changes.append(f"➕ Added {diff} new item{'' if diff == 1 else 's'}")
+    elif len(new_non_empty) < len(old_non_empty):
+        diff = len(old_non_empty) - len(new_non_empty)
+        changes.append(f"➖ Removed {diff} item{'' if diff == 1 else 's'}")
+    
+    # Check for modifications in existing items (compare by position)
+    min_length = min(len(old_items), len(new_items))
+    modifications_count = 0
+    detailed_modifications = []
+    
+    for i in range(min_length):
+        old_item = old_items[i]
+        new_item = new_items[i]
+        
+        # Skip if both items are empty
+        if not is_non_empty_item(old_item) and not is_non_empty_item(new_item):
+            continue
+        
+        item_changes = []
+        
+        # Check each field
+        if str(old_item.get('item', '')).strip() != str(new_item.get('item', '')).strip():
+            item_changes.append("item name")
+        if str(old_item.get('remedialAction', '')).strip() != str(new_item.get('remedialAction', '')).strip():
+            item_changes.append("remedial action")
+        if str(old_item.get('colour', '')).strip() != str(new_item.get('colour', '')).strip():
+            item_changes.append("colour")
+        if str(old_item.get('size', '')).strip() != str(new_item.get('size', '')).strip():
+            item_changes.append("size")
+        if str(old_item.get('qty', '')).strip() != str(new_item.get('qty', '')).strip():
+            item_changes.append("quantity")
+        
+        if item_changes:
+            modifications_count += 1
+            item_name = new_item.get('item', '').strip() or old_item.get('item', '').strip() or f"Item #{i+1}"
+            # Limit item name length for readability
+            if len(item_name) > 30:
+                item_name = item_name[:27] + "..."
+            detailed_modifications.append(f"• {item_name}: {', '.join(item_changes)}")
+    
+    # Add modification summary
+    if modifications_count > 0:
+        changes.append(f"✏️ Modified {modifications_count} item{'' if modifications_count == 1 else 's'}")
+        # Add detailed modifications (limit to first 3 for notification clarity)
+        changes.extend(detailed_modifications[:3])
+        if len(detailed_modifications) > 3:
+            changes.append(f"... and {len(detailed_modifications) - 3} more changes")
+    
+    return changes

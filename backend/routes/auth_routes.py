@@ -582,6 +582,25 @@ def get_users():
     finally:
         session.close() # Close session for read-only route
 
+@auth_bp.route('/users/me', methods=['GET', 'OPTIONS'])
+@token_required
+def get_user_me():
+    """Get current user information - alternative endpoint"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    try:
+        return jsonify({
+            'id': g.user.id,
+            'name': g.user.full_name if hasattr(g.user, 'full_name') else f"{g.user.first_name} {g.user.last_name}",
+            'email': g.user.email,
+            'role': g.user.role,
+            'username': g.user.username if hasattr(g.user, 'username') else g.user.email
+        }), 200
+    except Exception as e:
+        current_app.logger.exception(f"Error fetching current user: {e}")
+        return jsonify({'error': 'Failed to fetch user information'}), 500
+
 @auth_bp.route('/auth/users/<int:user_id>/toggle-status', methods=['POST'])
 @admin_required
 def toggle_user_status(user_id):
