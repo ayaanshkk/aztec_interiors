@@ -77,10 +77,12 @@ def get_customers():
             # Get the customer dict
             customer_dict = customer.to_dict(include_projects=False)
             
-            # Add the counts
+            # Add the counts - THIS IS THE KEY CHANGE
             customer_dict['form_count'] = form_count
             customer_dict['drawing_count'] = drawing_count
             customer_dict['form_document_count'] = form_doc_count
+            customer_dict['has_drawings'] = drawing_count > 0
+            customer_dict['has_forms'] = form_count > 0 or form_doc_count > 0
             
             result.append(customer_dict)
 

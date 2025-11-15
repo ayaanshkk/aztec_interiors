@@ -297,7 +297,7 @@ def get_approval_status(document_id):
         return jsonify({'error': 'Failed to fetch approval status'}), 500
     finally:
         session.close() # 👈 CLOSE SESSION
-
+        
 # ------------------------------------------------------------------------
 # ROUTE: INVOICE PDF DOWNLOAD (WITH APPROVAL CHECK)
 # ------------------------------------------------------------------------
@@ -1302,13 +1302,13 @@ def get_form_submission(submission_id):
         session.close()
 
 # ===========================================================================
-# UPDATED FORM SUBMISSION UPDATE ROUTE (with detailed checklist change tracking)
+# UPDATED FORM SUBMISSION UPDATE ROUTE (with activity logging)
 # ===========================================================================
 
 @form_bp.route('/form-submissions/<int:submission_id>', methods=['PUT', 'OPTIONS'])
 @token_required
 def update_form_submission(submission_id):
-    """Update an existing form submission with detailed change tracking and notifications"""
+    """Update an existing form submission with activity logging"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -1339,44 +1339,23 @@ def update_form_submission(submission_id):
         submission.form_data = json.dumps(updated_form_data)
         submission.updated_at = datetime.utcnow()
         
-        # 🔔 CREATE ACTIVITY NOTIFICATION WITH DETAILED CHANGE TRACKING
+        # 🔔 CREATE ACTIVITY NOTIFICATION
         user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        # Determine what type of form was updated
+        form_type = "Form"
+        if old_form_data.get('is_invoice'):
+            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
+        elif old_form_data.get('is_receipt'):
+            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
+        elif old_form_data.get('checklistType'):
+            form_type = f"{old_form_data.get('checklistType', '').title()} Checklist"
         
         # Get customer info
         customer = session.get(Customer, submission.customer_id)
         customer_name = customer.name if customer else old_form_data.get('customerName', 'N/A')
         
-        # Determine what type of form was updated and detect changes
-        notification_message = ""
-        
-        if old_form_data.get('is_invoice'):
-            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
-            notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
-            
-        elif old_form_data.get('is_receipt'):
-            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
-            notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
-            
-        elif old_form_data.get('checklistType'):
-            # DETAILED CHECKLIST CHANGE TRACKING
-            checklist_type = old_form_data.get('checklistType', '').title()
-            form_type = f"{checklist_type} Checklist"
-            
-            # Detect specific changes
-            changes = detect_checklist_changes(old_form_data, updated_form_data)
-            
-            if changes:
-                # Create detailed notification with changes
-                # For the main notification message, show first 2-3 changes
-                changes_preview = " | ".join(changes[:2])
-                if len(changes) > 2:
-                    changes_preview += f" (+{len(changes) - 2} more changes)"
-                
-                notification_message = f"✏️ {form_type} edited by {user_name} for {customer_name}. Changes: {changes_preview}"
-            else:
-                notification_message = f"✏️ {form_type} updated by {user_name} for {customer_name}"
-        else:
-            notification_message = f"✏️ Form updated by {user_name} for {customer_name}"
+        notification_message = f"✏️ {form_type} updated by {user_name} for customer: {customer_name}"
         
         create_activity_notification(
             session=session,
