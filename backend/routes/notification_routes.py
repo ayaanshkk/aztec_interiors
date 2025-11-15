@@ -189,7 +189,7 @@ def clear_all_notifications():
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error clearing all notifications: {e}")
-        return jsonify({'error': str(e)}'), 500
+        return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
