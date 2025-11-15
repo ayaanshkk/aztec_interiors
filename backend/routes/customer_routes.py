@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from ..models import Customer, Project, CustomerFormData, User, Job, DrawingDocument, ProductionNotification
+from ..models import Customer, Project, CustomerFormData, User, Job, DrawingDocument, FormDocument, ProductionNotification
 from functools import wraps
 from flask import current_app
 import uuid
@@ -53,31 +53,38 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts and full fields."""
+    """Get all customers with their project counts, form counts, and drawing counts."""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
     session = SessionLocal()
     try:
-        # ✅ Explicitly refresh/expire_on_commit=False to ensure data is loaded
+        # ✅ Fetch all customers
         customers = session.query(Customer).all()
         
-        # ✅ DEBUG: Check if data exists before serialization
-        if customers:
-            first = customers[0]
-            current_app.logger.info(f"🔍 Raw customer object:")
-            current_app.logger.info(f"  postcode type: {type(first.postcode)}, value: {repr(first.postcode)}")
-            current_app.logger.info(f"  salesperson type: {type(first.salesperson)}, value: {repr(first.salesperson)}")
-            current_app.logger.info(f"  project_types type: {type(first.project_types)}, value: {repr(first.project_types)}")
+        # ✅ Build result with document counts
+        result = []
+        for customer in customers:
+            # Count form submissions for this customer
+            form_count = session.query(CustomerFormData).filter_by(customer_id=customer.id).count()
+            
+            # Count drawing documents for this customer
+            drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
+            
+            # Count form documents for this customer (Excel/PDF uploads)
+            form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
+            
+            # Get the customer dict
+            customer_dict = customer.to_dict(include_projects=False)
+            
+            # Add the counts
+            customer_dict['form_count'] = form_count
+            customer_dict['drawing_count'] = drawing_count
+            customer_dict['form_document_count'] = form_doc_count
+            
+            result.append(customer_dict)
 
-        # Serialize to dict BEFORE closing session
-        data = [customer.to_dict(include_projects=False) for customer in customers]
-        
-        # ✅ DEBUG: Check serialized data
-        if data:
-            current_app.logger.info(f"🔍 Serialized customer dict: {data[0]}")
-
-        return jsonify(data), 200
+        return jsonify(result), 200
 
     except Exception as e:
         current_app.logger.exception(f"Error fetching customers: {e}")
@@ -344,10 +351,6 @@ def create_project(customer_id):
         session.commit() # 👈 Commit the new project first
         
         # --- CRITICAL FIX 1: SIMPLIFY STAGE SYNC ON CREATION ---
-        # NOTE: After commit, we must use fresh queries for count unless the session is closed and reopened.
-        # Since we are keeping the session open, use session queries (or a utility that handles this)
-        
-        # We need a clean query for the counts, which .query.count() provides easily.
         existing_project_count = session.query(Project).filter_by(customer_id=customer_id).count()
         existing_job_count = session.query(Job).filter_by(customer_id=customer_id).count()
         
@@ -370,8 +373,6 @@ def create_project(customer_id):
                 current_app.logger.info(f"📢 Production notification created for customer {customer_id}")
             
             session.commit() # Commit customer stage change and notification
-        
-        # --- END CRITICAL FIX 1 ---
         
         current_app.logger.info(f"Project {new_project.id} created for customer {customer_id} by user {request.current_user.id}")
         
@@ -430,7 +431,6 @@ def update_project(project_id):
         
         # Check permissions
         if request.current_user.role in ['Sales', 'Staff']:
-            # Using session.get() to safely check user properties if needed
             if customer.created_by != session.get(User, request.current_user.id).id and customer.salesperson != session.get(User, request.current_user.id).full_name:
                 return jsonify({'error': 'You do not have permission to edit this project'}), 403
         
@@ -453,10 +453,7 @@ def update_project(project_id):
         project.updated_by = request.current_user.id
         project.updated_at = datetime.utcnow()
         
-        # --- CRITICAL FIX 2: CONDITIONAL CUSTOMER STAGE SYNC RE-EVALUATED ---
-        
         # Count existing linked entities (Projects + Jobs)
-        # We must exclude the current project being updated from the count 
         total_other_linked_entities = session.query(Project).filter(Project.customer_id==customer.id, Project.id != project_id).count() + \
                                       session.query(Job).filter_by(customer_id=customer.id).count()
         
@@ -477,8 +474,6 @@ def update_project(project_id):
                 )
                 session.add(notification)
                 current_app.logger.info(f"📢 Production notification created for customer {customer.id}")
-            
-        # --- END CRITICAL FIX 2 ---
         
         session.commit() # 👈 Commit transaction
         
@@ -521,18 +516,15 @@ def delete_project(project_id):
         session.delete(project)
         session.commit() # 👈 Commit deletion
         
-        # --- POST-DELETE CUSTOMER STAGE SYNC ---
         # After deletion, check if the customer has any remaining projects or jobs.
         remaining_projects_count = session.query(Project).filter_by(customer_id=customer_id).count()
         remaining_jobs_count = session.query(Job).filter_by(customer_id=customer_id).count()
         
         if remaining_projects_count == 0 and remaining_jobs_count == 0:
-             # If nothing remains, reset customer stage to 'Lead' or similar default
              customer = session.get(Customer, customer_id)
              if customer:
                  customer.stage = 'Lead' 
                  session.commit()
-        # --- END POST-DELETE SYNC ---
 
         current_app.logger.info(f"Project {project_id} deleted by user {request.current_user.id}")
         

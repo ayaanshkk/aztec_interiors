@@ -11,26 +11,19 @@ notification_bp = Blueprint('notification', __name__)
 @token_required
 def get_production_notifications():
     """
-    Get all unread production notifications.
+    Get all production notifications for the current user.
     Returns notifications sorted by creation date (newest first).
+    Now accessible to all user roles: Manager, HR, Sales, Production
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
     session = SessionLocal()
     try:
-        # Check if the 'read' field exists on the model
-        # If it doesn't exist, we'll fetch all notifications
-        try:
-            notifications = session.query(ProductionNotification).filter_by(read=False).order_by(
-                ProductionNotification.created_at.desc()
-            ).all()
-        except AttributeError:
-            # Fallback: If 'read' field doesn't exist, get all recent notifications
-            current_app.logger.warning("ProductionNotification model missing 'read' field. Returning all notifications.")
-            notifications = session.query(ProductionNotification).order_by(
-                ProductionNotification.created_at.desc()
-            ).limit(50).all()  # Limit to 50 most recent
+        # Get all notifications (both read and unread) sorted by newest first
+        notifications = session.query(ProductionNotification).order_by(
+            ProductionNotification.created_at.desc()
+        ).all()
 
         return jsonify([
             {
@@ -59,7 +52,7 @@ def get_production_notifications():
 @token_required
 def mark_as_read(notification_id):
     """
-    Mark a specific notification as read.
+    Mark a specific notification as read (but don't delete it).
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
@@ -96,7 +89,7 @@ def mark_as_read(notification_id):
 @token_required
 def mark_all_as_read():
     """
-    Mark all unread production notifications as read.
+    Mark all unread production notifications as read (but don't delete them).
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
@@ -128,6 +121,70 @@ def mark_all_as_read():
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error marking all notifications as read: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@notification_bp.route('/notifications/production/clear-all', methods=['DELETE', 'OPTIONS'])
+@token_required
+def clear_all_notifications():
+    """
+    Delete all production notifications permanently.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        # Delete all notifications
+        deleted_count = session.query(ProductionNotification).delete(synchronize_session='fetch')
+        session.commit()
+        
+        return jsonify({
+            'message': 'All notifications cleared',
+            'count': deleted_count
+        }), 200
+            
+    except SQLAlchemyError as e:
+        session.rollback()
+        current_app.logger.exception(f"Database error clearing all notifications: {e}")
+        return jsonify({'error': 'Database error occurred'}), 500
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error clearing all notifications: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@notification_bp.route('/notifications/production/<string:notification_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
+def delete_notification(notification_id):
+    """
+    Delete a specific notification permanently.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        notification = session.get(ProductionNotification, notification_id)
+        if not notification:
+            return jsonify({'error': 'Notification not found'}), 404
+        
+        session.delete(notification)
+        session.commit()
+        
+        return jsonify({'message': 'Notification deleted'}), 200
+            
+    except SQLAlchemyError as e:
+        session.rollback()
+        current_app.logger.exception(f"Database error deleting notification {notification_id}: {e}")
+        return jsonify({'error': 'Database error occurred'}), 500
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error deleting notification {notification_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()

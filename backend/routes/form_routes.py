@@ -9,6 +9,8 @@ from fpdf import FPDF
 from ..db import SessionLocal # Required for database access
 from functools import wraps
 from sqlalchemy.orm import joinedload 
+from .notifications import create_activity_notification
+
 
 form_bp = Blueprint("form", __name__)
 
@@ -464,11 +466,11 @@ def download_invoice_pdf():
 @form_bp.route('/invoices/save', methods=['POST', 'OPTIONS'])
 @token_required
 def save_invoice():
-    """Saves invoice data with pending approval status and notifies managers"""
+    """Saves invoice data with pending approval status, notifies managers, and logs activity"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
-    session = SessionLocal() # 👈 Start session
+    session = SessionLocal()
     try:
         data = request.get_json(silent=True) or {}
         customer_id = data.get('customerId')
@@ -483,7 +485,6 @@ def save_invoice():
         data['form_type'] = f"invoice_{data.get('invoiceNumber', 'general')}"
         data['is_invoice'] = True
 
-        # Create form submission with pending approval
         customer_form_data = CustomerFormData(
             customer_id=customer_id,
             form_data=json.dumps(data),
@@ -494,21 +495,15 @@ def save_invoice():
         )
         
         session.add(customer_form_data)
-        # Flush to get the ID for notifications without committing yet
-        session.flush() 
+        session.flush()
         
-        # Create approval notification
+        # Create approval notifications for managers
         try:
-            # Get all managers to notify (using the current session)
             managers = session.query(User).filter(
                 User.role.in_(['Manager', 'HR']),
                 User.is_active == True
             ).all()
             
-            if not managers:
-                current_app.logger.warning("No active managers found to notify!")
-            
-            # Create notifications for all managers
             for manager in managers:
                 notification = ApprovalNotification(
                     user_id=manager.id,
@@ -521,16 +516,22 @@ def save_invoice():
                 )
                 session.add(notification)
             
-            current_app.logger.info(
-                f"Invoice saved for customer {customer_id}. ID: {customer_form_data.id}. "
-                f"Status: pending. Notified {len(managers)} managers."
-            )
-            
         except Exception as e:
             current_app.logger.error(f"Error creating approval notifications: {e}")
-            # Continue anyway - invoice was saved even if notifications failed
-            
-        session.commit() # 👈 Commit the main transaction (invoice + notifications)
+        
+        # 🔔 CREATE ACTIVITY NOTIFICATION (for general staff awareness)
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        notification_message = f"💰 New Invoice #{data.get('invoiceNumber', 'N/A')} created by {user_name} for {customer.name} - Amount: £{data.get('totalAmount', 0):,.2f} (Pending Approval)"
+        
+        create_activity_notification(
+            session=session,
+            message=notification_message,
+            customer_id=customer_id,
+            moved_by=user_name
+        )
+        
+        session.commit()
 
         return jsonify({
             "success": True,
@@ -540,11 +541,11 @@ def save_invoice():
         }), 200
 
     except Exception as e:
-        session.rollback() # 👈 Rollback on error
+        session.rollback()
         current_app.logger.exception(f"Error saving invoice: {e}")
         return jsonify({"error": f"Failed to save invoice: {str(e)}"}), 500
     finally:
-        session.close() # 👈 Close session
+        session.close()
     
 # ------------------------------------------------------------------------
 # ROUTE: RECEIPT PDF DOWNLOAD
@@ -675,11 +676,11 @@ def download_receipt_pdf():
 @form_bp.route('/receipts/save', methods=['POST', 'OPTIONS'])
 @token_required
 def save_receipt():
-    """Saves receipt data with pending approval status and notifies managers"""
+    """Saves receipt data with pending approval status, notifies managers, and logs activity"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
-    session = SessionLocal() # 👈 Start session
+    session = SessionLocal()
     try:
         data = request.get_json(silent=True) or {}
         customer_id = data.get('customerId')
@@ -694,7 +695,6 @@ def save_receipt():
         data['form_type'] = f"receipt_{data.get('receiptType', 'general')}"
         data['is_receipt'] = True
 
-        # Create form submission with pending approval
         customer_form_data = CustomerFormData(
             customer_id=customer_id,
             form_data=json.dumps(data),
@@ -705,20 +705,15 @@ def save_receipt():
         )
         
         session.add(customer_form_data)
-        session.flush() # Flush to get the ID for notifications without committing yet
+        session.flush()
         
-        # Create approval notification using SQLAlchemy ORM (replacing raw SQL)
+        # Create approval notifications for managers
         try:
-            # Get all managers to notify (using the current session)
             managers = session.query(User).filter(
                 User.role.in_(['Manager', 'HR']),
                 User.is_active == True
             ).all()
             
-            if not managers:
-                current_app.logger.warning("No active managers found to notify!")
-            
-            # Create notifications for all managers
             for manager in managers:
                 notification = ApprovalNotification(
                     user_id=manager.id,
@@ -731,16 +726,22 @@ def save_receipt():
                 )
                 session.add(notification)
             
-            current_app.logger.info(
-                f"Receipt saved for customer {customer_id}. ID: {customer_form_data.id}. "
-                f"Status: pending. Notified {len(managers)} managers."
-            )
-            
         except Exception as e:
             current_app.logger.error(f"Error creating approval notifications: {e}")
-            # Continue anyway - receipt was saved even if notifications failed
-            
-        session.commit() # 👈 Commit the main transaction (receipt + notifications)
+        
+        # 🔔 CREATE ACTIVITY NOTIFICATION (for general staff awareness)
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        notification_message = f"🧾 New Receipt ({data.get('receiptType', 'Payment')}) created by {user_name} for {customer.name} - Amount: £{data.get('paidAmount', 0):,.2f} (Pending Approval)"
+        
+        create_activity_notification(
+            session=session,
+            message=notification_message,
+            customer_id=customer_id,
+            moved_by=user_name
+        )
+        
+        session.commit()
 
         return jsonify({
             "success": True,
@@ -750,11 +751,11 @@ def save_receipt():
         }), 200
 
     except Exception as e:
-        session.rollback() # 👈 Rollback on error
+        session.rollback()
         current_app.logger.exception(f"Error saving receipt: {e}")
         return jsonify({"error": f"Failed to save receipt: {str(e)}"}), 500
     finally:
-        session.close() # 👈 Close session
+        session.close()
 
 
 # ------------------------------------------------------------------------
@@ -906,19 +907,25 @@ def download_checklist_pdf():
     except Exception as e:
         current_app.logger.exception(f"PDF generation failed on server (fpdf2): {e}")
         return jsonify({"error": f"Server failed to generate PDF: {str(e)}"}), 500
+    
+# ===========================================================================
+# UPDATED CHECKLIST SAVE ROUTE (with activity logging)
+# ===========================================================================
 
 @form_bp.route('/checklists/save', methods=['POST', 'OPTIONS'])
+@token_required
 def save_checklist():
-    """Handles POST requests to save internal staff checklists."""
+    """Handles POST requests to save internal staff checklists with activity logging."""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
-    session = SessionLocal() # 👈 Start session
+    session = SessionLocal()
     try:
         data = request.get_json(silent=True) or {}
         checklist_type = data.get('checklistType', 'unknown')
         customer_id = data.get('customerId')
         customer_name = data.get('customerName', 'N/A')
+        fitters = data.get('fitters', 'Unknown')
 
         customer = session.get(Customer, customer_id)
         if not customer:
@@ -928,25 +935,43 @@ def save_checklist():
             customer_id=customer_id,
             form_data=json.dumps(data),
             token_used='',
-            submitted_at=datetime.utcnow()
+            submitted_at=datetime.utcnow(),
+            created_by=request.current_user.id
         )
         
         session.add(customer_form_data)
-        session.commit() # 👈 Commit transaction
+        session.flush()  # Get the ID before committing
+        
+        # 🔔 CREATE ACTIVITY NOTIFICATION
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        notification_message = f"📋 New {checklist_type.title()} Checklist created by {user_name} for customer: {customer_name}"
+        if fitters and fitters != 'Unknown':
+            notification_message += f" (Fitters: {fitters})"
+        
+        create_activity_notification(
+            session=session,
+            message=notification_message,
+            customer_id=customer_id,
+            moved_by=user_name
+        )
+        
+        session.commit()
         
         current_app.logger.info(f"Staff checklist '{checklist_type}' saved for customer {customer_id} ({customer_name}). ID: {customer_form_data.id}")
 
         return jsonify({
+            "success": True,
             "message": f"{checklist_type.title()} Checklist saved successfully!",
             "form_submission_id": customer_form_data.id
         }), 200
 
     except Exception as e:
-        session.rollback() # 👈 Rollback on error
+        session.rollback()
         current_app.logger.exception(f"Error saving internal checklist: {e}")
         return jsonify({"error": f"Failed to save checklist: {str(e)}"}), 500
     finally:
-        session.close() # 👈 Close session
+        session.close()
 
 
 @form_bp.route('/customers/<customer_id>/generate-form-link', methods=['POST', 'OPTIONS'])
@@ -1228,12 +1253,14 @@ def delete_form_submission(submission_id):
     finally:
         session.close() # 👈 Close session
 
+# ===========================================================================
+# UPDATED FORM SUBMISSION UPDATE ROUTE (with activity logging)
+# ===========================================================================
+
 @form_bp.route('/form-submissions/<int:submission_id>', methods=['PUT', 'OPTIONS'])
 @token_required
 def update_form_submission(submission_id):
-    """
-    Update an existing form submission
-    """
+    """Update an existing form submission with activity logging"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -1245,23 +1272,49 @@ def update_form_submission(submission_id):
         if not updated_form_data:
             return jsonify({'error': 'Missing form data'}), 400
 
-        # Get the form submission
         submission = session.get(CustomerFormData, submission_id)
         if not submission:
             return jsonify({'error': 'Form submission not found'}), 404
 
         # Check permissions
-        # Allow edit if user is Manager, HR, Production, Sales, or the creator
         user_role = request.current_user.role
-        allowed_roles = ['Manager', 'HR', 'Production', 'Sales']  # ✅ Added 'Sales'
+        allowed_roles = ['Manager', 'HR', 'Production', 'Sales']
         is_creator = submission.created_by == request.current_user.id
         
         if user_role not in allowed_roles and not is_creator:
             return jsonify({'error': 'You do not have permission to edit this form'}), 403
 
+        # Get old data for comparison
+        old_form_data = json.loads(submission.form_data)
+        
         # Update the form data
         submission.form_data = json.dumps(updated_form_data)
         submission.updated_at = datetime.utcnow()
+        
+        # 🔔 CREATE ACTIVITY NOTIFICATION
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
+        
+        # Determine what type of form was updated
+        form_type = "Form"
+        if old_form_data.get('is_invoice'):
+            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
+        elif old_form_data.get('is_receipt'):
+            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
+        elif old_form_data.get('checklistType'):
+            form_type = f"{old_form_data.get('checklistType', '').title()} Checklist"
+        
+        # Get customer info
+        customer = session.get(Customer, submission.customer_id)
+        customer_name = customer.name if customer else old_form_data.get('customerName', 'N/A')
+        
+        notification_message = f"✏️ {form_type} updated by {user_name} for customer: {customer_name}"
+        
+        create_activity_notification(
+            session=session,
+            message=notification_message,
+            customer_id=submission.customer_id,
+            moved_by=user_name
+        )
         
         session.commit()
 
