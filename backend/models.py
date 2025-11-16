@@ -195,8 +195,6 @@ class Customer(Base):
     __tablename__ = 'customers'
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    customer_id = Column(String(36), ForeignKey('customers.id'), nullable=False)
-    project_id = Column(String(36), ForeignKey('projects.id'), nullable=True)
     date_of_measure = Column(Date)
     name = Column(String(200), nullable=False)
     address = Column(Text)
@@ -1292,7 +1290,7 @@ class MaterialOrder(Base):
     supplier_reference = Column(String(100), nullable=True)
     
     # Status & Dates
-    status = Column(SQLEnum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
+    status = Column(Enum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
     order_date = Column(DateTime, nullable=True)
     expected_delivery_date = Column(DateTime, nullable=True)
     actual_delivery_date = Column(DateTime, nullable=True)
