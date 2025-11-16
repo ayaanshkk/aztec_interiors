@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from ..models import (MaterialOrder, MaterialChangeLog, MaterialStatus, Customer, User)
-from .auth_helpers import token_required, role_required
+from .auth_helpers import token_required
 from ..db import SessionLocal
 from datetime import datetime
 from sqlalchemy import and_, or_
@@ -22,9 +22,14 @@ def get_all_materials():
         - customer_id: Filter by customer
         - status: Filter by status (not_ordered, ordered, in_transit, delivered, delayed)
         - date_from/date_to: Filter by order date range
+    Only Manager, HR, and Production roles can view all materials
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
+    
+    # Role check: Only Manager, HR, and Production can view materials
+    if request.user.role not in ['Manager', 'HR', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view materials'}), 403
     
     session = SessionLocal()
     try:
@@ -67,9 +72,16 @@ def get_all_materials():
 @materials_bp.route('/materials/<material_id>', methods=['GET', 'OPTIONS'])
 @token_required
 def get_material(material_id):
-    """Get single material order by ID"""
+    """
+    Get single material order by ID
+    Only Manager, HR, and Production roles can view material details
+    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
+    
+    # Role check: Only Manager, HR, and Production can view material details
+    if request.user.role not in ['Manager', 'HR', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view material details'}), 403
     
     session = SessionLocal()
     try:
@@ -98,9 +110,14 @@ def get_customer_materials(customer_id):
     """
     Get all material orders for a specific customer
     Returns summary including modification safety status
+    Only Manager, HR, and Production roles can view customer materials
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
+    
+    # Role check: Only Manager, HR, and Production can view customer materials
+    if request.user.role not in ['Manager', 'HR', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer materials'}), 403
     
     session = SessionLocal()
     try:
@@ -139,12 +156,16 @@ def get_customer_materials(customer_id):
 
 @materials_bp.route('/materials', methods=['POST'])
 @token_required
-@role_required(['Manager', 'Production'])  # Only Production team and Managers can create material orders
 def create_material_order():
     """
     Create a new material order
     Called by Production team when they order materials
+    Only Manager and Production roles can create material orders
     """
+    # Role check: Only Manager and Production can create material orders
+    if request.user.role not in ['Manager', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager and Production can create material orders'}), 403
+    
     session = SessionLocal()
     try:
         data = request.json
@@ -216,12 +237,16 @@ def create_material_order():
 
 @materials_bp.route('/materials/<material_id>', methods=['PATCH'])
 @token_required
-@role_required(['Manager', 'Production'])
 def update_material_order(material_id):
     """
     Update material order details
     Used when Production team updates status, delivery dates, etc.
+    Only Manager and Production roles can update material orders
     """
+    # Role check: Only Manager and Production can update material orders
+    if request.user.role not in ['Manager', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager and Production can update material orders'}), 403
+    
     session = SessionLocal()
     try:
         material_order = session.get(MaterialOrder, material_id)
@@ -338,9 +363,15 @@ def update_material_order(material_id):
 
 @materials_bp.route('/materials/<material_id>', methods=['DELETE'])
 @token_required
-@role_required(['Manager'])  # Only Managers can delete material orders
 def delete_material_order(material_id):
-    """Delete a material order"""
+    """
+    Delete a material order
+    Only Manager role can delete material orders
+    """
+    # Role check: Only Manager can delete material orders
+    if request.user.role != 'Manager':
+        return jsonify({'error': 'Unauthorized - Only Manager can delete material orders'}), 403
+    
     session = SessionLocal()
     try:
         material_order = session.get(MaterialOrder, material_id)
@@ -368,12 +399,16 @@ def delete_material_order(material_id):
 
 @materials_bp.route('/materials/dashboard/overview', methods=['GET'])
 @token_required
-@role_required(['Manager', 'HR'])
 def materials_dashboard_overview():
     """
     Get overview of all materials for manager dashboard
     Shows pending orders, deliveries expected, etc.
+    Only Manager and HR roles can view dashboard overview
     """
+    # Role check: Only Manager and HR can view dashboard overview
+    if request.user.role not in ['Manager', 'HR']:
+        return jsonify({'error': 'Unauthorized - Only Manager and HR can view dashboard overview'}), 403
+    
     session = SessionLocal()
     try:
         # Get counts by status
@@ -454,7 +489,12 @@ def get_customer_project_timeline(customer_id):
     Shows if materials ordered and estimated completion date
     
     This is what managers check when customers call asking about timelines
+    Only Manager, HR, and Production roles can view customer timelines
     """
+    # Role check: Only Manager, HR, and Production can view customer timelines
+    if request.user.role not in ['Manager', 'HR', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer timelines'}), 403
+    
     session = SessionLocal()
     try:
         customer = session.get(Customer, customer_id)
@@ -539,12 +579,16 @@ def _get_timeline_message(materials, any_ordered, all_delivered, latest_delivery
 
 @materials_bp.route('/materials/notifications/pending-orders', methods=['GET'])
 @token_required
-@role_required(['Production', 'Manager'])
 def get_pending_material_orders():
     """
     Get list of customers waiting for materials to be ordered
     Production team checks this to know what needs ordering
+    Only Manager and Production roles can view pending orders
     """
+    # Role check: Only Manager and Production can view pending orders
+    if request.user.role not in ['Manager', 'Production']:
+        return jsonify({'error': 'Unauthorized - Only Manager and Production can view pending orders'}), 403
+    
     session = SessionLocal()
     try:
         pending = session.query(MaterialOrder).filter(
