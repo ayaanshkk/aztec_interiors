@@ -5,7 +5,7 @@ from .auth_routes import token_required
 
 # 👈 NEW IMPORTS: Required for SQLAlchemy usage
 from ..db import SessionLocal 
-# from ..utils.google_calendar_utils import create_calendar_event, update_calendar_event, delete_calendar_event
+from ..utils.google_calendar_utils import create_calendar_event, update_calendar_event, delete_calendar_event
 
 # Create blueprint
 assignment_bp = Blueprint('assignments', __name__)
