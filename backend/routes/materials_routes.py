@@ -1,8 +1,8 @@
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify, current_app
 from ..models import (MaterialOrder, MaterialChangeLog, MaterialStatus, Customer, User)
 from .auth_helpers import token_required
 from ..db import SessionLocal
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import and_, or_
 import uuid
 
@@ -27,8 +27,8 @@ def get_all_materials():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager, HR, and Production can view materials
     if user_role not in ['manager', 'hr', 'production']:
@@ -82,8 +82,8 @@ def get_material(material_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager, HR, and Production can view material details
     if user_role not in ['manager', 'hr', 'production']:
@@ -121,8 +121,8 @@ def get_customer_materials(customer_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager, HR, and Production can view customer materials
     if user_role not in ['manager', 'hr', 'production']:
@@ -171,8 +171,9 @@ def create_material_order():
     Called by Production team when they order materials
     Only Manager and Production roles can create material orders
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
+    current_user_id = request.current_user.id
     
     # Role check: Only Manager and Production can create material orders
     if user_role not in ['manager', 'production']:
@@ -181,7 +182,10 @@ def create_material_order():
     session = SessionLocal()
     try:
         data = request.json
-        current_user_id = g.user.id  # From token_required decorator
+        
+        # ✅ CRITICAL FIX: Log the incoming request for debugging
+        current_app.logger.info(f"📥 Material order creation request: {data}")
+        current_app.logger.info(f"👤 User: {current_user_id}, Role: {user_role}")
         
         # Validate required fields
         if not data.get('customer_id'):
@@ -195,7 +199,24 @@ def create_material_order():
             return jsonify({'error': 'Customer not found'}), 404
         
         # Parse status
-        status = MaterialStatus(data.get('status', 'not_ordered'))
+        status = MaterialStatus(data.get('status', 'ordered'))  # Default to 'ordered' when creating
+        
+        # ✅ FIX: Handle date parsing more robustly
+        order_date = None
+        if data.get('order_date'):
+            try:
+                order_date = datetime.fromisoformat(data['order_date'].replace('Z', '+00:00'))
+            except:
+                order_date = datetime.utcnow()
+        else:
+            order_date = datetime.utcnow() if status != MaterialStatus.NOT_ORDERED else None
+        
+        expected_delivery_date = None
+        if data.get('expected_delivery_date'):
+            try:
+                expected_delivery_date = datetime.fromisoformat(data['expected_delivery_date'].replace('Z', '+00:00'))
+            except:
+                expected_delivery_date = None
         
         # Create material order
         material_order = MaterialOrder(
@@ -208,8 +229,8 @@ def create_material_order():
             supplier_name=data.get('supplier_name'),
             supplier_reference=data.get('supplier_reference'),
             status=status,
-            order_date=datetime.fromisoformat(data['order_date']) if data.get('order_date') else None,
-            expected_delivery_date=datetime.fromisoformat(data['expected_delivery_date']) if data.get('expected_delivery_date') else None,
+            order_date=order_date,
+            expected_delivery_date=expected_delivery_date,
             estimated_cost=data.get('estimated_cost'),
             notes=data.get('notes')
         )
@@ -229,7 +250,7 @@ def create_material_order():
         
         session.commit()
         
-        current_app.logger.info(f"Material order {material_order.id} created for customer {data['customer_id']}")
+        current_app.logger.info(f"✅ Material order {material_order.id} created for customer {data['customer_id']}")
         
         return jsonify({
             'message': 'Material order created successfully',
@@ -238,10 +259,11 @@ def create_material_order():
         
     except ValueError as e:
         session.rollback()
+        current_app.logger.exception(f"❌ ValueError creating material order: {e}")
         return jsonify({'error': f'Invalid status value: {str(e)}'}), 400
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error creating material order: {e}")
+        current_app.logger.exception(f"❌ Error creating material order: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -255,8 +277,9 @@ def update_material_order(material_id):
     Used when Production team updates status, delivery dates, etc.
     Only Manager and Production roles can update material orders
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
+    current_user_id = request.current_user.id
     
     # Role check: Only Manager and Production can update material orders
     if user_role not in ['manager', 'production']:
@@ -269,7 +292,6 @@ def update_material_order(material_id):
             return jsonify({'error': 'Material order not found'}), 404
         
         data = request.json
-        current_user_id = g.user.id
         
         # Track changes for audit log
         changes = []
@@ -383,8 +405,8 @@ def delete_material_order(material_id):
     Delete a material order
     Only Manager role can delete material orders
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager can delete material orders
     if user_role != 'manager':
@@ -423,8 +445,8 @@ def materials_dashboard_overview():
     Shows pending orders, deliveries expected, etc.
     Only Manager and HR roles can view dashboard overview
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager and HR can view dashboard overview
     if user_role not in ['manager', 'hr']:
@@ -454,7 +476,6 @@ def materials_dashboard_overview():
         ).count()
         
         # Get deliveries expected this week/month
-        from datetime import timedelta
         today = datetime.utcnow()
         week_end = today + timedelta(days=7)
         month_end = today + timedelta(days=30)
@@ -512,8 +533,8 @@ def get_customer_project_timeline(customer_id):
     This is what managers check when customers call asking about timelines
     Only Manager, HR, and Production roles can view customer timelines
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager, HR, and Production can view customer timelines
     if user_role not in ['manager', 'hr', 'production']:
@@ -554,7 +575,6 @@ def get_customer_project_timeline(customer_id):
         # Estimate completion (delivery date + 2 weeks installation time)
         estimated_completion = None
         if latest_delivery:
-            from datetime import timedelta
             estimated_completion = latest_delivery + timedelta(days=14)  # Assume 2 weeks for installation
         
         return jsonify({
@@ -570,9 +590,10 @@ def get_customer_project_timeline(customer_id):
             },
             'materials_breakdown': [
                 {
+                    'id': m.id,
                     'description': m.material_description,
                     'status': m.status.value,
-                    'delivery_status': m.delivery_status_summary
+                    'delivery_status': f"{m.status.value.replace('_', ' ').title()}"
                 } for m in materials
             ]
         }), 200
@@ -609,8 +630,8 @@ def get_pending_material_orders():
     Production team checks this to know what needs ordering
     Only Manager and Production roles can view pending orders
     """
-    # ✅ Normalize role to lowercase
-    user_role = g.user.role.lower() if g.user.role else ''
+    # ✅ FIX: Use request.current_user instead of g.user
+    user_role = request.current_user.role.lower() if request.current_user.role else ''
     
     # Role check: Only Manager and Production can view pending orders
     if user_role not in ['manager', 'production']:

@@ -12,6 +12,37 @@ from ..db import SessionLocal
 
 customer_bp = Blueprint('customers', __name__)
 
+# Define stage hierarchy for determining "most advanced" stage
+STAGE_HIERARCHY = {
+    "Lead": 0,
+    "Survey": 1,
+    "Design": 2,
+    "Quote": 3,
+    "Accepted": 4,
+    "OnHold": 5,
+    "Ordered": 6,
+    "Production": 7,
+    "Delivery": 8,
+    "Installation": 9,
+    "Complete": 10,
+    "Remedial": 11,
+    "Cancelled": 12
+}
+
+def get_most_advanced_stage(stages):
+    """Given a list of stage strings, return the most advanced one"""
+    if not stages:
+        return "Lead"
+    
+    # Filter out None values and get hierarchy values
+    valid_stages = [s for s in stages if s and s in STAGE_HIERARCHY]
+    if not valid_stages:
+        return "Lead"
+    
+    # Return the stage with highest hierarchy value
+    return max(valid_stages, key=lambda s: STAGE_HIERARCHY.get(s, 0))
+
+
 # Token authentication decorator (left unchanged as it relies on User.verify_jwt_token)
 def token_required(f):
     @wraps(f)
@@ -53,7 +84,7 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts, form counts, and drawing counts."""
+    """Get all customers with their project counts, form counts, drawing counts, and CORRECT STAGE."""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -62,7 +93,7 @@ def get_customers():
         # ✅ Fetch all customers
         customers = session.query(Customer).all()
         
-        # ✅ Build result with document counts
+        # ✅ Build result with document counts AND correct stage
         result = []
         for customer in customers:
             # Count form submissions for this customer
@@ -74,18 +105,43 @@ def get_customers():
             # Count form documents for this customer (Excel/PDF uploads)
             form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
             
-            # Get the customer dict - INCLUDE PROJECTS to get correct stage info
+            # 🔑 CRITICAL FIX: Get all linked jobs and projects to determine actual stage
+            customer_jobs = session.query(Job).filter_by(customer_id=customer.id).all()
+            customer_projects = session.query(Project).filter_by(customer_id=customer.id).all()
+            
+            # Collect all stages (customer + jobs + projects)
+            all_stages = [customer.stage]
+            all_stages.extend([job.stage for job in customer_jobs if job.stage])
+            all_stages.extend([project.stage for project in customer_projects if project.stage])
+            
+            # Get the most advanced stage
+            display_stage = get_most_advanced_stage(all_stages)
+            
+            # Get the customer dict - INCLUDE PROJECTS to get stage info
             customer_dict = customer.to_dict(include_projects=True)
             
-            # Add the counts
-            customer_dict['form_count'] = form_count
-            customer_dict['drawing_count'] = drawing_count
-            customer_dict['form_document_count'] = form_doc_count
+            # 🔑 OVERRIDE the stage with the calculated one
+            customer_dict['stage'] = display_stage
+            
+            # Add the counts - ENSURE THEY ARE INTEGERS
+            customer_dict['form_count'] = int(form_count)
+            customer_dict['drawing_count'] = int(drawing_count)
+            customer_dict['form_document_count'] = int(form_doc_count)
             customer_dict['has_drawings'] = drawing_count > 0
             customer_dict['has_forms'] = form_count > 0 or form_doc_count > 0
             
+            # LOGGING - Check what's being sent
+            current_app.logger.info(
+                f"Customer {customer.name} (ID: {customer.id}): "
+                f"base_stage={customer.stage}, jobs={len(customer_jobs)}, "
+                f"projects={len(customer_projects)}, display_stage={display_stage}, "
+                f"form_count={form_count}, drawing_count={drawing_count}, "
+                f"form_document_count={form_doc_count}"
+            )
+            
             result.append(customer_dict)
 
+        current_app.logger.info(f"Returning {len(result)} customers with correct stages and document counts")
         return jsonify(result), 200
 
     except Exception as e:
