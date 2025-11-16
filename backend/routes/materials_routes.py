@@ -28,7 +28,7 @@ def get_all_materials():
         return jsonify({}), 200
     
     # Role check: Only Manager, HR, and Production can view materials
-    if request.user.role not in ['Manager', 'HR', 'Production']:
+    if g.user.role not in ['Manager', 'HR', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view materials'}), 403
     
     session = SessionLocal()
@@ -80,7 +80,7 @@ def get_material(material_id):
         return jsonify({}), 200
     
     # Role check: Only Manager, HR, and Production can view material details
-    if request.user.role not in ['Manager', 'HR', 'Production']:
+    if g.user.role not in ['Manager', 'HR', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view material details'}), 403
     
     session = SessionLocal()
@@ -116,7 +116,7 @@ def get_customer_materials(customer_id):
         return jsonify({}), 200
     
     # Role check: Only Manager, HR, and Production can view customer materials
-    if request.user.role not in ['Manager', 'HR', 'Production']:
+    if g.user.role not in ['Manager', 'HR', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer materials'}), 403
     
     session = SessionLocal()
@@ -163,13 +163,13 @@ def create_material_order():
     Only Manager and Production roles can create material orders
     """
     # Role check: Only Manager and Production can create material orders
-    if request.user.role not in ['Manager', 'Production']:
+    if g.user.role not in ['Manager', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can create material orders'}), 403
     
     session = SessionLocal()
     try:
         data = request.json
-        current_user_id = request.user_id  # From token_required decorator
+        current_user_id = g.user.id  # From token_required decorator
         
         # Validate required fields
         if not data.get('customer_id'):
@@ -244,7 +244,7 @@ def update_material_order(material_id):
     Only Manager and Production roles can update material orders
     """
     # Role check: Only Manager and Production can update material orders
-    if request.user.role not in ['Manager', 'Production']:
+    if g.user.role not in ['Manager', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can update material orders'}), 403
     
     session = SessionLocal()
@@ -254,7 +254,7 @@ def update_material_order(material_id):
             return jsonify({'error': 'Material order not found'}), 404
         
         data = request.json
-        current_user_id = request.user_id
+        current_user_id = g.user.id
         
         # Track changes for audit log
         changes = []
@@ -369,7 +369,7 @@ def delete_material_order(material_id):
     Only Manager role can delete material orders
     """
     # Role check: Only Manager can delete material orders
-    if request.user.role != 'Manager':
+    if g.user.role != 'Manager':
         return jsonify({'error': 'Unauthorized - Only Manager can delete material orders'}), 403
     
     session = SessionLocal()
@@ -406,7 +406,7 @@ def materials_dashboard_overview():
     Only Manager and HR roles can view dashboard overview
     """
     # Role check: Only Manager and HR can view dashboard overview
-    if request.user.role not in ['Manager', 'HR']:
+    if g.user.role not in ['Manager', 'HR']:
         return jsonify({'error': 'Unauthorized - Only Manager and HR can view dashboard overview'}), 403
     
     session = SessionLocal()
@@ -492,7 +492,7 @@ def get_customer_project_timeline(customer_id):
     Only Manager, HR, and Production roles can view customer timelines
     """
     # Role check: Only Manager, HR, and Production can view customer timelines
-    if request.user.role not in ['Manager', 'HR', 'Production']:
+    if g.user.role not in ['Manager', 'HR', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer timelines'}), 403
     
     session = SessionLocal()
@@ -586,7 +586,7 @@ def get_pending_material_orders():
     Only Manager and Production roles can view pending orders
     """
     # Role check: Only Manager and Production can view pending orders
-    if request.user.role not in ['Manager', 'Production']:
+    if g.user.role not in ['Manager', 'Production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can view pending orders'}), 403
     
     session = SessionLocal()
