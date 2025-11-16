@@ -198,8 +198,9 @@ def create_material_order():
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Parse status
-        status = MaterialStatus(data.get('status', 'ordered'))  # Default to 'ordered' when creating
+        # Parse status - ensure lowercase
+        status_value = data.get('status', 'ordered').lower()
+        status = MaterialStatus(status_value)  # Default to 'ordered' when creating
         
         # ✅ FIX: Handle date parsing more robustly
         order_date = None
