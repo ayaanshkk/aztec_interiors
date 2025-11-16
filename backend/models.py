@@ -1,4 +1,5 @@
 import uuid
+import enum
 import secrets
 from datetime import datetime, timedelta
 from sqlalchemy import (
@@ -1258,4 +1259,116 @@ class FormDocument(Base):
             'type': self.category,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'uploaded_by': self.uploaded_by
+        }
+
+class MaterialStatus(enum.Enum):
+    """Material order status options"""
+    NOT_ORDERED = "not_ordered"
+    ORDERED = "ordered"
+    IN_TRANSIT = "in_transit"
+    DELIVERED = "delivered"
+    DELAYED = "delayed"
+
+# Add this MaterialOrder model class
+class MaterialOrder(Base):
+    """
+    Tracks material orders for customer projects
+    Links to Customer, Project/Job, and User (who ordered)
+    """
+    __tablename__ = 'material_orders'
+    
+    # Primary Key
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    
+    # Foreign Keys - Link to existing tables
+    customer_id = Column(String(36), ForeignKey('customers.id'), nullable=False)
+    job_id = Column(String(36), ForeignKey('jobs.id'), nullable=True)
+    project_id = Column(Integer, ForeignKey('projects.id'), nullable=True)
+    ordered_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=True)
+    
+    # Material Details
+    material_description = Column(Text, nullable=False)
+    supplier_name = Column(String(255), nullable=True)
+    supplier_reference = Column(String(100), nullable=True)
+    
+    # Status & Dates
+    status = Column(SQLEnum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
+    order_date = Column(DateTime, nullable=True)
+    expected_delivery_date = Column(DateTime, nullable=True)
+    actual_delivery_date = Column(DateTime, nullable=True)
+    
+    # Cost Information
+    estimated_cost = Column(Numeric(10, 2), nullable=True)
+    actual_cost = Column(Numeric(10, 2), nullable=True)
+    
+    # Additional Info
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    customer = relationship('Customer', backref='material_orders')
+    ordered_by = relationship('User', backref='material_orders_placed', foreign_keys=[ordered_by_user_id])
+    
+    def to_dict(self):
+        """Convert to dictionary for API responses"""
+        return {
+            'id': self.id,
+            'customer_id': self.customer_id,
+            'customer_name': self.customer.name if self.customer else None,
+            'job_id': self.job_id,
+            'project_id': self.project_id,
+            'material_description': self.material_description,
+            'supplier_name': self.supplier_name,
+            'supplier_reference': self.supplier_reference,
+            'status': self.status.value,
+            'order_date': self.order_date.isoformat() if self.order_date else None,
+            'expected_delivery_date': self.expected_delivery_date.isoformat() if self.expected_delivery_date else None,
+            'actual_delivery_date': self.actual_delivery_date.isoformat() if self.actual_delivery_date else None,
+            'estimated_cost': float(self.estimated_cost) if self.estimated_cost else None,
+            'actual_cost': float(self.actual_cost) if self.actual_cost else None,
+            'ordered_by': self.ordered_by.username if self.ordered_by else None,
+            'notes': self.notes,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+    
+    @property
+    def is_modification_safe(self):
+        """Returns True if materials haven't been ordered yet"""
+        return self.status == MaterialStatus.NOT_ORDERED
+
+# Add this MaterialChangeLog model class
+class MaterialChangeLog(Base):
+    """
+    Audit trail for material order changes
+    Tracks who made changes and when
+    """
+    __tablename__ = 'material_change_logs'
+    
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    material_order_id = Column(String(36), ForeignKey('material_orders.id'), nullable=False)
+    changed_by_user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    
+    change_type = Column(String(50), nullable=False)
+    old_value = Column(Text, nullable=True)
+    new_value = Column(Text, nullable=True)
+    change_description = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    material_order = relationship('MaterialOrder', backref='change_logs')
+    changed_by = relationship('User', backref='material_changes_made')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'material_order_id': self.material_order_id,
+            'changed_by': self.changed_by.username if self.changed_by else None,
+            'change_type': self.change_type,
+            'old_value': self.old_value,
+            'new_value': self.new_value,
+            'change_description': self.change_description,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
         }
