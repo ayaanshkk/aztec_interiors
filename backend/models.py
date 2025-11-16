@@ -1290,7 +1290,7 @@ class MaterialOrder(Base):
     supplier_reference = Column(String(100), nullable=True)
     
     # Status & Dates
-    status = Column(Enum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
+    status = Column(String(20), default='not_ordered', nullable=False)
     order_date = Column(DateTime, nullable=True)
     expected_delivery_date = Column(DateTime, nullable=True)
     actual_delivery_date = Column(DateTime, nullable=True)
@@ -1319,13 +1319,14 @@ class MaterialOrder(Base):
             'material_description': self.material_description,
             'supplier_name': self.supplier_name,
             'supplier_reference': self.supplier_reference,
-            'status': self.status.value,
+            # ✅ FIX: Handle both string and enum cases
+            'status': self.status.value if isinstance(self.status, MaterialStatus) else self.status,
             'order_date': self.order_date.isoformat() if self.order_date else None,
             'expected_delivery_date': self.expected_delivery_date.isoformat() if self.expected_delivery_date else None,
             'actual_delivery_date': self.actual_delivery_date.isoformat() if self.actual_delivery_date else None,
             'estimated_cost': float(self.estimated_cost) if self.estimated_cost else None,
             'actual_cost': float(self.actual_cost) if self.actual_cost else None,
-            'ordered_by': self.ordered_by.username if self.ordered_by else None,
+            'ordered_by': self.ordered_by.full_name if self.ordered_by else None,  # ✅ Changed from username to full_name
             'notes': self.notes,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
