@@ -84,71 +84,94 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts, form counts, drawing counts, and CORRECT STAGE."""
+    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED STAGE."""
+    
     if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
-    session = SessionLocal()
+        return '', 204
+    
     try:
-        # ✅ Fetch all customers
-        customers = session.query(Customer).all()
+        # Define stage order (higher number = more advanced)
+        stage_order = {
+            'Lead': 1,
+            'Qualified': 2,
+            'Quote Sent': 3,
+            'Negotiation': 4,
+            'Accepted': 5,
+            'Deposit Paid': 6,
+            'In Production': 7,
+            'Ready for Delivery': 8,
+            'Delivered': 9,
+            'Installed': 10,
+            'Completed': 11,
+            'Lost': 0  # Lost is not really a progression, so we keep it at 0
+        }
         
-        # ✅ Build result with document counts AND correct stage
-        result = []
-        for customer in customers:
-            # Count form submissions for this customer
-            form_count = session.query(CustomerFormData).filter_by(customer_id=customer.id).count()
+        # Create a SQL CASE statement for stage ordering
+        stage_order_case = case(
+            *[(Project.stage == stage, order) for stage, order in stage_order.items()],
+            else_=0
+        )
+        
+        # Get all customers with aggregated data
+        customers_query = db.session.query(
+            Customer,
+            func.count(func.distinct(Project.id)).label('project_count'),
+            func.count(func.distinct(CustomerFormData.id)).label('form_count'),
+            func.count(func.distinct(DrawingDocument.id)).label('drawing_count'),
+            func.count(func.distinct(FormDocument.id)).label('form_document_count'),
+            func.max(stage_order_case).label('max_stage_order')
+        ).outerjoin(
+            Project, Customer.id == Project.customer_id
+        ).outerjoin(
+            CustomerFormData, Customer.id == CustomerFormData.customer_id
+        ).outerjoin(
+            DrawingDocument, Customer.id == DrawingDocument.customer_id
+        ).outerjoin(
+            FormDocument, Customer.id == FormDocument.customer_id
+        ).group_by(Customer.id).all()
+        
+        # Reverse lookup for stage order
+        order_to_stage = {v: k for k, v in stage_order.items()}
+        
+        customers_list = []
+        for customer, project_count, form_count, drawing_count, form_document_count, max_stage_order in customers_query:
+            # Determine the most advanced stage
+            if project_count > 0:
+                # Customer has projects, use the most advanced stage
+                most_advanced_stage = order_to_stage.get(max_stage_order, 'Lead')
+            else:
+                # No projects, customer is in Lead stage
+                most_advanced_stage = 'Lead'
             
-            # Count drawing documents for this customer
-            drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
+            customer_data = {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+                'email': customer.email,
+                'address': customer.address,
+                'city': customer.city,
+                'postcode': customer.postcode,
+                'source': customer.source,
+                'stage': most_advanced_stage,  # Most advanced stage across all projects
+                'project_count': project_count,  # Total number of projects
+                'form_count': form_count,
+                'drawing_count': drawing_count,
+                'form_document_count': form_document_count,
+                'notes': customer.notes,
+                'created_at': customer.created_at.isoformat() if customer.created_at else None,
+                'updated_at': customer.updated_at.isoformat() if customer.updated_at else None
+            }
             
-            # Count form documents for this customer (Excel/PDF uploads)
-            form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
-            
-            # 🔑 CRITICAL FIX: Get all linked jobs and projects to determine actual stage
-            customer_jobs = session.query(Job).filter_by(customer_id=customer.id).all()
-            customer_projects = session.query(Project).filter_by(customer_id=customer.id).all()
-            
-            # Collect all stages (customer + jobs + projects)
-            all_stages = [customer.stage]
-            all_stages.extend([job.stage for job in customer_jobs if job.stage])
-            all_stages.extend([project.stage for project in customer_projects if project.stage])
-            
-            # Get the most advanced stage
-            display_stage = get_most_advanced_stage(all_stages)
-            
-            # Get the customer dict - INCLUDE PROJECTS to get stage info
-            customer_dict = customer.to_dict(include_projects=True)
-            
-            # 🔑 OVERRIDE the stage with the calculated one
-            customer_dict['stage'] = display_stage
-            
-            # Add the counts - ENSURE THEY ARE INTEGERS
-            customer_dict['form_count'] = int(form_count)
-            customer_dict['drawing_count'] = int(drawing_count)
-            customer_dict['form_document_count'] = int(form_doc_count)
-            customer_dict['has_drawings'] = drawing_count > 0
-            customer_dict['has_forms'] = form_count > 0 or form_doc_count > 0
-            
-            # LOGGING - Check what's being sent
-            current_app.logger.info(
-                f"Customer {customer.name} (ID: {customer.id}): "
-                f"base_stage={customer.stage}, jobs={len(customer_jobs)}, "
-                f"projects={len(customer_projects)}, display_stage={display_stage}, "
-                f"form_count={form_count}, drawing_count={drawing_count}, "
-                f"form_document_count={form_doc_count}"
-            )
-            
-            result.append(customer_dict)
-
-        current_app.logger.info(f"Returning {len(result)} customers with correct stages and document counts")
-        return jsonify(result), 200
-
+            customers_list.append(customer_data)
+        
+        # Sort by most recently updated
+        customers_list.sort(key=lambda x: x['updated_at'] if x['updated_at'] else '', reverse=True)
+        
+        return jsonify(customers_list), 200
+        
     except Exception as e:
-        current_app.logger.exception(f"Error fetching customers: {e}")
-        return jsonify({'error': 'Failed to fetch customers'}), 500
-    finally:
-        session.close()
+        print(f"Error fetching customers: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 
 @customer_bp.route('/customers', methods=['POST', 'OPTIONS'])
@@ -342,29 +365,49 @@ def delete_customer(customer_id):
 # PROJECT ENDPOINTS
 # ==========================================
 
-@customer_bp.route('/customers/<string:customer_id>/projects', methods=['GET', 'OPTIONS'])
+@customer_bp.route('/customers/<int:customer_id>/projects', methods=['GET'])
 @token_required
 def get_customer_projects(customer_id):
-    """Get all projects for a specific customer"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+    """Get all projects for a specific customer with full details."""
     
     try:
-        customer = Customer.query.get_or_404(customer_id)
+        customer = Customer.query.get(customer_id)
+        if not customer:
+            return jsonify({'error': 'Customer not found'}), 404
         
-        # Check permissions
-        if request.current_user.role in ['Sales', 'Staff']:
-            if customer.created_by != request.current_user.id and customer.salesperson != request.current_user.get_full_name():
-                return jsonify({'error': 'You do not have permission to view projects for this customer'}), 403
+        # Get all projects for this customer
+        projects = Project.query.filter_by(customer_id=customer_id).all()
         
-        projects = Project.query.filter_by(customer_id=customer_id).order_by(Project.created_at.desc()).all()
+        projects_list = []
+        for project in projects:
+            project_data = {
+                'id': project.id,
+                'project_name': project.project_name,
+                'stage': project.stage,
+                'quote_price': float(project.quote_price) if project.quote_price else None,
+                'deposit_amount': float(project.deposit_amount) if project.deposit_amount else None,
+                'balance_due': float(project.balance_due) if project.balance_due else None,
+                'expected_delivery_date': project.expected_delivery_date.isoformat() if project.expected_delivery_date else None,
+                'actual_delivery_date': project.actual_delivery_date.isoformat() if project.actual_delivery_date else None,
+                'notes': project.notes,
+                'created_at': project.created_at.isoformat() if project.created_at else None,
+                'updated_at': project.updated_at.isoformat() if project.updated_at else None
+            }
+            projects_list.append(project_data)
         
-        return jsonify([project.to_dict(include_forms=False) for project in projects]), 200
+        return jsonify({
+            'customer': {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+                'email': customer.email
+            },
+            'projects': projects_list
+        }), 200
         
     except Exception as e:
-        current_app.logger.exception(f"Error fetching projects for customer {customer_id}: {e}")
-        return jsonify({'error': 'Failed to fetch projects'}), 500
-
+        print(f"Error fetching customer projects: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @customer_bp.route('/customers/<string:customer_id>/projects', methods=['POST', 'OPTIONS'])
 @token_required
@@ -758,3 +801,68 @@ def submit_form():
         return jsonify({'error': f'Failed to submit form: {str(e)}'}), 500
     finally:
         session.close() # 👈 Close session
+
+@customer_bp.route('/pipeline', methods=['GET'])
+@token_required
+def get_pipeline():
+    """Get pipeline data showing customers by their most advanced stage."""
+    
+    try:
+        # Define stage order
+        stage_order = {
+            'Lead': 1,
+            'Qualified': 2,
+            'Quote Sent': 3,
+            'Negotiation': 4,
+            'Accepted': 5,
+            'Deposit Paid': 6,
+            'In Production': 7,
+            'Ready for Delivery': 8,
+            'Delivered': 9,
+            'Installed': 10,
+            'Completed': 11,
+            'Lost': 0
+        }
+        
+        stage_order_case = case(
+            *[(Project.stage == stage, order) for stage, order in stage_order.items()],
+            else_=0
+        )
+        
+        # Get customers with their most advanced stage
+        customers_query = db.session.query(
+            Customer,
+            func.count(func.distinct(Project.id)).label('project_count'),
+            func.max(stage_order_case).label('max_stage_order')
+        ).outerjoin(
+            Project, Customer.id == Project.customer_id
+        ).group_by(Customer.id).all()
+        
+        order_to_stage = {v: k for k, v in stage_order.items()}
+        
+        # Organize customers by stage
+        pipeline_data = {stage: [] for stage in stage_order.keys()}
+        
+        for customer, project_count, max_stage_order in customers_query:
+            if project_count > 0:
+                most_advanced_stage = order_to_stage.get(max_stage_order, 'Lead')
+            else:
+                most_advanced_stage = 'Lead'
+            
+            customer_data = {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone,
+                'email': customer.email,
+                'project_count': project_count,
+                'stage': most_advanced_stage,
+                'created_at': customer.created_at.isoformat() if customer.created_at else None
+            }
+            
+            pipeline_data[most_advanced_stage].append(customer_data)
+        
+        return jsonify(pipeline_data), 200
+        
+    except Exception as e:
+        print(f"Error fetching pipeline data: {str(e)}")
+        return jsonify({'error': str(e)}), 500

@@ -1319,14 +1319,14 @@ class MaterialOrder(Base):
             'material_description': self.material_description,
             'supplier_name': self.supplier_name,
             'supplier_reference': self.supplier_reference,
-            # ✅ FIX: Handle both string and enum cases
-            'status': self.status.value if isinstance(self.status, MaterialStatus) else self.status,
+            # ✅ CRITICAL FIX: Handle both string and enum cases
+            'status': self.status if isinstance(self.status, str) else self.status.value,
             'order_date': self.order_date.isoformat() if self.order_date else None,
             'expected_delivery_date': self.expected_delivery_date.isoformat() if self.expected_delivery_date else None,
             'actual_delivery_date': self.actual_delivery_date.isoformat() if self.actual_delivery_date else None,
             'estimated_cost': float(self.estimated_cost) if self.estimated_cost else None,
             'actual_cost': float(self.actual_cost) if self.actual_cost else None,
-            'ordered_by': self.ordered_by.full_name if self.ordered_by else None,  # ✅ Changed from username to full_name
+            'ordered_by': self.ordered_by_user.full_name if self.ordered_by_user else None,
             'notes': self.notes,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
