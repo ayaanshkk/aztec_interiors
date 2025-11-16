@@ -102,7 +102,7 @@ def create_app():
     from backend.routes import (
         auth_routes, approvals_routes, form_routes, db_routes,
         notification_routes, assignment_routes, appliance_routes,
-        customer_routes, file_routes, material_routes
+        customer_routes, file_routes, # material_routes
     )
 
     app.register_blueprint(auth_routes.auth_bp)
@@ -114,7 +114,7 @@ def create_app():
     app.register_blueprint(appliance_routes.appliance_bp)
     app.register_blueprint(customer_routes.customer_bp)
     app.register_blueprint(file_routes.file_bp)
-    app.register_blueprint(material_routes.materials_bp, url_prefix='/api')
+    # app.register_blueprint(material_routes.materials_bp, url_prefix='/api')
 
     # ============================================
     # HEALTH CHECK
