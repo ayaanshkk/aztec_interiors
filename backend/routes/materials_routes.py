@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, g
 from ..models import (MaterialOrder, MaterialChangeLog, MaterialStatus, Customer, User)
 from .auth_helpers import token_required
 from ..db import SessionLocal
