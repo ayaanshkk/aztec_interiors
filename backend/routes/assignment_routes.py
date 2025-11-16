@@ -5,7 +5,7 @@ from .auth_routes import token_required
 
 # 👈 NEW IMPORTS: Required for SQLAlchemy usage
 from ..db import SessionLocal 
-from ..utils.google_calendar_utils import create_calendar_event, update_calendar_event, delete_calendar_event
+# from ..utils.google_calendar_utils import create_calendar_event, update_calendar_event, delete_calendar_event
 
 # Create blueprint
 assignment_bp = Blueprint('assignments', __name__)
@@ -65,17 +65,17 @@ def handle_assignments():
             session.add(assignment)
             session.commit() # 👈 Commit after creating assignment
             
-            # --- NEW GOOGLE SYNC LOGIC (CREATE) ---
-            should_sync = (current_user.role == 'Manager' and assignment.user_id == current_user.id)
+            # # --- NEW GOOGLE SYNC LOGIC (CREATE) ---
+            # should_sync = (current_user.role == 'Manager' and assignment.user_id == current_user.id)
             
-            if should_sync:
-                try:
-                    event_id = create_calendar_event(assignment)
-                    assignment.calendar_event_id = event_id
-                    # Persist event ID using the same session
-                    session.commit() 
-                except Exception as cal_err:
-                    print(f"Google Calendar event creation failed: {cal_err}")
+            # if should_sync:
+            #     try:
+            #         event_id = create_calendar_event(assignment)
+            #         assignment.calendar_event_id = event_id
+            #         # Persist event ID using the same session
+            #         session.commit() 
+            #     except Exception as cal_err:
+            #         print(f"Google Calendar event creation failed: {cal_err}")
 
             return jsonify({
                 'message': 'Assignment created successfully',
@@ -179,14 +179,14 @@ def handle_single_assignment(assignment_id):
             
             session.commit() # 👈 Commit transaction
 
-            # --- NEW GOOGLE SYNC LOGIC (UPDATE) ---
-            should_sync = (current_user.role == 'Manager' and assignment.user_id == current_user.id)
+            # # --- NEW GOOGLE SYNC LOGIC (UPDATE) ---
+            # should_sync = (current_user.role == 'Manager' and assignment.user_id == current_user.id)
 
-            if should_sync and assignment.calendar_event_id:
-                try:
-                    update_calendar_event(assignment.calendar_event_id, assignment)
-                except Exception as cal_err:
-                    print(f"Google Calendar event update failed: {cal_err}")
+            # if should_sync and assignment.calendar_event_id:
+            #     try:
+            #         update_calendar_event(assignment.calendar_event_id, assignment)
+            #     except Exception as cal_err:
+            #         print(f"Google Calendar event update failed: {cal_err}")
             
             return jsonify({
                 'message': 'Assignment updated successfully',
@@ -196,12 +196,12 @@ def handle_single_assignment(assignment_id):
         # -------------------- DELETE --------------------
         elif request.method == 'DELETE':
             
-            # --- NEW GOOGLE SYNC LOGIC (DELETE) ---
-            if assignment.calendar_event_id and current_user.role == 'Manager' and assignment.user_id == current_user.id:
-                try:
-                    delete_calendar_event(assignment.calendar_event_id)
-                except Exception as cal_err:
-                    print(f"Google Calendar event deletion failed: {cal_err}")
+            # # --- NEW GOOGLE SYNC LOGIC (DELETE) ---
+            # if assignment.calendar_event_id and current_user.role == 'Manager' and assignment.user_id == current_user.id:
+            #     try:
+            #         delete_calendar_event(assignment.calendar_event_id)
+            #     except Exception as cal_err:
+            #         print(f"Google Calendar event deletion failed: {cal_err}")
             
             session.delete(assignment)
             session.commit() # 👈 Commit deletion
