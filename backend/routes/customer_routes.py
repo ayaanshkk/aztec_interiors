@@ -74,10 +74,10 @@ def get_customers():
             # Count form documents for this customer (Excel/PDF uploads)
             form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
             
-            # Get the customer dict
-            customer_dict = customer.to_dict(include_projects=False)
+            # Get the customer dict - INCLUDE PROJECTS to get correct stage info
+            customer_dict = customer.to_dict(include_projects=True)
             
-            # Add the counts - THIS IS THE KEY CHANGE
+            # Add the counts
             customer_dict['form_count'] = form_count
             customer_dict['drawing_count'] = drawing_count
             customer_dict['form_document_count'] = form_doc_count

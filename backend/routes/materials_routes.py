@@ -27,8 +27,11 @@ def get_all_materials():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager, HR, and Production can view materials
-    if g.user.role not in ['manager', 'hr', 'production']:
+    if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view materials'}), 403
     
     session = SessionLocal()
@@ -79,8 +82,11 @@ def get_material(material_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager, HR, and Production can view material details
-    if g.user.role not in ['manager', 'hr', 'production']:
+    if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view material details'}), 403
     
     session = SessionLocal()
@@ -115,8 +121,11 @@ def get_customer_materials(customer_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager, HR, and Production can view customer materials
-    if g.user.role not in ['manager', 'hr', 'production']:
+    if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer materials'}), 403
     
     session = SessionLocal()
@@ -162,8 +171,11 @@ def create_material_order():
     Called by Production team when they order materials
     Only Manager and Production roles can create material orders
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager and Production can create material orders
-    if g.user.role not in ['manager', 'production']:
+    if user_role not in ['manager', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can create material orders'}), 403
     
     session = SessionLocal()
@@ -243,8 +255,11 @@ def update_material_order(material_id):
     Used when Production team updates status, delivery dates, etc.
     Only Manager and Production roles can update material orders
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager and Production can update material orders
-    if g.user.role not in ['manager', 'production']:
+    if user_role not in ['manager', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can update material orders'}), 403
     
     session = SessionLocal()
@@ -368,8 +383,11 @@ def delete_material_order(material_id):
     Delete a material order
     Only Manager role can delete material orders
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager can delete material orders
-    if g.user.role != 'Manager':
+    if user_role != 'manager':
         return jsonify({'error': 'Unauthorized - Only Manager can delete material orders'}), 403
     
     session = SessionLocal()
@@ -405,8 +423,11 @@ def materials_dashboard_overview():
     Shows pending orders, deliveries expected, etc.
     Only Manager and HR roles can view dashboard overview
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager and HR can view dashboard overview
-    if g.user.role not in ['manager', 'hr']:
+    if user_role not in ['manager', 'hr']:
         return jsonify({'error': 'Unauthorized - Only Manager and HR can view dashboard overview'}), 403
     
     session = SessionLocal()
@@ -491,8 +512,11 @@ def get_customer_project_timeline(customer_id):
     This is what managers check when customers call asking about timelines
     Only Manager, HR, and Production roles can view customer timelines
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager, HR, and Production can view customer timelines
-    if g.user.role not in ['manager', 'hr', 'production']:
+    if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer timelines'}), 403
     
     session = SessionLocal()
@@ -542,7 +566,7 @@ def get_customer_project_timeline(customer_id):
                 'can_modify_project': not any_ordered,
                 'latest_expected_delivery': latest_delivery.isoformat() if latest_delivery else None,
                 'estimated_completion_date': estimated_completion.isoformat() if estimated_completion else None,
-                'message': self._get_timeline_message(materials, any_ordered, all_delivered, latest_delivery, estimated_completion)
+                'message': _get_timeline_message(materials, any_ordered, all_delivered, latest_delivery, estimated_completion)
             },
             'materials_breakdown': [
                 {
@@ -585,8 +609,11 @@ def get_pending_material_orders():
     Production team checks this to know what needs ordering
     Only Manager and Production roles can view pending orders
     """
+    # ✅ Normalize role to lowercase
+    user_role = g.user.role.lower() if g.user.role else ''
+    
     # Role check: Only Manager and Production can view pending orders
-    if g.user.role not in ['manager', 'production']:
+    if user_role not in ['manager', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can view pending orders'}), 403
     
     session = SessionLocal()
