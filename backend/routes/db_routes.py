@@ -279,59 +279,74 @@ def _extract_stage_from_payload(data: dict) -> Optional[str]:
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
+    """Update customer stage - FIXED VERSION"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
+    
     session = SessionLocal()
     try:
+        # Get the customer
         customer = session.query(Customer).filter_by(id=customer_id).first()
         if not customer:
+            current_app.logger.error(f"❌ Customer {customer_id} not found")
             return jsonify({'error': 'Customer not found'}), 404
 
+        # Extract data
         data = request.json
         updated_by_user = get_current_user_email(data)
         new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         
+        current_app.logger.info(f"🔄 Stage update request for customer {customer_id}: {customer.stage} → {new_stage}")
+        
+        # Validate stage
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
         if new_stage not in PIPELINE_STAGE_ORDER:
-            return jsonify({'error': 'Invalid stage'}), 400
+            return jsonify({'error': f'Invalid stage: {new_stage}'}), 400
 
         old_stage = customer.stage
+        
+        # If stage hasn't changed, return early
         if old_stage == new_stage:
+            current_app.logger.info(f"ℹ️ Customer {customer_id} already in stage {new_stage}")
             return jsonify({
                 'message': 'Stage not changed', 
                 'stage_updated': False,
                 'customer_id': customer.id,
-                'new_stage': new_stage
+                'new_stage': new_stage,
+                'old_stage': old_stage
             }), 200
 
         # Update customer stage
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
+        
+        # Add audit note
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
+        # Handle notification for Accepted stage
+        notification_created = False
         if new_stage == 'Accepted':
-            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
-            notification = ProductionNotification(
-                job_id=linked_job.id if linked_job else None,
-                customer_id=customer.id,
-                message=f"Customer '{customer.name}' moved to Accepted",
-                moved_by=updated_by_user
-            )
-            session.add(notification)
-        
-        # 🔑 CRITICAL FIX: Flush before commit
-        session.flush()
+            try:
+                linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
+                notification = ProductionNotification(
+                    job_id=linked_job.id if linked_job else None,
+                    customer_id=customer.id,
+                    message=f"Customer '{customer.name}' moved to Accepted",
+                    moved_by=updated_by_user
+                )
+                session.add(notification)
+                notification_created = True
+                current_app.logger.info(f"📢 Created notification for customer {customer_id}")
+            except Exception as notif_error:
+                current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
         
         # Commit the transaction
         session.commit()
-        
-        # 🔑 CRITICAL FIX: Refresh to get the latest state from DB
-        session.refresh(customer)
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         
@@ -341,12 +356,12 @@ def update_customer_stage(customer_id):
             'old_stage': old_stage,
             'new_stage': new_stage,
             'stage_updated': True,
-            'notification_sent': new_stage == 'Accepted'
+            'notification_sent': notification_created
         }), 200
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error updating customer stage: {e}")
+        current_app.logger.error(f"❌ Error updating customer {customer_id} stage: {e}")
         import traceback
         current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
@@ -614,13 +629,15 @@ def update_job_stage(job_id):
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
+    """Get all pipeline items - FIXED VERSION"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
+    
     session = SessionLocal()
     try:
-        # 🔑 CRITICAL FIX: Force fresh read from database
-        session.expire_all()
+        # 🔑 REMOVED: session.expire_all() - This was causing stale data issues
         
+        # Eagerly load relationships to avoid lazy loading issues
         customers = session.query(Customer).options(
             selectinload(Customer.jobs),
             selectinload(Customer.projects)
@@ -629,7 +646,7 @@ def get_pipeline_data():
         pipeline_items = []
 
         for customer in customers:
-            # Relationships are now eagerly loaded:
+            # Relationships are now eagerly loaded
             customer_jobs = customer.jobs 
             customer_projects = customer.projects 
             has_linked_entity = bool(customer_jobs or customer_projects)
@@ -640,7 +657,7 @@ def get_pipeline_data():
                     'id': f'job-{job.id}',
                     'type': 'job',
                     'customer': customer.to_dict(include_projects=False),
-                    'stage': job.stage,
+                    'stage': job.stage,  # Job's stage takes precedence
                     'job': {
                         'id': job.id,
                         'customer_id': job.customer_id,
@@ -654,8 +671,8 @@ def get_pipeline_data():
                         'sold_amount': float(job.sold_amount) if job.sold_amount else None,
                         'deposit1': float(job.deposit1) if job.deposit1 else None,
                         'deposit2': float(job.deposit2) if job.deposit2 else None,
-                        'deposit1_paid': False, # Placeholder
-                        'deposit2_paid': False, # Placeholder
+                        'deposit1_paid': False,
+                        'deposit2_paid': False,
                         'delivery_date': job.delivery_date.isoformat() if job.delivery_date else None,
                         'measure_date': job.measure_date.isoformat() if job.measure_date else None,
                         'completion_date': job.completion_date.isoformat() if job.completion_date else None,
@@ -674,8 +691,8 @@ def get_pipeline_data():
                     'id': f'project-{project.id}',
                     'type': 'project',
                     'customer': customer.to_dict(include_projects=False),
-                    'stage': project.stage,
-                    'job': { # Mapping Project to 'job' for frontend compatibility
+                    'stage': project.stage,  # Project's stage takes precedence
+                    'job': {
                         'id': project.id,
                         'customer_id': customer.id,
                         'job_reference': f"PROJ-{getattr(project, 'project_name', 'N/A')}", 
@@ -683,11 +700,14 @@ def get_pipeline_data():
                         'job_type': getattr(project, 'project_type', 'Unknown'), 
                         'stage': project.stage,
                         'priority': 'Medium',
-                        'quote_price': None, 'agreed_price': None, 'sold_amount': None,
-                        'deposit1': None, 'deposit2': None,
-                        'deposit1_paid': False, 'deposit2_paid': False,
+                        'quote_price': None,
+                        'agreed_price': None,
+                        'sold_amount': None,
+                        'deposit1': None,
+                        'deposit2': None,
+                        'deposit1_paid': False,
+                        'deposit2_paid': False,
                         'delivery_date': None,
-                        # Note: Need to handle the Date/DateTime difference for measure_date
                         'measure_date': getattr(project, 'date_of_measure', None).isoformat() if getattr(project, 'date_of_measure', None) else None,
                         'installation_address': customer.address,
                         'salesperson_name': customer.salesperson,
@@ -696,19 +716,22 @@ def get_pipeline_data():
                     }
                 })
 
-            # 3. Case: Customer is a pure Lead.
+            # 3. Case: Customer is a pure Lead (no jobs or projects)
             if not has_linked_entity:
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer.stage,
+                    'stage': customer.stage,  # Customer's stage
                     'customer': customer.to_dict(include_projects=False)
                 })
         
+        current_app.logger.info(f"📊 Pipeline data fetched: {len(pipeline_items)} items")
         return jsonify(pipeline_items)
         
     except Exception as e:
-        current_app.logger.error(f"Error fetching pipeline: {e}")
+        current_app.logger.error(f"❌ Error fetching pipeline: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
