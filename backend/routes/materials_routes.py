@@ -198,9 +198,15 @@ def create_material_order():
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Parse status - ensure lowercase
+        # Parse status - ensure we use the enum properly
         status_value = data.get('status', 'ordered').lower()
-        status = MaterialStatus(status_value)  # Default to 'ordered' when creating
+        try:
+            status = MaterialStatus(status_value)  # This creates the enum object
+        except ValueError:
+            # Fallback to 'ordered' if invalid status provided
+            status = MaterialStatus.ORDERED
+        
+        current_app.logger.info(f"📊 Status enum created: {status}, value: {status.value}")
         
         # ✅ FIX: Handle date parsing more robustly
         order_date = None
@@ -220,6 +226,7 @@ def create_material_order():
                 expected_delivery_date = None
         
         # Create material order
+        # 🔑 CRITICAL FIX: Pass status.value (lowercase string) not status enum object
         material_order = MaterialOrder(
             id=str(uuid.uuid4()),
             customer_id=data['customer_id'],
@@ -229,7 +236,7 @@ def create_material_order():
             material_description=data['material_description'],
             supplier_name=data.get('supplier_name'),
             supplier_reference=data.get('supplier_reference'),
-            status=status,
+            status=status.value,  # ✅ Pass the lowercase string value, not the enum
             order_date=order_date,
             expected_delivery_date=expected_delivery_date,
             estimated_cost=data.get('estimated_cost'),
@@ -299,16 +306,16 @@ def update_material_order(material_id):
         
         # Update status
         if 'status' in data:
-            old_status = material_order.status.value
-            new_status = MaterialStatus(data['status'])
+            old_status = material_order.status if isinstance(material_order.status, str) else material_order.status.value
+            new_status_enum = MaterialStatus(data['status'])
             
-            if old_status != new_status.value:
-                material_order.status = new_status
+            if old_status != new_status_enum.value:
+                material_order.status = new_status_enum.value  # ✅ Pass the lowercase string value
                 changes.append({
                     'type': 'status_change',
                     'old': old_status,
-                    'new': new_status.value,
-                    'description': f"Status changed from {old_status} to {new_status.value}"
+                    'new': new_status_enum.value,
+                    'description': f"Status changed from {old_status} to {new_status_enum.value}"
                 })
                 
                 # Auto-set order_date if moving to "ordered" status
