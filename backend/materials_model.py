@@ -1,11 +1,12 @@
-from sqlalchemy import Column, String, DateTime, Boolean, Text, ForeignKey, Numeric, Enum
+from sqlalchemy import Column, String, DateTime, Boolean, Text, ForeignKey, Numeric
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import uuid
 import enum
 
-# Import your Base from models.py
-from models import Base
+# Import your Base from db.py (change this to match your actual import)
+# For your setup, it should be:
+from db import Base
 
 class MaterialStatus(enum.Enum):
     """Material order status options"""
@@ -37,7 +38,8 @@ class MaterialOrder(Base):
     supplier_reference = Column(String(100), nullable=True)  # Supplier's order/invoice number
     
     # Status & Dates
-    status = Column(Enum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
+    from sqlalchemy import Enum as SQLEnum
+    status = Column(SQLEnum(MaterialStatus), default=MaterialStatus.NOT_ORDERED, nullable=False)
     order_date = Column(DateTime, nullable=True)  # When materials were ordered
     expected_delivery_date = Column(DateTime, nullable=True)  # ETA from supplier
     actual_delivery_date = Column(DateTime, nullable=True)  # When actually delivered
@@ -146,68 +148,3 @@ class MaterialChangeLog(Base):
             'change_description': self.change_description,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
-
-
-# ============================================
-# SQL MIGRATION SCRIPT
-# Run this to create the tables in your database
-# ============================================
-
-SQL_MIGRATION = """
--- Create material_orders table
-CREATE TABLE material_orders (
-    id VARCHAR(36) PRIMARY KEY,
-    customer_id VARCHAR(36) NOT NULL,
-    job_id VARCHAR(36),
-    project_id INT,
-    ordered_by_user_id INT,
-    material_description TEXT NOT NULL,
-    supplier_name VARCHAR(255),
-    supplier_reference VARCHAR(100),
-    status ENUM('not_ordered', 'ordered', 'in_transit', 'delivered', 'delayed') DEFAULT 'not_ordered' NOT NULL,
-    order_date DATETIME,
-    expected_delivery_date DATETIME,
-    actual_delivery_date DATETIME,
-    estimated_cost DECIMAL(10, 2),
-    actual_cost DECIMAL(10, 2),
-    notes TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
-    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE SET NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
-    FOREIGN KEY (ordered_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
-    
-    INDEX idx_customer (customer_id),
-    INDEX idx_status (status),
-    INDEX idx_order_date (order_date),
-    INDEX idx_delivery_date (expected_delivery_date)
-);
-
--- Create material_change_logs table
-CREATE TABLE material_change_logs (
-    id VARCHAR(36) PRIMARY KEY,
-    material_order_id VARCHAR(36) NOT NULL,
-    changed_by_user_id INT NOT NULL,
-    change_type VARCHAR(50) NOT NULL,
-    old_value TEXT,
-    new_value TEXT,
-    change_description TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    
-    FOREIGN KEY (material_order_id) REFERENCES material_orders(id) ON DELETE CASCADE,
-    FOREIGN KEY (changed_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
-    
-    INDEX idx_material_order (material_order_id),
-    INDEX idx_created_at (created_at)
-);
-"""
-
-if __name__ == "__main__":
-    print("Material Tracking Models Defined!")
-    print("\nNext steps:")
-    print("1. Add these models to your models.py file")
-    print("2. Run the SQL migration script to create tables")
-    print("3. Implement the API routes (see materials_routes.py)")
-    print("4. Create the frontend UI components")
