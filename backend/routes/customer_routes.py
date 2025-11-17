@@ -123,31 +123,65 @@ def get_customers():
             # Get the most advanced stage
             display_stage = get_most_advanced_stage(all_stages)
             
-            # Get the customer dict
-            customer_dict = customer.to_dict(include_projects=False)
+            # ✅ FIX: Build response manually instead of using to_dict()
+            customer_data = {
+                'id': customer.id,
+                'name': customer.name,
+                'phone': customer.phone or '',
+                'email': customer.email or '',
+                'address': customer.address or '',
+                'postcode': customer.postcode or '',
+                'salesperson': customer.salesperson or '',
+                'contact_made': customer.contact_made or 'Unknown',
+                'preferred_contact_method': customer.preferred_contact_method or 'Phone',
+                'marketing_opt_in': bool(customer.marketing_opt_in),
+                'notes': customer.notes or '',
+                'status': customer.status or 'Active',
+                'date_of_measure': customer.date_of_measure.isoformat() if customer.date_of_measure else None,
+                'created_at': customer.created_at.isoformat() if customer.created_at else None,
+                'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
+                'created_by': customer.created_by,
+                'updated_by': customer.updated_by,
+                
+                # ✅ CRITICAL: Use calculated values, not from to_dict()
+                'stage': display_stage,  # ✅ Most advanced stage
+                'project_count': total_project_count,  # ✅ Actual count
+                
+                # ✅ Ensure these are integers
+                'form_count': int(form_count),
+                'drawing_count': int(drawing_count),
+                'form_document_count': int(form_doc_count),
+                'has_drawings': drawing_count > 0,
+                'has_forms': form_count > 0 or form_doc_count > 0,
+            }
             
-            # 🔑 OVERRIDE with calculated values
-            customer_dict['stage'] = display_stage
-            customer_dict['project_count'] = total_project_count  # ✅ CRITICAL: This is the fix!
+            # Handle project_types JSON field
+            project_types_value = customer.project_types
+            if project_types_value is None:
+                project_types_value = []
+            elif isinstance(project_types_value, str):
+                import json
+                try:
+                    project_types_value = json.loads(project_types_value)
+                except:
+                    project_types_value = []
+            elif not isinstance(project_types_value, list):
+                project_types_value = []
             
-            # Add the counts - ENSURE THEY ARE INTEGERS
-            customer_dict['form_count'] = int(form_count)
-            customer_dict['drawing_count'] = int(drawing_count)
-            customer_dict['form_document_count'] = int(form_doc_count)
-            customer_dict['has_drawings'] = drawing_count > 0
-            customer_dict['has_forms'] = form_count > 0 or form_doc_count > 0
+            customer_data['project_types'] = project_types_value
             
-            # Enhanced logging
+            # Enhanced logging for debugging
             if total_project_count > 0:
                 current_app.logger.info(
                     f"✅ Customer {customer.name}: "
                     f"Jobs={len(customer_jobs)}, Projects={len(customer_projects)}, "
-                    f"Total={total_project_count}, Stage={display_stage}"
+                    f"Total={total_project_count}, Stage={display_stage}, "
+                    f"Forms={form_count}, Drawings={drawing_count}"
                 )
             
-            result.append(customer_dict)
+            result.append(customer_data)
 
-        current_app.logger.info(f"📤 Returning {len(result)} customers with correct stages and project counts")
+        current_app.logger.info(f"📤 Returning {len(result)} customers with correct data")
         return jsonify(result), 200
 
     except Exception as e:
@@ -438,9 +472,18 @@ def create_project(customer_id):
         )
         
         session.add(new_project)
-        session.commit()
         
-        # Simplify stage sync on creation
+        # ✅ ENHANCED NOTIFICATION: Create notification for project creation
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+        
+        create_activity_notification(
+            session=session,
+            message=f"➕ New {data.get('project_type', 'project')} created for customer '{customer.name}' - {data.get('project_name')}",
+            customer_id=customer_id,
+            moved_by=user_name
+        )
+        
+        # Update customer stage if this is the first project
         existing_project_count = session.query(Project).filter_by(customer_id=customer_id).count()
         existing_job_count = session.query(Job).filter_by(customer_id=customer_id).count()
         
@@ -448,18 +491,27 @@ def create_project(customer_id):
             old_customer_stage = customer.stage
             customer.stage = new_project.stage
             
-            if new_project.stage == 'Production' and old_customer_stage != 'Production':
-                notification = ProductionNotification(
-                    id=str(uuid.uuid4()),
-                    customer_id=customer_id,
-                    message=f"New customer '{customer.name}' moved to Production stage",
-                    created_at=datetime.utcnow(),
-                    moved_by=request.current_user.email,
-                    read=False
-                )
-                session.add(notification)
+            # ✅ ENHANCED: Create notification for ANY important stage change, not just Production
+            important_stages = ['Accepted', 'Production', 'Delivery', 'Installation', 'Complete']
             
-            session.commit()
+            if new_project.stage in important_stages and old_customer_stage != new_project.stage:
+                stage_emoji = {
+                    'Accepted': '✅',
+                    'Production': '🏭',
+                    'Delivery': '🚚',
+                    'Installation': '🔧',
+                    'Complete': '🎉'
+                }
+                emoji = stage_emoji.get(new_project.stage, '🔄')
+                
+                create_activity_notification(
+                    session=session,
+                    message=f"{emoji} Customer '{customer.name}' moved from {old_customer_stage} to {new_project.stage} stage",
+                    customer_id=customer_id,
+                    moved_by=user_name
+                )
+        
+        session.commit()
         
         current_app.logger.info(f"Project {new_project.id} created for customer {customer_id}")
         

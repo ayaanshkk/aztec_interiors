@@ -1,5 +1,3 @@
-# job_routes.py - Flask API endpoints for job management
-
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
 from models import (
@@ -179,6 +177,25 @@ def create_job():
         session.flush()
         
         print(f"Created job with ID: {job.id}")
+        
+        # ✅ NEW: Create notification for job creation
+        from backend.routes.notification_routes import create_activity_notification
+        
+        # Get user name (if available from request context, otherwise use 'System')
+        user_name = data.get('created_by', 'System')
+        
+        # Create notification message
+        job_name_display = data.get('job_name') or f"{data['job_type']} Job"
+        
+        create_activity_notification(
+            session=session,
+            message=f"💼 New job created for customer '{customer.name}': {job_name_display} ({data['job_type']}) - Ref: {job_reference}",
+            job_id=job.id,
+            customer_id=customer.id,
+            moved_by=user_name
+        )
+        
+        print(f"✅ Notification created for job {job.id}")
         
         # Link attached forms if provided
         attached_forms = data.get('attached_forms', [])
