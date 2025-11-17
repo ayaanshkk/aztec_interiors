@@ -1,12 +1,13 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
-import uuid  # ✅ ADD THIS IMPORT
+import uuid
 from ..models import (
     Job, Customer, Team, Fitter, Salesperson, 
     JobDocument, JobFormLink, FormSubmission, 
-    JobNote, Quotation  # ✅ JobNote already imported
+    JobNote, Quotation
 )
 from ..db import SessionLocal
+from .auth_helpers import token_required
 
 job_bp = Blueprint('jobs', __name__)
 
@@ -54,9 +55,13 @@ def serialize_job(job):
         'updated_at': job.updated_at.isoformat() if job.updated_at else None,
     }
 
-@job_bp.route('/jobs', methods=['GET'])
+@job_bp.route('/jobs', methods=['GET', 'OPTIONS'])
+@token_required
 def get_jobs():
     """Get all jobs with optional filtering"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     session = SessionLocal()
     try:
         customer_id = request.args.get('customer_id')
@@ -81,9 +86,13 @@ def get_jobs():
     finally:
         session.close()
 
-@job_bp.route('/jobs/<string:job_id>', methods=['GET'])
+@job_bp.route('/jobs/<string:job_id>', methods=['GET', 'OPTIONS'])
+@token_required
 def get_job(job_id):
     """Get a specific job by ID"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
@@ -97,6 +106,7 @@ def get_job(job_id):
         session.close()
 
 @job_bp.route('/jobs', methods=['POST'])
+@token_required
 def create_job():
     """Create a new job"""
     session = SessionLocal()
@@ -128,7 +138,6 @@ def create_job():
         # Check if job reference is unique
         existing_job = session.query(Job).filter(Job.job_reference == job_reference).first()
         if existing_job:
-            # Auto-generate a unique one with counter
             counter = 1
             base_ref = job_reference
             while existing_job:
@@ -146,9 +155,11 @@ def create_job():
                     return None
             return None
         
-        # ✅ CRITICAL FIX: Generate UUID for job ID
+        # ✅ Use customer's address as installation address if not provided
+        installation_address = data.get('installation_address') or customer.address
+        
         job = Job(
-            id=str(uuid.uuid4()),  # ✅ ADD THIS LINE - Generate UUID
+            id=str(uuid.uuid4()),
             job_reference=job_reference,
             job_name=data.get('job_name'),
             customer_id=data['customer_id'],
@@ -164,12 +175,13 @@ def create_job():
             deposit1=data.get('deposit1'),
             deposit2=data.get('deposit2'),
             deposit_due_date=parse_date(data.get('deposit_due_date')),
-            installation_address=data.get('installation_address', ''),
+            installation_address=installation_address,  # ✅ Use customer address
             assigned_team_id=data.get('assigned_team') if data.get('assigned_team') else None,
             primary_fitter_id=data.get('primary_fitter') if data.get('primary_fitter') else None,
             salesperson_id=data.get('salesperson') if data.get('salesperson') else None,
-            assigned_team_name=data.get('team_member'),  # Store team member name
-            notes=data.get('notes', ''),  # ✅ Default to empty string
+            assigned_team_name=data.get('team_member'),
+            salesperson_name=data.get('salesperson_name') or customer.salesperson,  # ✅ Use from data or customer
+            notes=data.get('notes', ''),
             has_counting_sheet=data.get('create_counting_sheet', False),
             has_schedule=data.get('create_schedule', False),
             has_invoice=data.get('generate_invoice', False)
@@ -180,14 +192,11 @@ def create_job():
         
         print(f"Created job with ID: {job.id}")
         
-        # ✅ Create notification for job creation
+        # Create notification
         try:
             from backend.routes.notification_routes import create_activity_notification
             
-            # Get user name (if available from request context, otherwise use 'System')
             user_name = data.get('created_by', 'System')
-            
-            # Create notification message
             job_name_display = data.get('job_name') or f"{data['job_type']} Job"
             
             create_activity_notification(
@@ -201,9 +210,8 @@ def create_job():
             print(f"✅ Notification created for job {job.id}")
         except Exception as notif_error:
             print(f"⚠️ Failed to create notification: {notif_error}")
-            # Continue without notification - don't fail the job creation
         
-        # Link attached forms if provided
+        # Link attached forms
         attached_forms = data.get('attached_forms', [])
         for form_id in attached_forms:
             try:
@@ -216,7 +224,7 @@ def create_job():
             except Exception as e:
                 print(f"Error linking form {form_id}: {e}")
         
-        # Create initial note if notes provided
+        # Create initial note
         if data.get('notes'):
             try:
                 initial_note = JobNote(
@@ -236,15 +244,19 @@ def create_job():
     except Exception as e:
         print(f"Error creating job: {str(e)}")
         import traceback
-        traceback.print_exc()  # ✅ Print full traceback for debugging
+        traceback.print_exc()
         session.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-@job_bp.route('/jobs/<string:job_id>', methods=['PUT'])
+@job_bp.route('/jobs/<string:job_id>', methods=['PUT', 'OPTIONS'])
+@token_required
 def update_job(job_id):
     """Update an existing job"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
@@ -253,7 +265,6 @@ def update_job(job_id):
             
         data = request.get_json()
         
-        # Parse dates helper
         def parse_date(date_str):
             if date_str:
                 try:
@@ -262,7 +273,6 @@ def update_job(job_id):
                     return None
             return None
         
-        # Update fields
         updateable_fields = [
             'job_name', 'job_type', 'stage', 'priority', 'quote_id', 'quote_price',
             'agreed_price', 'deposit1', 'deposit2', 'installation_address',
@@ -274,7 +284,6 @@ def update_job(job_id):
             if field in data:
                 setattr(job, field, data[field])
         
-        # Update date fields
         date_fields = ['measure_date', 'delivery_date', 'completion_date', 'deposit_due_date']
         for field in date_fields:
             if field in data:
@@ -292,9 +301,13 @@ def update_job(job_id):
     finally:
         session.close()
 
-@job_bp.route('/jobs/<string:job_id>', methods=['DELETE'])
+@job_bp.route('/jobs/<string:job_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
 def delete_job(job_id):
     """Delete a job"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+        
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
