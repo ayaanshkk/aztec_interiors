@@ -1308,7 +1308,7 @@ def get_form_submission(submission_id):
 @form_bp.route('/form-submissions/<int:submission_id>', methods=['PUT', 'OPTIONS'])
 @token_required
 def update_form_submission(submission_id):
-    """Update an existing form submission with activity logging"""
+    """Update an existing form submission with DETAILED change tracking and notifications"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -1332,37 +1332,75 @@ def update_form_submission(submission_id):
         if user_role not in allowed_roles and not is_creator:
             return jsonify({'error': 'You do not have permission to edit this form'}), 403
 
-        # Get old data for comparison
+        # ✅ CRITICAL: Get old data for detailed comparison
         old_form_data = json.loads(submission.form_data)
         
         # Update the form data
         submission.form_data = json.dumps(updated_form_data)
         submission.updated_at = datetime.utcnow()
         
-        # 🔔 CREATE ACTIVITY NOTIFICATION
+        # Get user and customer info
         user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
-        
-        # Determine what type of form was updated
-        form_type = "Form"
-        if old_form_data.get('is_invoice'):
-            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
-        elif old_form_data.get('is_receipt'):
-            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
-        elif old_form_data.get('checklistType'):
-            form_type = f"{old_form_data.get('checklistType', '').title()} Checklist"
-        
-        # Get customer info
         customer = session.get(Customer, submission.customer_id)
         customer_name = customer.name if customer else old_form_data.get('customerName', 'N/A')
         
-        notification_message = f"✏️ {form_type} updated by {user_name} for customer: {customer_name}"
+        # ✅ DETERMINE FORM TYPE AND GENERATE DETAILED CHANGES
+        form_type = "Form"
+        change_details = []
         
-        create_activity_notification(
-            session=session,
-            message=notification_message,
-            customer_id=submission.customer_id,
-            moved_by=user_name
-        )
+        if old_form_data.get('is_invoice'):
+            form_type = f"Invoice #{old_form_data.get('invoiceNumber', 'N/A')}"
+            change_details = detect_invoice_changes(old_form_data, updated_form_data)
+            
+        elif old_form_data.get('is_receipt'):
+            form_type = f"Receipt ({old_form_data.get('receiptType', 'Payment')})"
+            change_details = detect_receipt_changes(old_form_data, updated_form_data)
+            
+        elif old_form_data.get('checklistType') or updated_form_data.get('checklistType'):
+            checklist_type = old_form_data.get('checklistType') or updated_form_data.get('checklistType')
+            form_type = f"{checklist_type.title()} Checklist"
+            change_details = detect_checklist_changes(old_form_data, updated_form_data)
+        
+        else:
+            # Generic form changes
+            change_details = detect_generic_form_changes(old_form_data, updated_form_data)
+        
+        # ✅ BUILD DETAILED NOTIFICATION MESSAGE
+        if change_details and len(change_details) > 0:
+            # Format: Main message + detailed changes
+            notification_message = f"📋 {form_type} updated by {user_name} for customer: {customer_name}\n"
+            notification_message += "\n".join(change_details[:5])  # Limit to 5 changes for readability
+            
+            if len(change_details) > 5:
+                notification_message += f"\n... and {len(change_details) - 5} more changes"
+        else:
+            # Fallback if no specific changes detected
+            notification_message = f"📋 {form_type} updated by {user_name} for customer: {customer_name}"
+        
+        # ✅ CREATE ACTIVITY NOTIFICATION (Sales team will see this!)
+        try:
+            create_activity_notification(
+                session=session,
+                message=notification_message,
+                customer_id=submission.customer_id,
+                moved_by=user_name
+            )
+            
+            # ✅ STORE FORM_SUBMISSION_ID IN NOTIFICATION FOR "VIEW CHECKLIST" BUTTON
+            # Get the last notification we just created
+            last_notification = session.query(ProductionNotification).order_by(
+                ProductionNotification.created_at.desc()
+            ).first()
+            
+            if last_notification:
+                # Store the form submission ID so we can link to it
+                last_notification.form_submission_id = submission_id
+                # Also store checklist type if available
+                if old_form_data.get('checklistType'):
+                    last_notification.form_type = old_form_data.get('checklistType')
+        
+        except Exception as notif_error:
+            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
         
         session.commit()
 
@@ -1371,7 +1409,8 @@ def update_form_submission(submission_id):
         return jsonify({
             'success': True,
             'message': 'Form updated successfully',
-            'form_submission_id': submission.id
+            'form_submission_id': submission.id,
+            'changes_detected': len(change_details)
         }), 200
 
     except Exception as e:
@@ -1387,37 +1426,40 @@ def update_form_submission(submission_id):
 
 def detect_checklist_changes(old_data, new_data):
     """
-    Compare old and new checklist data and return a human-readable description of changes.
-    Returns a list of change descriptions.
+    Compare old and new checklist data and return detailed, human-readable changes.
+    This version provides SPECIFIC change descriptions for each field.
     """
     changes = []
     
-    # Check basic field changes
+    # Field labels for better readability
     field_labels = {
         'customerName': 'Customer Name',
         'customerAddress': 'Customer Address',
         'customerPhone': 'Customer Phone',
         'date': 'Date',
-        'fitters': 'Fitters'
+        'fitters': 'Fitters',
+        'checklistType': 'Checklist Type'
     }
     
+    # Check basic field changes
     for field, label in field_labels.items():
         old_val = str(old_data.get(field, '')).strip()
         new_val = str(new_data.get(field, '')).strip()
-        if old_val != new_val and (old_val or new_val):  # Only report if values are different and not both empty
+        
+        if old_val != new_val and (old_val or new_val):
             if old_val and new_val:
-                changes.append(f"{label} changed from '{old_val}' to '{new_val}'")
+                changes.append(f"✏️ {label}: '{old_val}' → '{new_val}'")
             elif new_val:
-                changes.append(f"{label} added: '{new_val}'")
+                changes.append(f"✅ Added {label}: {new_val}")
             else:
-                changes.append(f"{label} removed")
+                changes.append(f"❌ Removed {label}: {old_val}")
     
-    # Check items changes
+    # Check items changes (the most important part for checklists)
     old_items = old_data.get('items', [])
     new_items = new_data.get('items', [])
     
-    # Filter out empty items for accurate counting
     def is_non_empty_item(item):
+        """Check if an item has any meaningful content"""
         return any([
             item.get('item', '').strip(),
             item.get('remedialAction', '').strip(),
@@ -1432,15 +1474,24 @@ def detect_checklist_changes(old_data, new_data):
     # Report additions/removals
     if len(new_non_empty) > len(old_non_empty):
         diff = len(new_non_empty) - len(old_non_empty)
-        changes.append(f"➕ Added {diff} new item{'' if diff == 1 else 's'}")
+        changes.append(f"➕ Added {diff} new item{'s' if diff > 1 else ''} to checklist")
+        
+        # Show what was added (if reasonable number)
+        if diff <= 3:
+            added_items = new_non_empty[len(old_non_empty):]
+            for item in added_items:
+                item_name = item.get('item', 'Unknown Item').strip()
+                if len(item_name) > 40:
+                    item_name = item_name[:37] + "..."
+                changes.append(f"  • New item: {item_name}")
+    
     elif len(new_non_empty) < len(old_non_empty):
         diff = len(old_non_empty) - len(new_non_empty)
-        changes.append(f"➖ Removed {diff} item{'' if diff == 1 else 's'}")
+        changes.append(f"➖ Removed {diff} item{'s' if diff > 1 else ''} from checklist")
     
-    # Check for modifications in existing items (compare by position)
+    # Check for modifications in existing items
     min_length = min(len(old_items), len(new_items))
-    modifications_count = 0
-    detailed_modifications = []
+    item_modifications = []
     
     for i in range(min_length):
         old_item = old_items[i]
@@ -1450,34 +1501,197 @@ def detect_checklist_changes(old_data, new_data):
         if not is_non_empty_item(old_item) and not is_non_empty_item(new_item):
             continue
         
-        item_changes = []
+        field_changes = []
         
-        # Check each field
-        if str(old_item.get('item', '')).strip() != str(new_item.get('item', '')).strip():
-            item_changes.append("item name")
-        if str(old_item.get('remedialAction', '')).strip() != str(new_item.get('remedialAction', '')).strip():
-            item_changes.append("remedial action")
-        if str(old_item.get('colour', '')).strip() != str(new_item.get('colour', '')).strip():
-            item_changes.append("colour")
-        if str(old_item.get('size', '')).strip() != str(new_item.get('size', '')).strip():
-            item_changes.append("size")
-        if str(old_item.get('qty', '')).strip() != str(new_item.get('qty', '')).strip():
-            item_changes.append("quantity")
+        # Check item name
+        old_item_name = str(old_item.get('item', '')).strip()
+        new_item_name = str(new_item.get('item', '')).strip()
+        if old_item_name != new_item_name:
+            if old_item_name and new_item_name:
+                field_changes.append(f"item name: '{old_item_name}' → '{new_item_name}'")
+            elif new_item_name:
+                field_changes.append(f"added item name: '{new_item_name}'")
+            else:
+                field_changes.append(f"removed item name")
         
-        if item_changes:
-            modifications_count += 1
-            item_name = new_item.get('item', '').strip() or old_item.get('item', '').strip() or f"Item #{i+1}"
-            # Limit item name length for readability
-            if len(item_name) > 30:
-                item_name = item_name[:27] + "..."
-            detailed_modifications.append(f"• {item_name}: {', '.join(item_changes)}")
+        # Check remedial action
+        old_action = str(old_item.get('remedialAction', '')).strip()
+        new_action = str(new_item.get('remedialAction', '')).strip()
+        if old_action != new_action:
+            if old_action and new_action:
+                # Truncate long actions for readability
+                if len(new_action) > 50:
+                    new_action = new_action[:47] + "..."
+                field_changes.append(f"action updated to: '{new_action}'")
+            elif new_action:
+                if len(new_action) > 50:
+                    new_action = new_action[:47] + "..."
+                field_changes.append(f"added action: '{new_action}'")
+            else:
+                field_changes.append(f"removed action")
+        
+        # Check colour
+        old_colour = str(old_item.get('colour', '')).strip()
+        new_colour = str(new_item.get('colour', '')).strip()
+        if old_colour != new_colour:
+            if old_colour and new_colour:
+                field_changes.append(f"colour: '{old_colour}' → '{new_colour}'")
+            elif new_colour:
+                field_changes.append(f"added colour: '{new_colour}'")
+            else:
+                field_changes.append(f"removed colour")
+        
+        # Check size
+        old_size = str(old_item.get('size', '')).strip()
+        new_size = str(new_item.get('size', '')).strip()
+        if old_size != new_size:
+            if old_size and new_size:
+                field_changes.append(f"size: '{old_size}' → '{new_size}'")
+            elif new_size:
+                field_changes.append(f"added size: '{new_size}'")
+            else:
+                field_changes.append(f"removed size")
+        
+        # Check quantity
+        old_qty = str(old_item.get('qty', '')).strip()
+        new_qty = str(new_item.get('qty', '')).strip()
+        if old_qty != new_qty:
+            if old_qty and new_qty:
+                field_changes.append(f"qty: {old_qty} → {new_qty}")
+            elif new_qty:
+                field_changes.append(f"added qty: {new_qty}")
+            else:
+                field_changes.append(f"removed qty")
+        
+        if field_changes:
+            # Use the new item name or fallback to old name or position
+            display_name = new_item_name or old_item_name or f"Item #{i+1}"
+            if len(display_name) > 35:
+                display_name = display_name[:32] + "..."
+            
+            item_modifications.append(f"✏️ {display_name}: {', '.join(field_changes)}")
     
-    # Add modification summary
-    if modifications_count > 0:
-        changes.append(f"✏️ Modified {modifications_count} item{'' if modifications_count == 1 else 's'}")
-        # Add detailed modifications (limit to first 3 for notification clarity)
-        changes.extend(detailed_modifications[:3])
-        if len(detailed_modifications) > 3:
-            changes.append(f"... and {len(detailed_modifications) - 3} more changes")
+    # Add item modifications to changes (limit to first 5 for readability)
+    if item_modifications:
+        changes.extend(item_modifications[:5])
+        if len(item_modifications) > 5:
+            changes.append(f"... and {len(item_modifications) - 5} more item changes")
     
-    return changes
+    return changes if changes else ["Minor updates made"]
+
+def detect_invoice_changes(old_data, new_data):
+    """Detect changes in invoice data"""
+    changes = []
+    
+    # Check invoice-specific fields
+    invoice_fields = {
+        'invoiceNumber': 'Invoice Number',
+        'invoiceDate': 'Invoice Date',
+        'dueDate': 'Due Date',
+        'customerName': 'Customer Name',
+        'totalAmount': 'Total Amount',
+        'subTotal': 'Subtotal',
+        'vatAmount': 'VAT Amount',
+        'vatRate': 'VAT Rate'
+    }
+    
+    for field, label in invoice_fields.items():
+        old_val = str(old_data.get(field, '')).strip()
+        new_val = str(new_data.get(field, '')).strip()
+        
+        if old_val != new_val and (old_val or new_val):
+            # Special formatting for amounts
+            if 'Amount' in label or 'Total' in label:
+                if old_val and new_val:
+                    changes.append(f"✏️ {label}: £{old_val} → £{new_val}")
+                elif new_val:
+                    changes.append(f"✅ Added {label}: £{new_val}")
+            else:
+                if old_val and new_val:
+                    changes.append(f"✏️ {label}: '{old_val}' → '{new_val}'")
+                elif new_val:
+                    changes.append(f"✅ Added {label}: {new_val}")
+    
+    # Check line items changes
+    old_items = old_data.get('items', [])
+    new_items = new_data.get('items', [])
+    
+    if len(new_items) > len(old_items):
+        diff = len(new_items) - len(old_items)
+        changes.append(f"➕ Added {diff} line item{'s' if diff > 1 else ''}")
+    elif len(new_items) < len(old_items):
+        diff = len(old_items) - len(new_items)
+        changes.append(f"➖ Removed {diff} line item{'s' if diff > 1 else ''}")
+    
+    return changes if changes else ["Invoice details updated"]
+
+
+def detect_receipt_changes(old_data, new_data):
+    """Detect changes in receipt data"""
+    changes = []
+    
+    receipt_fields = {
+        'receiptType': 'Receipt Type',
+        'receiptDate': 'Receipt Date',
+        'customerName': 'Customer Name',
+        'paidAmount': 'Paid Amount',
+        'totalPaidToDate': 'Total Paid to Date',
+        'balanceToPay': 'Balance to Pay',
+        'paymentDescription': 'Payment Description'
+    }
+    
+    for field, label in receipt_fields.items():
+        old_val = str(old_data.get(field, '')).strip()
+        new_val = str(new_data.get(field, '')).strip()
+        
+        if old_val != new_val and (old_val or new_val):
+            # Special formatting for amounts
+            if 'Amount' in label or 'Balance' in label or 'Paid' in label:
+                if old_val and new_val:
+                    changes.append(f"✏️ {label}: £{old_val} → £{new_val}")
+                elif new_val:
+                    changes.append(f"✅ {label}: £{new_val}")
+            else:
+                if old_val and new_val:
+                    changes.append(f"✏️ {label}: '{old_val}' → '{new_val}'")
+                elif new_val:
+                    changes.append(f"✅ Added {label}: {new_val}")
+    
+    return changes if changes else ["Receipt details updated"]
+
+
+def detect_generic_form_changes(old_data, new_data):
+    """Detect changes in generic form data"""
+    changes = []
+    
+    # Get all keys from both old and new data
+    all_keys = set(old_data.keys()) | set(new_data.keys())
+    
+    # Skip certain meta fields
+    skip_fields = {'token', 'form_type', 'is_invoice', 'is_receipt', 'checklistType'}
+    
+    for key in all_keys:
+        if key in skip_fields:
+            continue
+        
+        old_val = str(old_data.get(key, '')).strip()
+        new_val = str(new_data.get(key, '')).strip()
+        
+        if old_val != new_val and (old_val or new_val):
+            field_name = key.replace('_', ' ').title()
+            
+            if old_val and new_val:
+                # Truncate long values
+                if len(old_val) > 30:
+                    old_val = old_val[:27] + "..."
+                if len(new_val) > 30:
+                    new_val = new_val[:27] + "..."
+                changes.append(f"✏️ {field_name}: '{old_val}' → '{new_val}'")
+            elif new_val:
+                if len(new_val) > 50:
+                    new_val = new_val[:47] + "..."
+                changes.append(f"✅ Added {field_name}: {new_val}")
+            else:
+                changes.append(f"❌ Removed {field_name}")
+    
+    return changes if changes else ["Form data updated"]

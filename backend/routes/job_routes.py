@@ -1,9 +1,10 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
+import uuid  # ✅ ADD THIS IMPORT
 from ..models import (
     Job, Customer, Team, Fitter, Salesperson, 
     JobDocument, JobFormLink, FormSubmission, 
-    JobNote, Quotation
+    JobNote, Quotation  # ✅ JobNote already imported
 )
 from ..db import SessionLocal
 
@@ -26,7 +27,7 @@ def serialize_job(job):
         'job_name': job.job_name,
         'customer_id': job.customer_id,
         'customer_name': job.customer.name if job.customer else None,
-        'job_type': job.job_type,  # Changed from 'type' to 'job_type'
+        'job_type': job.job_type,
         'stage': job.stage,
         'priority': job.priority,
         'measure_date': job.measure_date.isoformat() if job.measure_date else None,
@@ -145,8 +146,9 @@ def create_job():
                     return None
             return None
         
-        # Create new job
+        # ✅ CRITICAL FIX: Generate UUID for job ID
         job = Job(
+            id=str(uuid.uuid4()),  # ✅ ADD THIS LINE - Generate UUID
             job_reference=job_reference,
             job_name=data.get('job_name'),
             customer_id=data['customer_id'],
@@ -167,7 +169,7 @@ def create_job():
             primary_fitter_id=data.get('primary_fitter') if data.get('primary_fitter') else None,
             salesperson_id=data.get('salesperson') if data.get('salesperson') else None,
             assigned_team_name=data.get('team_member'),  # Store team member name
-            notes=data.get('notes'),
+            notes=data.get('notes', ''),  # ✅ Default to empty string
             has_counting_sheet=data.get('create_counting_sheet', False),
             has_schedule=data.get('create_schedule', False),
             has_invoice=data.get('generate_invoice', False)
@@ -178,24 +180,28 @@ def create_job():
         
         print(f"Created job with ID: {job.id}")
         
-        # ✅ NEW: Create notification for job creation
-        from backend.routes.notification_routes import create_activity_notification
-        
-        # Get user name (if available from request context, otherwise use 'System')
-        user_name = data.get('created_by', 'System')
-        
-        # Create notification message
-        job_name_display = data.get('job_name') or f"{data['job_type']} Job"
-        
-        create_activity_notification(
-            session=session,
-            message=f"💼 New job created for customer '{customer.name}': {job_name_display} ({data['job_type']}) - Ref: {job_reference}",
-            job_id=job.id,
-            customer_id=customer.id,
-            moved_by=user_name
-        )
-        
-        print(f"✅ Notification created for job {job.id}")
+        # ✅ Create notification for job creation
+        try:
+            from backend.routes.notification_routes import create_activity_notification
+            
+            # Get user name (if available from request context, otherwise use 'System')
+            user_name = data.get('created_by', 'System')
+            
+            # Create notification message
+            job_name_display = data.get('job_name') or f"{data['job_type']} Job"
+            
+            create_activity_notification(
+                session=session,
+                message=f"💼 New job created for customer '{customer.name}': {job_name_display} ({data['job_type']}) - Ref: {job_reference}",
+                job_id=job.id,
+                customer_id=customer.id,
+                moved_by=user_name
+            )
+            
+            print(f"✅ Notification created for job {job.id}")
+        except Exception as notif_error:
+            print(f"⚠️ Failed to create notification: {notif_error}")
+            # Continue without notification - don't fail the job creation
         
         # Link attached forms if provided
         attached_forms = data.get('attached_forms', [])
@@ -229,6 +235,8 @@ def create_job():
         
     except Exception as e:
         print(f"Error creating job: {str(e)}")
+        import traceback
+        traceback.print_exc()  # ✅ Print full traceback for debugging
         session.rollback()
         return jsonify({'error': str(e)}), 500
     finally:

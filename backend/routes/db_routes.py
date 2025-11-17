@@ -279,7 +279,7 @@ def _extract_stage_from_payload(data: dict) -> Optional[str]:
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
-    """Update customer stage - FIXED VERSION"""
+    """Update customer stage - ENHANCED VERSION with all important stage notifications"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -328,22 +328,59 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # Handle notification for Accepted stage
+        # ✅ ENHANCED: Create notifications for multiple important stages
         notification_created = False
-        if new_stage == 'Accepted':
-            try:
-                linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
-                notification = ProductionNotification(
+        
+        try:
+            from backend.routes.notification_routes import create_activity_notification
+            
+            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
+            
+            # Define stage-specific notification messages
+            stage_notifications = {
+                'Accepted': {
+                    'emoji': '✅',
+                    'message': f"Customer '{customer.name}' accepted the quote and moved to Accepted stage",
+                    'create': True
+                },
+                'Production': {
+                    'emoji': '🏭',
+                    'message': f"Customer '{customer.name}' is now in Production - Manufacturing started",
+                    'create': True
+                },
+                'Delivery': {
+                    'emoji': '🚚',
+                    'message': f"🚚 Customer '{customer.name}' is ready for delivery! Project completed and awaiting delivery",
+                    'create': True
+                },
+                'Installation': {
+                    'emoji': '🔧',
+                    'message': f"Installation scheduled for customer '{customer.name}'",
+                    'create': True
+                },
+                'Complete': {
+                    'emoji': '🎉',
+                    'message': f"🎉 Project COMPLETED for customer '{customer.name}'! Job finished successfully",
+                    'create': True
+                }
+            }
+            
+            # Create notification if it's an important stage
+            if new_stage in stage_notifications:
+                stage_config = stage_notifications[new_stage]
+                
+                create_activity_notification(
+                    session=session,
                     job_id=linked_job.id if linked_job else None,
                     customer_id=customer.id,
-                    message=f"Customer '{customer.name}' moved to Accepted",
+                    message=stage_config['message'],
                     moved_by=updated_by_user
                 )
-                session.add(notification)
                 notification_created = True
-                current_app.logger.info(f"📢 Created notification for customer {customer_id}")
-            except Exception as notif_error:
-                current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
+                current_app.logger.info(f"📢 Created {new_stage} notification for customer {customer_id}")
+                
+        except Exception as notif_error:
+            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
         
         # Commit the transaction
         session.commit()
@@ -812,6 +849,7 @@ def handle_single_project(project_id):
 @db_bp.route('/projects/<string:project_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_project_stage(project_id):
+    """Update project stage - ENHANCED VERSION with all important stage notifications"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -829,13 +867,6 @@ def update_project_stage(project_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
-        valid_stages = [
-            "Lead", "Survey", "Design", "Quote",
-            "Accepted", "OnHold", "Ordered",
-            "Production", "Delivery", "Installation",
-            "Complete", "Remedial", "Cancelled"
-        ]
-
         if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
@@ -852,6 +883,52 @@ def update_project_stage(project_id):
         project.updated_at = datetime.utcnow()
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         project.notes = (project.notes or '') + note_entry
+
+        # ✅ ENHANCED: Create notifications for all important stages
+        try:
+            from backend.routes.notification_routes import create_activity_notification
+            
+            project_display_name = project.project_name or f"Project #{project.id[:8]}"
+            customer_name = project.customer.name if project.customer else "Unknown Customer"
+            
+            # Define stage-specific notification messages for projects
+            stage_notifications = {
+                'Accepted': {
+                    'emoji': '✅',
+                    'message': f"Project '{project_display_name}' for {customer_name} has been accepted",
+                },
+                'Production': {
+                    'emoji': '🏭',
+                    'message': f"Project '{project_display_name}' for {customer_name} is now in Production",
+                },
+                'Delivery': {
+                    'emoji': '🚚',
+                    'message': f"🚚 Project '{project_display_name}' for {customer_name} is ready for delivery!",
+                },
+                'Installation': {
+                    'emoji': '🔧',
+                    'message': f"Installation started for project '{project_display_name}' - {customer_name}",
+                },
+                'Complete': {
+                    'emoji': '🎉',
+                    'message': f"🎉 Project '{project_display_name}' for {customer_name} has been COMPLETED!",
+                }
+            }
+            
+            # Create notification if it's an important stage
+            if new_stage in stage_notifications:
+                stage_config = stage_notifications[new_stage]
+                
+                create_activity_notification(
+                    session=session,
+                    customer_id=project.customer_id,
+                    message=stage_config['message'],
+                    moved_by=updated_by_user
+                )
+                current_app.logger.info(f"📢 Created {new_stage} notification for project {project.id}")
+                
+        except Exception as notif_error:
+            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
 
         session.flush()
         session.commit()

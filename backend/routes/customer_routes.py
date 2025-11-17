@@ -8,6 +8,7 @@ import json
 
 # 👈 NEW IMPORT: Required for all database write operations
 from ..db import SessionLocal 
+from backend.routes.notification_routes import create_activity_notification  # ✅ ADD THIS IMPORT
 
 
 customer_bp = Blueprint('customers', __name__)
@@ -130,7 +131,7 @@ def get_customers():
                 'phone': customer.phone or '',
                 'email': customer.email or '',
                 'address': customer.address or '',
-                'postcode': customer.postcode or '',
+                'postcode': customer.postcode or '',  # ✅ This should work if column exists
                 'salesperson': customer.salesperson or '',
                 'contact_made': customer.contact_made or 'Unknown',
                 'preferred_contact_method': customer.preferred_contact_method or 'Phone',
@@ -176,7 +177,7 @@ def get_customers():
                     f"✅ Customer {customer.name}: "
                     f"Jobs={len(customer_jobs)}, Projects={len(customer_projects)}, "
                     f"Total={total_project_count}, Stage={display_stage}, "
-                    f"Forms={form_count}, Drawings={drawing_count}"
+                    f"Forms={form_count}, Drawings={drawing_count}, FormDocs={form_doc_count}"
                 )
             
             result.append(customer_data)
@@ -474,14 +475,17 @@ def create_project(customer_id):
         session.add(new_project)
         
         # ✅ ENHANCED NOTIFICATION: Create notification for project creation
-        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
-        
-        create_activity_notification(
-            session=session,
-            message=f"➕ New {data.get('project_type', 'project')} created for customer '{customer.name}' - {data.get('project_name')}",
-            customer_id=customer_id,
-            moved_by=user_name
-        )
+        try:
+            user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+            
+            create_activity_notification(
+                session=session,
+                message=f"➕ New {data.get('project_type', 'project')} created for customer '{customer.name}' - {data.get('project_name')}",
+                customer_id=customer_id,
+                moved_by=user_name
+            )
+        except Exception as notif_error:
+            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
         
         # Update customer stage if this is the first project
         existing_project_count = session.query(Project).filter_by(customer_id=customer_id).count()
@@ -495,21 +499,24 @@ def create_project(customer_id):
             important_stages = ['Accepted', 'Production', 'Delivery', 'Installation', 'Complete']
             
             if new_project.stage in important_stages and old_customer_stage != new_project.stage:
-                stage_emoji = {
-                    'Accepted': '✅',
-                    'Production': '🏭',
-                    'Delivery': '🚚',
-                    'Installation': '🔧',
-                    'Complete': '🎉'
-                }
-                emoji = stage_emoji.get(new_project.stage, '🔄')
-                
-                create_activity_notification(
-                    session=session,
-                    message=f"{emoji} Customer '{customer.name}' moved from {old_customer_stage} to {new_project.stage} stage",
-                    customer_id=customer_id,
-                    moved_by=user_name
-                )
+                try:
+                    stage_emoji = {
+                        'Accepted': '✅',
+                        'Production': '🏭',
+                        'Delivery': '🚚',
+                        'Installation': '🔧',
+                        'Complete': '🎉'
+                    }
+                    emoji = stage_emoji.get(new_project.stage, '🔄')
+                    
+                    create_activity_notification(
+                        session=session,
+                        message=f"{emoji} Customer '{customer.name}' moved from {old_customer_stage} to {new_project.stage} stage",
+                        customer_id=customer_id,
+                        moved_by=user_name
+                    )
+                except Exception as notif_error:
+                    current_app.logger.warning(f"⚠️ Failed to create stage notification: {notif_error}")
         
         session.commit()
         

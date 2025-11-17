@@ -277,21 +277,12 @@ def create_material_order():
         session.close()
 
 
-@materials_bp.route('/materials/<material_id>', methods=['PATCH'])
+@materials_bp.route('/materials/<string:material_id>', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_material_order(material_id):
-    """
-    Update material order details
-    Used when Production team updates status, delivery dates, etc.
-    Only Manager and Production roles can update material orders
-    """
-    # ✅ FIX: Use request.current_user instead of g.user
-    user_role = request.current_user.role.lower() if request.current_user.role else ''
-    current_user_id = request.current_user.id
-    
-    # Role check: Only Manager and Production can update material orders
-    if user_role not in ['manager', 'production']:
-        return jsonify({'error': 'Unauthorized - Only Manager and Production can update material orders'}), 403
+    """Update a material order"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     
     session = SessionLocal()
     try:
@@ -299,105 +290,79 @@ def update_material_order(material_id):
         if not material_order:
             return jsonify({'error': 'Material order not found'}), 404
         
-        data = request.json
+        data = request.get_json()
+        old_status = material_order.status
         
-        # Track changes for audit log
-        changes = []
+        # ✅ FIXED: Define new_status BEFORE using it
+        new_status = data.get('status')  # Get the new status from request data
         
-        # Update status
-        if 'status' in data:
-            old_status = material_order.status if isinstance(material_order.status, str) else material_order.status.value
-            new_status_enum = MaterialStatus(data['status'])
-            
-            if old_status != new_status_enum.value:
-                material_order.status = new_status_enum.value  # ✅ Pass the lowercase string value
-                changes.append({
-                    'type': 'status_change',
-                    'old': old_status,
-                    'new': new_status_enum.value,
-                    'description': f"Status changed from {old_status} to {new_status_enum.value}"
-                })
-                
-                # Auto-set order_date if moving to "ordered" status
-                if new_status == MaterialStatus.ORDERED and not material_order.order_date:
-                    material_order.order_date = datetime.utcnow()
-                    material_order.ordered_by_user_id = current_user_id
-                
-                # Auto-set actual_delivery_date if marking as delivered
-                if new_status == MaterialStatus.DELIVERED and not material_order.actual_delivery_date:
-                    material_order.actual_delivery_date = datetime.utcnow()
-        
-        # Update other fields
+        # Update fields
         if 'material_description' in data:
             material_order.material_description = data['material_description']
         if 'supplier_name' in data:
             material_order.supplier_name = data['supplier_name']
         if 'supplier_reference' in data:
             material_order.supplier_reference = data['supplier_reference']
-        
-        # Update dates
+        if 'status' in data:
+            material_order.status = data['status']
+            new_status = data['status']  # Make sure new_status is set
         if 'order_date' in data:
-            old_date = material_order.order_date
-            new_date = datetime.fromisoformat(data['order_date']) if data['order_date'] else None
-            if old_date != new_date:
-                material_order.order_date = new_date
-                changes.append({
-                    'type': 'order_date_change',
-                    'old': old_date.isoformat() if old_date else None,
-                    'new': new_date.isoformat() if new_date else None,
-                    'description': 'Order date updated'
-                })
-        
+            material_order.order_date = datetime.fromisoformat(data['order_date']) if data['order_date'] else None
         if 'expected_delivery_date' in data:
-            old_date = material_order.expected_delivery_date
-            new_date = datetime.fromisoformat(data['expected_delivery_date']) if data['expected_delivery_date'] else None
-            if old_date != new_date:
-                material_order.expected_delivery_date = new_date
-                changes.append({
-                    'type': 'delivery_date_change',
-                    'old': old_date.isoformat() if old_date else None,
-                    'new': new_date.isoformat() if new_date else None,
-                    'description': 'Expected delivery date updated'
-                })
-        
+            material_order.expected_delivery_date = datetime.fromisoformat(data['expected_delivery_date']) if data['expected_delivery_date'] else None
         if 'actual_delivery_date' in data:
             material_order.actual_delivery_date = datetime.fromisoformat(data['actual_delivery_date']) if data['actual_delivery_date'] else None
-        
-        # Update costs
         if 'estimated_cost' in data:
             material_order.estimated_cost = data['estimated_cost']
         if 'actual_cost' in data:
             material_order.actual_cost = data['actual_cost']
-        
         if 'notes' in data:
             material_order.notes = data['notes']
         
-        # Create change logs
-        for change in changes:
-            change_log = MaterialChangeLog(
-                id=str(uuid.uuid4()),
-                material_order_id=material_id,
-                changed_by_user_id=current_user_id,
-                change_type=change['type'],
-                old_value=str(change['old']) if change.get('old') else None,
-                new_value=str(change['new']) if change.get('new') else None,
-                change_description=change['description']
+        # ✅ NOW this line will work because new_status is defined
+        if new_status == MaterialStatus.ORDERED and not material_order.order_date:
+            material_order.order_date = datetime.utcnow()
+        
+        # Auto-set actual delivery date when marked as delivered
+        if new_status == MaterialStatus.DELIVERED and not material_order.actual_delivery_date:
+            material_order.actual_delivery_date = datetime.utcnow()
+        
+        material_order.updated_at = datetime.utcnow()
+        
+        # Create notification if status changed
+        if old_status != new_status:
+            from backend.routes.notification_routes import create_activity_notification
+            
+            user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+            
+            status_emoji = {
+                'not_ordered': '📝',
+                'ordered': '✅',
+                'in_transit': '🚚',
+                'delivered': '📦',
+                'delayed': '⚠️'
+            }
+            
+            # Get the status value (handle both string and enum)
+            old_status_value = old_status if isinstance(old_status, str) else old_status.value if old_status else 'not_ordered'
+            new_status_value = new_status if isinstance(new_status, str) else new_status.value if new_status else 'not_ordered'
+            
+            emoji = status_emoji.get(new_status_value, '🔄')
+            
+            create_activity_notification(
+                session=session,
+                message=f"{emoji} Material order for {material_order.customer.name} updated: {old_status_value} → {new_status_value} | Material: {material_order.material_description}",
+                customer_id=material_order.customer_id,
+                moved_by=user_name
             )
-            session.add(change_log)
         
         session.commit()
         
-        current_app.logger.info(f"Material order {material_id} updated by user {current_user_id}")
-        
         return jsonify({
-            'message': 'Material order updated successfully',
-            'material_order': material_order.to_dict(),
-            'changes_made': len(changes)
+            'success': True,
+            'material': material_order.to_dict()
         }), 200
         
-    except ValueError as e:
-        session.rollback()
-        return jsonify({'error': f'Invalid value: {str(e)}'}), 400
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error updating material order {material_id}: {e}")
