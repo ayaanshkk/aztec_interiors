@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Optional
 from flask import Blueprint, request, jsonify, current_app
 import json
@@ -185,7 +186,7 @@ def handle_single_customer(customer_id):
 
 PIPELINE_STAGE_ORDER = [
     "Lead", "Survey", "Design", "Quote",
-    "Accepted", "OnHold", "Ordered",
+    "Accepted", "Rejected", "Ordered",
     "Production", "Delivery", "Installation",
     "Complete", "Remedial", "Cancelled"
 ]
@@ -279,7 +280,7 @@ def _extract_stage_from_payload(data: dict) -> Optional[str]:
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
-    """Update customer stage - ENHANCED VERSION with all important stage notifications"""
+    """Update customer stage - ENHANCED VERSION with all important stage notifications AND auto-assignment creation"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -328,11 +329,13 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # ✅ ENHANCED: Create notifications for multiple important stages
+        # ✅ ENHANCED: Create notifications for multiple important stages AND assignments for Accepted
         notification_created = False
+        assignment_created = False
         
         try:
             from backend.routes.notification_routes import create_activity_notification
+            from datetime import timedelta
             
             linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
             
@@ -378,9 +381,29 @@ def update_customer_stage(customer_id):
                 )
                 notification_created = True
                 current_app.logger.info(f"📢 Created {new_stage} notification for customer {customer_id}")
+            
+            # ✅ AUTO-CREATE ASSIGNMENT FOR PRODUCTION TEAM WHEN MOVED TO ACCEPTED
+            if new_stage == 'Accepted':
+                assignment = Assignment(
+                    id=str(uuid.uuid4()),
+                    type='job',
+                    title=f"Order materials for {customer.name}",
+                    date=(datetime.utcnow() + timedelta(days=1)).date(),
+                    team_member='Production Team',
+                    customer_id=customer.id,
+                    job_id=linked_job.id if linked_job else None,
+                    notes=f"Order all necessary materials for {customer.name}'s project",
+                    priority='High',
+                    status='Scheduled',
+                    created_by=None,
+                    created_at=datetime.utcnow()
+                )
+                session.add(assignment)
+                assignment_created = True
+                current_app.logger.info(f"📋 Created material order assignment for customer {customer_id}")
                 
         except Exception as notif_error:
-            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
+            current_app.logger.warning(f"⚠️ Failed to create notification or assignment: {notif_error}")
         
         # Commit the transaction
         session.commit()
@@ -393,7 +416,8 @@ def update_customer_stage(customer_id):
             'old_stage': old_stage,
             'new_stage': new_stage,
             'stage_updated': True,
-            'notification_sent': notification_created
+            'notification_sent': notification_created,
+            'assignment_created': assignment_created
         }), 200
 
     except Exception as e:
@@ -625,6 +649,29 @@ def update_job_stage(job_id):
                 moved_by=updated_by_user
             )
             session.add(notification)
+
+            from datetime import timedelta
+            
+            customer = session.query(Customer).filter_by(id=job.customer_id).first()
+            customer_name = customer.name if customer else "Unknown Customer"
+            
+            assignment = Assignment(
+                id=str(uuid.uuid4()),
+                type='job',
+                title=f"Order materials for {customer_name}",
+                date=(datetime.utcnow() + timedelta(days=1)).date(),
+                team_member='Production Team',
+                customer_id=job.customer_id,
+                job_id=job.id,
+                notes=f"Order all necessary materials for {customer_name}'s project",
+                priority='High',
+                status='Scheduled',
+                created_by=None,
+                created_at=datetime.utcnow()
+            )
+            session.add(assignment)
+            assignment_created = True
+            current_app.logger.info(f"📋 Created material order assignment for job {job.id}")
 
         # Simplified customer sync logic
         customer = session.query(Customer).filter_by(id=job.customer_id).first()
@@ -984,16 +1031,33 @@ def handle_assignments():
             session.commit()
             return jsonify({'id': assignment.id, 'message': 'Assignment created successfully'}), 201
 
-        # FIXED: Uses session.query
-        assignments = session.query(Assignment).order_by(Assignment.created_at.desc()).all()
+        # GET - Filter by user role
+        current_user_role = request.current_user.role if hasattr(request, 'current_user') else None
+        
+        # ✅ FILTER ASSIGNMENTS BY ROLE
+        if current_user_role == 'Production':
+            # Production users only see assignments for "Production Team"
+            assignments = session.query(Assignment).filter(
+                Assignment.team_member == 'Production Team'
+            ).order_by(Assignment.date.asc()).all()
+        elif current_user_role == 'Manager':
+            # Managers see all assignments
+            assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
+        else:
+            # Other roles see assignments assigned to them
+            user_id = request.current_user.id if hasattr(request, 'current_user') else None
+            assignments = session.query(Assignment).filter(
+                Assignment.user_id == user_id
+            ).order_by(Assignment.date.asc()).all()
+        
         return jsonify([a.to_dict() for a in assignments])
+        
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error in /assignments: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 # ------------------ FITTERS ------------------
 

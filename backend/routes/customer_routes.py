@@ -16,18 +16,21 @@ customer_bp = Blueprint('customers', __name__)
 # Define stage hierarchy for determining "most advanced" stage
 STAGE_HIERARCHY = {
     "Lead": 0,
-    "Survey": 1,
-    "Design": 2,
-    "Quote": 3,
-    "Accepted": 4,
-    "OnHold": 5,
-    "Ordered": 6,
-    "Production": 7,
-    "Delivery": 8,
-    "Installation": 9,
-    "Complete": 10,
-    "Remedial": 11,
-    "Cancelled": 12
+    "Quote": 1,
+    "Consultation": 2,
+    "Survey": 3,
+    "Measure": 4,
+    "Design": 5,
+    "Quoted": 6,
+    "Accepted": 7,  # ✅ MAKE SURE THIS EXISTS
+    "Rejected": 8,
+    "Ordered": 9,
+    "Production": 10,
+    "Delivery": 11,
+    "Installation": 12,
+    "Complete": 13,
+    "Remedial": 14,
+    "Cancelled": 15
 }
 
 def get_most_advanced_stage(stages):
@@ -92,31 +95,23 @@ def get_customers():
     
     session = SessionLocal()
     try:
-        # ✅ Fetch all customers
         customers = session.query(Customer).all()
         
         current_app.logger.info(f"📊 Fetching data for {len(customers)} customers")
         
-        # ✅ Build result with document counts AND correct stage
         result = []
         for customer in customers:
-            # Count form submissions for this customer
             form_count = session.query(CustomerFormData).filter_by(customer_id=customer.id).count()
-            
-            # Count drawing documents for this customer
             drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
-            
-            # Count form documents for this customer (Excel/PDF uploads)
             form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
             
-            # 🔑 CRITICAL FIX: Get all linked jobs and projects to determine actual stage
+            # Get all linked jobs and projects
             customer_jobs = session.query(Job).filter_by(customer_id=customer.id).all()
             customer_projects = session.query(Project).filter_by(customer_id=customer.id).all()
             
-            # Calculate total project count (Jobs + Projects)
             total_project_count = len(customer_jobs) + len(customer_projects)
             
-            # Collect all stages (customer + jobs + projects)
+            # Collect all stages
             all_stages = [customer.stage]
             all_stages.extend([job.stage for job in customer_jobs if job.stage])
             all_stages.extend([project.stage for project in customer_projects if project.stage])
@@ -124,14 +119,17 @@ def get_customers():
             # Get the most advanced stage
             display_stage = get_most_advanced_stage(all_stages)
             
-            # ✅ FIX: Build response manually instead of using to_dict()
+            # ✅ LOG ACCEPTED CUSTOMERS
+            if display_stage == 'Accepted':
+                current_app.logger.info(f"✅ ACCEPTED Customer: {customer.name} (ID: {customer.id})")
+            
             customer_data = {
                 'id': customer.id,
                 'name': customer.name,
                 'phone': customer.phone or '',
                 'email': customer.email or '',
                 'address': customer.address or '',
-                'postcode': customer.postcode or '',  # ✅ This should work if column exists
+                'postcode': customer.postcode or '',
                 'salesperson': customer.salesperson or '',
                 'contact_made': customer.contact_made or 'Unknown',
                 'preferred_contact_method': customer.preferred_contact_method or 'Phone',
@@ -143,12 +141,8 @@ def get_customers():
                 'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
                 'created_by': customer.created_by,
                 'updated_by': customer.updated_by,
-                
-                # ✅ CRITICAL: Use calculated values, not from to_dict()
-                'stage': display_stage,  # ✅ Most advanced stage
-                'project_count': total_project_count,  # ✅ Actual count
-                
-                # ✅ Ensure these are integers
+                'stage': display_stage,
+                'project_count': total_project_count,
                 'form_count': int(form_count),
                 'drawing_count': int(drawing_count),
                 'form_document_count': int(form_doc_count),
@@ -156,7 +150,7 @@ def get_customers():
                 'has_forms': form_count > 0 or form_doc_count > 0,
             }
             
-            # Handle project_types JSON field
+            # Handle project_types
             project_types_value = customer.project_types
             if project_types_value is None:
                 project_types_value = []
@@ -170,19 +164,12 @@ def get_customers():
                 project_types_value = []
             
             customer_data['project_types'] = project_types_value
-            
-            # Enhanced logging for debugging
-            if total_project_count > 0:
-                current_app.logger.info(
-                    f"✅ Customer {customer.name}: "
-                    f"Jobs={len(customer_jobs)}, Projects={len(customer_projects)}, "
-                    f"Total={total_project_count}, Stage={display_stage}, "
-                    f"Forms={form_count}, Drawings={drawing_count}, FormDocs={form_doc_count}"
-                )
-            
             result.append(customer_data)
 
-        current_app.logger.info(f"📤 Returning {len(result)} customers with correct data")
+        # ✅ LOG TOTAL ACCEPTED CUSTOMERS
+        accepted_count = len([c for c in result if c['stage'] == 'Accepted'])
+        current_app.logger.info(f"📊 Total customers: {len(result)}, Accepted: {accepted_count}")
+        
         return jsonify(result), 200
 
     except Exception as e:
