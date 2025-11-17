@@ -1,11 +1,11 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
-from models import (
+from ..models import (
     Job, Customer, Team, Fitter, Salesperson, 
     JobDocument, JobFormLink, FormSubmission, 
     JobNote, Quotation
 )
-from db import SessionLocal
+from ..db import SessionLocal
 
 job_bp = Blueprint('jobs', __name__)
 
