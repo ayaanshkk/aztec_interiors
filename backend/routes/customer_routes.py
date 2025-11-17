@@ -8,7 +8,7 @@ import json
 
 # 👈 NEW IMPORT: Required for all database write operations
 from ..db import SessionLocal 
-from backend.routes.notification_routes import create_activity_notification  # ✅ ADD THIS IMPORT
+from .notification_routes import create_activity_notification  # ✅ ADD THIS IMPORT
 
 
 customer_bp = Blueprint('customers', __name__)
@@ -88,7 +88,10 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED STAGE."""
+    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED STAGE.
+    
+    ✅ OPTIMIZED: Now includes document counts in response to avoid frontend making 2 API calls per customer
+    """
     
     if request.method == 'OPTIONS':
         return jsonify({}), 200
@@ -123,6 +126,10 @@ def get_customers():
             if display_stage == 'Accepted':
                 current_app.logger.info(f"✅ ACCEPTED Customer: {customer.name} (ID: {customer.id})")
             
+            # ✅ OPTIMIZATION: Calculate total document count IN BACKEND
+            # This eliminates the need for frontend to make 2 API calls per customer
+            total_documents = int(drawing_count) + int(form_count) + int(form_doc_count)
+            
             customer_data = {
                 'id': customer.id,
                 'name': customer.name,
@@ -146,6 +153,9 @@ def get_customers():
                 'form_count': int(form_count),
                 'drawing_count': int(drawing_count),
                 'form_document_count': int(form_doc_count),
+                # ✅ NEW FIELDS for red alert icon
+                'total_documents': total_documents,  # Total count of all documents
+                'has_documents': total_documents > 0,  # Boolean: does customer have ANY documents?
                 'has_drawings': drawing_count > 0,
                 'has_forms': form_count > 0 or form_doc_count > 0,
             }
@@ -168,7 +178,9 @@ def get_customers():
 
         # ✅ LOG TOTAL ACCEPTED CUSTOMERS
         accepted_count = len([c for c in result if c['stage'] == 'Accepted'])
-        current_app.logger.info(f"📊 Total customers: {len(result)}, Accepted: {accepted_count}")
+        customers_without_docs = len([c for c in result if c['total_documents'] == 0])
+        
+        current_app.logger.info(f"📊 Total customers: {len(result)}, Accepted: {accepted_count}, Without documents: {customers_without_docs}")
         
         return jsonify(result), 200
 

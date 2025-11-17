@@ -1,13 +1,15 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, date
 import uuid
+import traceback
 from ..models import (
     Job, Customer, Team, Fitter, Salesperson, 
     JobDocument, JobFormLink, FormSubmission, 
-    JobNote, Quotation
+    JobNote, Quotation, Assignment # Ensure Assignment is imported
 )
 from ..db import SessionLocal
 from .auth_helpers import token_required
+from sqlalchemy import func
 
 job_bp = Blueprint('jobs', __name__)
 
@@ -149,13 +151,14 @@ def create_job():
         def parse_date(date_str):
             if date_str:
                 try:
-                    return datetime.strptime(date_str, '%Y-%m-%d')
+                    # Accepts ISO format string and returns datetime object
+                    return datetime.strptime(date_str.split('T')[0], '%Y-%m-%d')
                 except ValueError:
                     print(f"Invalid date format: {date_str}")
                     return None
             return None
         
-        # ✅ Use customer's address as installation address if not provided
+        # Use customer's address as installation address if not provided
         installation_address = data.get('installation_address') or customer.address
         
         job = Job(
@@ -175,12 +178,12 @@ def create_job():
             deposit1=data.get('deposit1'),
             deposit2=data.get('deposit2'),
             deposit_due_date=parse_date(data.get('deposit_due_date')),
-            installation_address=installation_address,  # ✅ Use customer address
+            installation_address=installation_address,  # Use customer address
             assigned_team_id=data.get('assigned_team') if data.get('assigned_team') else None,
             primary_fitter_id=data.get('primary_fitter') if data.get('primary_fitter') else None,
             salesperson_id=data.get('salesperson') if data.get('salesperson') else None,
             assigned_team_name=data.get('team_member'),
-            salesperson_name=data.get('salesperson_name') or customer.salesperson,  # ✅ Use from data or customer
+            salesperson_name=data.get('salesperson_name') or customer.salesperson,  # Use from data or customer
             notes=data.get('notes', ''),
             has_counting_sheet=data.get('create_counting_sheet', False),
             has_schedule=data.get('create_schedule', False),
@@ -208,6 +211,8 @@ def create_job():
             )
             
             print(f"✅ Notification created for job {job.id}")
+        except ImportError:
+             print("⚠️ Warning: Notification function not found.")
         except Exception as notif_error:
             print(f"⚠️ Failed to create notification: {notif_error}")
         
@@ -243,7 +248,6 @@ def create_job():
         
     except Exception as e:
         print(f"Error creating job: {str(e)}")
-        import traceback
         traceback.print_exc()
         session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -304,7 +308,7 @@ def update_job(job_id):
 @job_bp.route('/jobs/<string:job_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
 def delete_job(job_id):
-    """Delete a job"""
+    """Delete a job and its dependent records to prevent Foreign Key errors."""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
@@ -314,13 +318,41 @@ def delete_job(job_id):
         if not job:
             return jsonify({'error': 'Job not found'}), 404
             
+        print(f"Attempting to delete job {job_id} and its dependencies.")
+
+        # 🔑 FIX: Delete dependent records first to satisfy Foreign Key constraints
+        
+        # 1. Delete Job Notes
+        session.query(JobNote).filter(JobNote.job_id == job_id).delete(synchronize_session='fetch')
+        
+        # 2. Delete Job Documents
+        session.query(JobDocument).filter(JobDocument.job_id == job_id).delete(synchronize_session='fetch')
+        
+        # 3. Delete Job Form Links (links to FormSubmission)
+        session.query(JobFormLink).filter(JobFormLink.job_id == job_id).delete(synchronize_session='fetch')
+        
+        # 4. Delete Assignments related to this job
+        session.query(Assignment).filter(Assignment.job_id == job_id).delete(synchronize_session='fetch')
+
+        # NOTE: Quotation is often loosely linked. If a Quotation record references this job_id
+        # and has ON DELETE RESTRICT, you must deal with it here (e.g., delete it or set job_id to NULL).
+        # Assuming it needs to be deleted if the job is deleted for safety:
+        # session.query(Quotation).filter(Quotation.job_id == job_id).delete(synchronize_session='fetch')
+
+        session.flush() # Execute dependent deletions immediately
+        
+        # 5. Delete the Job itself
         session.delete(job)
+        
         session.commit()
+        print(f"Successfully deleted job {job_id}.")
         return jsonify({'message': 'Job deleted successfully'})
+        
     except Exception as e:
-        print(f"Error deleting job {job_id}: {str(e)}")
+        traceback.print_exc()
+        print(f"FATAL Error deleting job {job_id}: {str(e)}")
         session.rollback()
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f"Failed to delete job due to database error. Check server logs."}), 500
     finally:
         session.close()
 
@@ -562,8 +594,6 @@ def get_job_stats():
     """Get job statistics"""
     session = SessionLocal()
     try:
-        from sqlalchemy import func
-        
         stats = {
             'total_jobs': session.query(Job).count(),
             'by_stage': {},
