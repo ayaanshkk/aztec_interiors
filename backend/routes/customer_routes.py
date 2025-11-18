@@ -122,12 +122,12 @@ def get_customers():
             # Get the most advanced stage
             display_stage = get_most_advanced_stage(all_stages)
             
-            # ✅ LOG ACCEPTED CUSTOMERS
-            if display_stage == 'Accepted':
-                current_app.logger.info(f"✅ ACCEPTED Customer: {customer.name} (ID: {customer.id})")
+            # ✅ CRITICAL FIX: Ensure stage is always a string, never None
+            if not display_stage or display_stage == 'None':
+                display_stage = 'Lead'
+                current_app.logger.warning(f"⚠️ Customer {customer.id} ({customer.name}) had no valid stage, defaulting to Lead")
             
             # ✅ OPTIMIZATION: Calculate total document count IN BACKEND
-            # This eliminates the need for frontend to make 2 API calls per customer
             total_documents = int(drawing_count) + int(form_count) + int(form_doc_count)
             
             customer_data = {
@@ -148,14 +148,14 @@ def get_customers():
                 'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
                 'created_by': customer.created_by,
                 'updated_by': customer.updated_by,
-                'stage': display_stage,
+                'stage': display_stage,  # ✅ ENSURE THIS IS SET
                 'project_count': total_project_count,
                 'form_count': int(form_count),
                 'drawing_count': int(drawing_count),
                 'form_document_count': int(form_doc_count),
                 # ✅ NEW FIELDS for red alert icon
-                'total_documents': total_documents,  # Total count of all documents
-                'has_documents': total_documents > 0,  # Boolean: does customer have ANY documents?
+                'total_documents': total_documents,
+                'has_documents': total_documents > 0,
                 'has_drawings': drawing_count > 0,
                 'has_forms': form_count > 0 or form_doc_count > 0,
             }
@@ -176,7 +176,7 @@ def get_customers():
             customer_data['project_types'] = project_types_value
             result.append(customer_data)
 
-        # ✅ LOG TOTAL ACCEPTED CUSTOMERS
+        # ✅ LOG SUMMARY
         accepted_count = len([c for c in result if c['stage'] == 'Accepted'])
         customers_without_docs = len([c for c in result if c['total_documents'] == 0])
         
