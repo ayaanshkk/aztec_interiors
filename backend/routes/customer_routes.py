@@ -491,10 +491,13 @@ def create_project(customer_id):
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Check permissions
-        if request.current_user.role in ['Sales', 'Staff']:
-            if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
-                return jsonify({'error': 'You do not have permission to create projects for this customer'}), 403
+        # Check permissions - Manager, HR, and Sales can create projects for any customer
+        allowed_roles = ['Manager', 'HR', 'Sales']
+        
+        if request.current_user.role not in allowed_roles:
+            return jsonify({
+                'error': f'You do not have permission to create projects. Only {", ".join(allowed_roles)} can create projects.'
+            }), 403
         
         data = request.get_json()
         
