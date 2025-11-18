@@ -339,6 +339,52 @@ def update_customer(customer_id):
     finally:
         session.close()
 
+@customer_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
+@token_required
+def update_customer_stage_direct(customer_id):
+    """Update customer stage directly - FIXED VERSION"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        customer = session.get(Customer, customer_id)
+        if not customer:
+            return jsonify({'error': 'Customer not found'}), 404
+
+        data = request.get_json()
+        new_stage = data.get('stage')
+        
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+
+        current_app.logger.info(f"🔄 Updating customer {customer_id} stage to {new_stage}")
+        
+        old_stage = customer.stage
+        customer.stage = new_stage
+        customer.updated_by = str(request.current_user.id)
+        customer.updated_at = datetime.utcnow()
+        
+        # ✅ CRITICAL: Commit immediately
+        session.commit()
+        session.refresh(customer)
+        
+        current_app.logger.info(f"✅ Customer stage updated: {old_stage} → {new_stage}")
+        
+        return jsonify({
+            'success': True,
+            'customer_id': customer.id,
+            'old_stage': old_stage,
+            'new_stage': customer.stage,
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating customer stage: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
 
 @customer_bp.route('/customers/<string:customer_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
