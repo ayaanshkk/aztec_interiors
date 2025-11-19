@@ -738,6 +738,11 @@ def get_pipeline_data():
         ).all()
 
         pipeline_items = []
+        
+        # ✅ DEBUG: Track what we're processing
+        customers_with_projects = 0
+        customers_without_projects = 0
+        total_projects = 0
 
         for customer in customers:
             customer_projects = customer.projects 
@@ -745,23 +750,26 @@ def get_pipeline_data():
 
             # ✅ Generate a card for *every* Project (projects have stages)
             for project in customer_projects:
+                total_projects += 1
+                project_stage = project.stage or 'Lead'  # ✅ Store stage value
+                
                 current_app.logger.debug(
                     f"  📋 Project: {project.project_name} | "
                     f"Customer: {customer.name} | "
-                    f"Stage: {project.stage}"
+                    f"Stage: {project_stage}"
                 )
                 
                 pipeline_items.append({
                     'id': f'project-{project.id}',
                     'type': 'project',
                     'customer': customer.to_dict(include_projects=False),
-                    'stage': project.stage,  # ✅ Use the ACTUAL database stage value
+                    'stage': project_stage,  # ✅ Use stored value
                     'project': {
                         'id': project.id,
                         'customer_id': customer.id,
                         'project_name': project.project_name or 'Unnamed Project',
                         'project_type': project.project_type or 'Unknown', 
-                        'stage': project.stage,  # ✅ Use the ACTUAL database stage value
+                        'stage': project_stage,  # ✅ Use stored value
                         'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
                         'notes': project.notes,
                         'created_at': project.created_at.isoformat() if project.created_at else None,
@@ -771,24 +779,34 @@ def get_pipeline_data():
 
             # ✅ Case: Customer is a pure Lead (no projects yet)
             if not has_projects:
+                customers_without_projects += 1
+                customer_stage = customer.stage or 'Lead'  # ✅ Store stage value
+                
                 current_app.logger.debug(
                     f"  👤 Customer (no projects): {customer.name} | "
-                    f"Stage: {customer.stage}"
+                    f"Stage: {customer_stage}"
                 )
                 
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer.stage or 'Lead',  # ✅ Use the ACTUAL database stage value
+                    'stage': customer_stage,  # ✅ Use stored value
                     'customer': customer.to_dict(include_projects=False)
                 })
+            else:
+                customers_with_projects += 1
         
+        # ✅ ENHANCED LOGGING
         current_app.logger.info(f"✅ Pipeline data fetched: {len(pipeline_items)} items")
+        current_app.logger.info(
+            f"   📊 Breakdown: {customers_with_projects} customers with projects ({total_projects} projects), "
+            f"{customers_without_projects} customers without projects"
+        )
         
         # Log stage distribution for debugging
         stage_counts = {}
         for item in pipeline_items:
-            stage = item['stage']
+            stage = item.get('stage', 'Unknown')
             stage_counts[stage] = stage_counts.get(stage, 0) + 1
         current_app.logger.info(f"📊 Stage distribution: {stage_counts}")
         

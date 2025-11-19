@@ -67,3 +67,15 @@ def get_db_connection():
     except SQLAlchemyError as e:
         print(f"❌ Error creating database connection: {e}")
         raise
+
+def init_db():
+    """Initialize database tables - only creates if they don't exist"""
+    from backend.models import (
+        User, Customer, Project, Job, Assignment, 
+        CustomerFormData, DrawingDocument, FormDocument,
+        MaterialOrder, ProductionNotification, Quotation, QuotationItem, Fitter
+    )
+    
+    # ✅ CRITICAL: checkfirst=True ensures existing data is NOT dropped
+    Base.metadata.create_all(bind=engine, checkfirst=True)
+    print("✅ Database tables initialized")

@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
-from .db import Base, engine, SessionLocal, test_connection 
+from .db import Base, engine, SessionLocal, test_connection, init_db
 # from backend.db import Base, engine, SessionLocal, test_connection
 
 
@@ -22,14 +22,22 @@ def create_app():
     # ============================================
     print("🔧 Initializing database schema...")
     try:
-        # NOTE: This is idempotent; it only creates tables that don't exist.
-        Base.metadata.create_all(bind=engine)
-        # You can add a quick check here if needed, but Base.metadata.create_all is the main step.
-        print("✅ Database schema initialized successfully.")
+        # ✅ CRITICAL: Import models FIRST so SQLAlchemy knows about them
+        from backend import models
+        
+        # ✅ CRITICAL: checkfirst=True ensures we don't drop existing tables
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+        
+        # Verify tables
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        print(f"✅ Database schema initialized - {len(tables)} tables exist")
+        
     except Exception as e:
         print(f"❌ Database initialization failed: {e}")
-        # Optionally, raise the exception to stop deployment if schema creation is critical
-        # raise
+        import traceback
+        traceback.print_exc()
 
     # ============================================
     # CORS
