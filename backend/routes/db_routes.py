@@ -280,7 +280,12 @@ def _extract_stage_from_payload(data: dict) -> Optional[str]:
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
-    """Update customer stage - ENHANCED VERSION with all important stage notifications AND auto-assignment creation"""
+    """Update customer stage - ENHANCED VERSION
+    
+    ✅ NOTE: Customer stages are synced with their PROJECT stages.
+    When a customer has no projects, they stay in Lead.
+    When they have projects, their stage reflects the most advanced project stage.
+    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -329,7 +334,7 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # ✅ ENHANCED: Create notifications for multiple important stages AND assignments for Accepted
+        # ✅ Create notifications and assignments for important stages
         notification_created = False
         assignment_created = False
         
@@ -337,7 +342,11 @@ def update_customer_stage(customer_id):
             from backend.routes.notification_routes import create_activity_notification
             from datetime import timedelta
             
-            linked_job = session.query(Job).filter_by(customer_id=customer.id).first()
+            # Get the customer's first project in the new stage (if any)
+            linked_project = session.query(Project).filter_by(
+                customer_id=customer.id,
+                stage=new_stage
+            ).first()
             
             # Define stage-specific notification messages
             stage_notifications = {
@@ -374,7 +383,6 @@ def update_customer_stage(customer_id):
                 
                 create_activity_notification(
                     session=session,
-                    job_id=linked_job.id if linked_job else None,
                     customer_id=customer.id,
                     message=stage_config['message'],
                     moved_by=updated_by_user
@@ -386,12 +394,11 @@ def update_customer_stage(customer_id):
             if new_stage == 'Accepted':
                 assignment = Assignment(
                     id=str(uuid.uuid4()),
-                    type='job',
+                    type='project',
                     title=f"Order materials for {customer.name}",
                     date=(datetime.utcnow() + timedelta(days=1)).date(),
                     team_member='Production Team',
                     customer_id=customer.id,
-                    job_id=linked_job.id if linked_job else None,
                     notes=f"Order all necessary materials for {customer.name}'s project",
                     priority='High',
                     status='Scheduled',
@@ -713,99 +720,52 @@ def update_job_stage(job_id):
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
-    """Get all pipeline items - FIXED VERSION"""
+    """Get all pipeline items - FIXED VERSION
+    
+    ✅ NOTE: Only PROJECTS have stages. Jobs are created when projects reach Accepted/Production.
+    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
-        # 🔑 REMOVED: session.expire_all() - This was causing stale data issues
-        
         # Eagerly load relationships to avoid lazy loading issues
         customers = session.query(Customer).options(
-            selectinload(Customer.jobs),
             selectinload(Customer.projects)
         ).all()
 
         pipeline_items = []
 
         for customer in customers:
-            # Relationships are now eagerly loaded
-            customer_jobs = customer.jobs 
             customer_projects = customer.projects 
-            has_linked_entity = bool(customer_jobs or customer_projects)
+            has_projects = bool(customer_projects)
 
-            # 1. Generate a card for *every* Job
-            for job in customer_jobs:
-                pipeline_items.append({
-                    'id': f'job-{job.id}',
-                    'type': 'job',
-                    'customer': customer.to_dict(include_projects=False),
-                    'stage': job.stage,  # Job's stage takes precedence
-                    'job': {
-                        'id': job.id,
-                        'customer_id': job.customer_id,
-                        'job_reference': job.job_reference,
-                        'job_name': job.job_name,
-                        'job_type': job.job_type,
-                        'stage': job.stage,
-                        'priority': job.priority,
-                        'quote_price': float(job.quote_price) if job.quote_price else None,
-                        'agreed_price': float(job.agreed_price) if job.agreed_price else None,
-                        'sold_amount': float(job.sold_amount) if job.sold_amount else None,
-                        'deposit1': float(job.deposit1) if job.deposit1 else None,
-                        'deposit2': float(job.deposit2) if job.deposit2 else None,
-                        'deposit1_paid': False,
-                        'deposit2_paid': False,
-                        'delivery_date': job.delivery_date.isoformat() if job.delivery_date else None,
-                        'measure_date': job.measure_date.isoformat() if job.measure_date else None,
-                        'completion_date': job.completion_date.isoformat() if job.completion_date else None,
-                        'installation_address': job.installation_address,
-                        'salesperson_name': job.salesperson_name,
-                        'assigned_team_name': job.assigned_team_name,
-                        'primary_fitter_name': job.primary_fitter_name,
-                        'created_at': job.created_at.isoformat() if job.created_at else None,
-                        'updated_at': job.updated_at.isoformat() if job.updated_at else None,
-                    }
-                })
-
-            # 2. Generate a card for *every* Project
+            # ✅ Generate a card for *every* Project (projects have stages)
             for project in customer_projects:
                 pipeline_items.append({
                     'id': f'project-{project.id}',
                     'type': 'project',
                     'customer': customer.to_dict(include_projects=False),
-                    'stage': project.stage,  # Project's stage takes precedence
-                    'job': {
+                    'stage': project.stage,  # Project's stage
+                    'project': {
                         'id': project.id,
                         'customer_id': customer.id,
-                        'job_reference': f"PROJ-{getattr(project, 'project_name', 'N/A')}", 
-                        'job_name': getattr(project, 'project_name', 'N/A'), 
-                        'job_type': getattr(project, 'project_type', 'Unknown'), 
+                        'project_name': project.project_name or 'Unnamed Project',
+                        'project_type': project.project_type or 'Unknown', 
                         'stage': project.stage,
-                        'priority': 'Medium',
-                        'quote_price': None,
-                        'agreed_price': None,
-                        'sold_amount': None,
-                        'deposit1': None,
-                        'deposit2': None,
-                        'deposit1_paid': False,
-                        'deposit2_paid': False,
-                        'delivery_date': None,
-                        'measure_date': getattr(project, 'date_of_measure', None).isoformat() if getattr(project, 'date_of_measure', None) else None,
-                        'installation_address': customer.address,
-                        'salesperson_name': customer.salesperson,
+                        'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
+                        'notes': project.notes,
                         'created_at': project.created_at.isoformat() if project.created_at else None,
                         'updated_at': project.updated_at.isoformat() if project.updated_at else None,
                     }
                 })
 
-            # 3. Case: Customer is a pure Lead (no jobs or projects)
-            if not has_linked_entity:
+            # ✅ Case: Customer is a pure Lead (no projects yet)
+            if not has_projects:
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer.stage,  # Customer's stage
+                    'stage': customer.stage or 'Lead',  # Customer's stage
                     'customer': customer.to_dict(include_projects=False)
                 })
         
@@ -819,6 +779,7 @@ def get_pipeline_data():
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
+
 
 
 # ------------------ PROJECTS ROUTES (New/Updated) ------------------

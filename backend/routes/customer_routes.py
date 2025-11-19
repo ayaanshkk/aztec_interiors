@@ -88,9 +88,10 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED STAGE.
+    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED PROJECT STAGE.
     
-    ✅ OPTIMIZED: Now includes document counts in response to avoid frontend making 2 API calls per customer
+    ✅ NOTE: Stages are only defined by Projects, not Jobs.
+    Jobs are created when projects reach Accepted/Production stage.
     """
     
     if request.method == 'OPTIONS':
@@ -108,18 +109,16 @@ def get_customers():
             drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
             form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
             
-            # Get all linked jobs and projects
-            customer_jobs = session.query(Job).filter_by(customer_id=customer.id).all()
+            # Get all linked projects (Jobs don't have stages)
             customer_projects = session.query(Project).filter_by(customer_id=customer.id).all()
             
-            total_project_count = len(customer_jobs) + len(customer_projects)
+            total_project_count = len(customer_projects)
             
-            # Collect all stages
-            all_stages = [customer.stage]
-            all_stages.extend([job.stage for job in customer_jobs if job.stage])
+            # ✅ FIXED: Collect stages ONLY from projects, not jobs
+            all_stages = [customer.stage] if customer.stage else []
             all_stages.extend([project.stage for project in customer_projects if project.stage])
             
-            # Get the most advanced stage
+            # Get the most advanced stage from projects only
             display_stage = get_most_advanced_stage(all_stages)
             
             # ✅ CRITICAL FIX: Ensure stage is always a string, never None
@@ -148,12 +147,11 @@ def get_customers():
                 'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
                 'created_by': customer.created_by,
                 'updated_by': customer.updated_by,
-                'stage': display_stage,  # ✅ ENSURE THIS IS SET
+                'stage': display_stage,  # ✅ Most advanced PROJECT stage
                 'project_count': total_project_count,
                 'form_count': int(form_count),
                 'drawing_count': int(drawing_count),
                 'form_document_count': int(form_doc_count),
-                # ✅ NEW FIELDS for red alert icon
                 'total_documents': total_documents,
                 'has_documents': total_documents > 0,
                 'has_drawings': drawing_count > 0,
@@ -382,6 +380,67 @@ def update_customer_stage_direct(customer_id):
         session.rollback()
         current_app.logger.error(f"❌ Error updating customer stage: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+@customer_bp.route('/customers/by-stage/<string:stage>', methods=['GET', 'OPTIONS'])
+@token_required
+def get_customers_by_stage(stage):
+    """Get customers who have at least one PROJECT in the specified stage
+    
+    Note: Only projects have stages. Jobs are created when projects reach Accepted/Production.
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        # Validate stage
+        if stage not in STAGE_HIERARCHY:
+            return jsonify({'error': f'Invalid stage: {stage}'}), 400
+        
+        # Find all customers with projects in this stage
+        customers_with_projects = session.query(Customer).join(Project).filter(
+            Project.stage == stage
+        ).distinct().all()
+        
+        # Prepare response
+        result = []
+        for customer in customers_with_projects:
+            # Count projects at this specific stage
+            projects_at_stage = session.query(Project).filter(
+                Project.customer_id == customer.id,
+                Project.stage == stage
+            ).all()
+            
+            # Get total project count for this customer
+            total_projects = session.query(Project).filter_by(customer_id=customer.id).count()
+            
+            result.append({
+                'id': customer.id,
+                'name': customer.name,
+                'email': customer.email,
+                'phone': customer.phone,
+                'address': customer.address,
+                'stage': stage,  # The stage we're filtering by
+                'projects_at_stage': len(projects_at_stage),
+                'project_details': [
+                    {
+                        'id': p.id,
+                        'name': p.project_name,
+                        'type': p.project_type
+                    } for p in projects_at_stage
+                ],
+                'total_projects': total_projects
+            })
+        
+        current_app.logger.info(f"✅ Found {len(result)} customers with projects in '{stage}' stage")
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.exception(f"❌ Error fetching customers by stage: {e}")
+        return jsonify({'error': f'Failed to fetch customers in {stage} stage'}), 500
     finally:
         session.close()
 
