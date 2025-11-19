@@ -330,7 +330,7 @@ class Project(Base):
     # Project details
     project_name = Column(String(200), nullable=False)
     project_type = Column(JOB_TYPE_ENUM, nullable=False)  # Kitchen, Bedroom, Wardrobe, etc.
-    stage = Column(JOB_STAGE_ENUM, default='Lead')
+    stage = Column(JOB_STAGE_ENUM, default='Lead', nullable=False)  # ✅ Added nullable=False
     date_of_measure = Column(Date)
     notes = Column(Text)
     
@@ -340,7 +340,7 @@ class Project(Base):
     updated_by = Column(String(200))
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # relationshipS
+    # Relationships
     customer = relationship('Customer', back_populates='projects')
     form_submissions = relationship('CustomerFormData', back_populates='project', lazy=True, cascade='all, delete-orphan')
 
@@ -354,7 +354,7 @@ class Project(Base):
             'customer_id': self.customer_id,
             'project_name': self.project_name,
             'project_type': self.project_type,
-            'stage': self.stage,
+            'stage': self.stage or 'Lead',  # ✅ Fallback to 'Lead' if somehow None
             'date_of_measure': self.date_of_measure.isoformat() if self.date_of_measure else None,
             'notes': self.notes,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -368,7 +368,6 @@ class Project(Base):
             data['forms'] = [form.to_dict() for form in self.form_submissions]
         
         return data
-
 
 class Team(Base):
     __tablename__ = 'teams'

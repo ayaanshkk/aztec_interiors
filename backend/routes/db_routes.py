@@ -720,15 +720,18 @@ def update_job_stage(job_id):
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
-    """Get all pipeline items - FIXED VERSION
+    """Get all pipeline items
     
     ✅ NOTE: Only PROJECTS have stages. Jobs are created when projects reach Accepted/Production.
+    ✅ CRITICAL: We must return the ACTUAL database stage values, not computed ones
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
+        current_app.logger.info("📊 Fetching pipeline data...")
+        
         # Eagerly load relationships to avoid lazy loading issues
         customers = session.query(Customer).options(
             selectinload(Customer.projects)
@@ -742,17 +745,23 @@ def get_pipeline_data():
 
             # ✅ Generate a card for *every* Project (projects have stages)
             for project in customer_projects:
+                current_app.logger.debug(
+                    f"  📋 Project: {project.project_name} | "
+                    f"Customer: {customer.name} | "
+                    f"Stage: {project.stage}"
+                )
+                
                 pipeline_items.append({
                     'id': f'project-{project.id}',
                     'type': 'project',
                     'customer': customer.to_dict(include_projects=False),
-                    'stage': project.stage,  # Project's stage
+                    'stage': project.stage,  # ✅ Use the ACTUAL database stage value
                     'project': {
                         'id': project.id,
                         'customer_id': customer.id,
                         'project_name': project.project_name or 'Unnamed Project',
                         'project_type': project.project_type or 'Unknown', 
-                        'stage': project.stage,
+                        'stage': project.stage,  # ✅ Use the ACTUAL database stage value
                         'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
                         'notes': project.notes,
                         'created_at': project.created_at.isoformat() if project.created_at else None,
@@ -762,14 +771,27 @@ def get_pipeline_data():
 
             # ✅ Case: Customer is a pure Lead (no projects yet)
             if not has_projects:
+                current_app.logger.debug(
+                    f"  👤 Customer (no projects): {customer.name} | "
+                    f"Stage: {customer.stage}"
+                )
+                
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer.stage or 'Lead',  # Customer's stage
+                    'stage': customer.stage or 'Lead',  # ✅ Use the ACTUAL database stage value
                     'customer': customer.to_dict(include_projects=False)
                 })
         
-        current_app.logger.info(f"📊 Pipeline data fetched: {len(pipeline_items)} items")
+        current_app.logger.info(f"✅ Pipeline data fetched: {len(pipeline_items)} items")
+        
+        # Log stage distribution for debugging
+        stage_counts = {}
+        for item in pipeline_items:
+            stage = item['stage']
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        current_app.logger.info(f"📊 Stage distribution: {stage_counts}")
+        
         return jsonify(pipeline_items)
         
     except Exception as e:
@@ -779,8 +801,6 @@ def get_pipeline_data():
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
-
 
 # ------------------ PROJECTS ROUTES (New/Updated) ------------------
 

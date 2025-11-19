@@ -959,3 +959,53 @@ def submit_form():
         return jsonify({'error': f'Failed to submit form: {str(e)}'}), 500
     finally:
         session.close()
+
+@customer_bp.route('/customers/debug-accepted', methods=['GET', 'OPTIONS'])
+# @token_required
+def debug_accepted_customers():
+    """Debug endpoint to see what's going on with Accepted stage"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        # Get all customers in Accepted stage
+        customers_in_accepted = session.query(Customer).filter(
+            Customer.stage == 'Accepted'
+        ).all()
+        
+        debug_info = []
+        
+        for customer in customers_in_accepted:
+            # Get all projects for this customer
+            projects = session.query(Project).filter_by(customer_id=customer.id).all()
+            
+            project_info = []
+            for project in projects:
+                project_info.append({
+                    'id': project.id,
+                    'name': project.project_name,
+                    'type': project.project_type,
+                    'stage': project.stage
+                })
+            
+            debug_info.append({
+                'customer_id': customer.id,
+                'customer_name': customer.name,
+                'customer_stage': customer.stage,
+                'projects': project_info,
+                'projects_in_accepted': len([p for p in projects if p.stage == 'Accepted'])
+            })
+        
+        current_app.logger.info(f"🔍 Debug: Found {len(customers_in_accepted)} customers with stage='Accepted'")
+        
+        return jsonify({
+            'total_customers_in_accepted': len(customers_in_accepted),
+            'details': debug_info
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.exception(f"❌ Debug error: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
