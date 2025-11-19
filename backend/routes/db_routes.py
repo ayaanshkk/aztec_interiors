@@ -343,7 +343,6 @@ def update_customer_stage(customer_id):
                     message=stage_config['message'],
                     job_id=None,
                     customer_id=customer.id,
-                    message=stage_config['message'],
                     moved_by=updated_by_user
                 )
                 notification_created = True
