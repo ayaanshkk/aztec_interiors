@@ -193,88 +193,44 @@ PIPELINE_STAGE_ORDER = [
 
 
 def _extract_stage_from_payload(data: dict) -> Optional[str]:
-    """Best-effort extraction of the intended pipeline stage from the request payload.
-
-    Historically the frontend sent a simple string field called ``stage`` but
-    some UI changes started providing additional metadata (for example
-    ``targetStage`` or destination column indexes).  When the UI bug reported in
-    the pipeline manifested, the backend was only reading the original ``stage``
-    field which, due to an indexing issue on the client, contained the stage of
-    the previous column (e.g. ``Design`` instead of ``Quote``).  By inspecting the
-    extended payload we can recover the actual intended target stage and keep the
-    server as the source of truth.
-
-    The helper considers a number of common shapes:
-
-    * Plain string values (``"Quote"``).
-    * Objects produced by select components (``{"label": "Quote", "value": "Quote"}``).
-    * Alternative keys such as ``targetStage``/``newStage``/``destinationStage``.
-    * Column indexes where the client only provides the destination column id.
-
-    The first recognised stage that matches the canonical ``PIPELINE_STAGE_ORDER``
-    list is returned.
+    """Extract stage from payload - SIMPLIFIED VERSION
+    
+    The frontend sends a simple payload like:
+    {
+        "stage": "Accepted",
+        "reason": "Moved via Kanban board",
+        "updated_by": "user@example.com"
+    }
+    
+    So we should just extract the 'stage' field directly.
     """
-
+    
     if not isinstance(data, dict):
         return None
 
-    candidates = []
-
-    def _add_candidate(value):
-        if value is None:
-            return
-        if isinstance(value, dict):
-            # Select inputs frequently send {label, value}
-            for key in ("value", "label", "stage"):
-                inner = value.get(key)
-                if isinstance(inner, str):
-                    candidates.append(inner.strip())
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                _add_candidate(item)
-        elif isinstance(value, str):
-            candidates.append(value.strip())
-        elif isinstance(value, (int, float)):
-            idx = int(value)
-            if 0 <= idx < len(PIPELINE_STAGE_ORDER):
-                candidates.append(PIPELINE_STAGE_ORDER[idx])
-
-    # Primary field used historically
-    _add_candidate(data.get('stage'))
-
-    # Alternative explicit keys the frontend may send
-    for key in (
-        'target_stage', 'targetStage',
-        'new_stage', 'newStage',
-        'destination_stage', 'destinationStage',
-        'pipeline_stage', 'pipelineStage',
-        'column_stage', 'columnStage'
-    ):
-        _add_candidate(data.get(key))
-
-    # Numeric column / index hints
-    for key in (
-        'stage_index', 'stageIndex',
-        'target_index', 'targetIndex',
-        'destination_index', 'destinationIndex',
-        'column_index', 'columnIndex'
-    ):
-        _add_candidate(data.get(key))
-
-    # Return the first recognised stage
-    seen = set()
-    for value in candidates:
-        if not isinstance(value, str):
-            continue
-        candidate = value.strip()
-        if not candidate:
-            continue
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        if candidate in PIPELINE_STAGE_ORDER:
-            return candidate
-
+    # ✅ PRIMARY: Check for direct 'stage' field (most common case)
+    stage = data.get('stage')
+    if stage and isinstance(stage, str):
+        stage = stage.strip()
+        if stage in PIPELINE_STAGE_ORDER:
+            return stage
+    
+    # ✅ FALLBACK: Check for object format (like {label: "Accepted", value: "Accepted"})
+    if isinstance(stage, dict):
+        for key in ('value', 'label', 'stage'):
+            inner = stage.get(key)
+            if isinstance(inner, str) and inner.strip() in PIPELINE_STAGE_ORDER:
+                return inner.strip()
+    
+    # ✅ FALLBACK: Check alternative field names
+    for field in ('target_stage', 'targetStage', 'new_stage', 'newStage'):
+        alt_stage = data.get(field)
+        if alt_stage and isinstance(alt_stage, str):
+            alt_stage = alt_stage.strip()
+            if alt_stage in PIPELINE_STAGE_ORDER:
+                return alt_stage
+    
+    # If nothing found, return None
     return None
 
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
