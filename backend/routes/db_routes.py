@@ -295,14 +295,10 @@ def update_customer_stage(customer_id):
         assignment_created = False
         
         try:
+            current_app.logger.info(f"🔍 Attempting to import notification function...")
             from backend.routes.notification_routes import create_activity_notification
             from datetime import timedelta
-            
-            # Get the customer's first project in the new stage (if any)
-            linked_project = session.query(Project).filter_by(
-                customer_id=customer.id,
-                stage=new_stage
-            ).first()
+            current_app.logger.info(f"✅ Notification function imported successfully")
             
             # Define stage-specific notification messages
             stage_notifications = {
@@ -335,20 +331,29 @@ def update_customer_stage(customer_id):
             
             # Create notification if it's an important stage
             if new_stage in stage_notifications:
+                current_app.logger.info(f"📢 Stage '{new_stage}' requires notification - creating now...")
                 stage_config = stage_notifications[new_stage]
+                
+                current_app.logger.info(f"📝 Notification message: {stage_config['message']}")
+                current_app.logger.info(f"👤 Moved by: {updated_by_user}")
+                current_app.logger.info(f"🆔 Customer ID: {customer.id}")
                 
                 create_activity_notification(
                     session=session,
+                    message=stage_config['message'],
+                    job_id=None,
                     customer_id=customer.id,
                     message=stage_config['message'],
                     moved_by=updated_by_user
                 )
                 notification_created = True
-                current_app.logger.info(f"📢 Created {new_stage} notification for customer {customer_id}")
+                current_app.logger.info(f"✅ Successfully created {new_stage} notification for customer {customer_id}")
+            else:
+                current_app.logger.info(f"ℹ️ Stage '{new_stage}' does not require notification (not in: {list(stage_notifications.keys())})")
             
             # ✅ AUTO-CREATE ASSIGNMENT FOR PRODUCTION TEAM WHEN MOVED TO ACCEPTED
             if new_stage == 'Accepted':
-                from datetime import timedelta
+                current_app.logger.info(f"📋 Creating assignment for customer {customer_id}...")
                 
                 assignment = Assignment(
                     id=str(uuid.uuid4()),
@@ -365,15 +370,22 @@ def update_customer_stage(customer_id):
                 )
                 session.add(assignment)
                 assignment_created = True
-                current_app.logger.info(f"📋 Created material order assignment for customer {customer_id}")
+                current_app.logger.info(f"✅ Successfully created material order assignment for customer {customer_id}")
                 
+        except ImportError as import_error:
+            current_app.logger.error(f"❌ Failed to import notification function: {import_error}")
+            import traceback
+            current_app.logger.error(f"Import traceback: {traceback.format_exc()}")
         except Exception as notif_error:
-            current_app.logger.warning(f"⚠️ Failed to create notification or assignment: {notif_error}")
+            current_app.logger.error(f"❌ Failed to create notification or assignment: {notif_error}")
+            import traceback
+            current_app.logger.error(f"Notification error traceback: {traceback.format_exc()}")
         
         # Commit the transaction
         session.commit()
         
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
+        current_app.logger.info(f"📊 Final status - Notification created: {notification_created}, Assignment created: {assignment_created}")
         
         return jsonify({
             'message': 'Stage updated successfully',
@@ -925,6 +937,7 @@ def update_project_stage(project_id):
                 
                 create_activity_notification(
                     session=session,
+                    message=stage_config['message'],
                     customer_id=project.customer_id,
                     message=stage_config['message'],
                     moved_by=updated_by_user
