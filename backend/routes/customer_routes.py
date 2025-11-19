@@ -386,9 +386,12 @@ def update_customer_stage_direct(customer_id):
 @customer_bp.route('/customers/by-stage/<string:stage>', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers_by_stage(stage):
-    """Get customers who have at least one PROJECT in the specified stage
+    """Get customers who have at least one PROJECT in the specified stage,
+    OR customers themselves in that stage (even without projects)
     
-    Note: Only projects have stages. Jobs are created when projects reach Accepted/Production.
+    This allows material orders for:
+    1. Customers with explicit projects in the stage
+    2. Customers in the stage without separate project entities
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
@@ -399,14 +402,38 @@ def get_customers_by_stage(stage):
         if stage not in STAGE_HIERARCHY:
             return jsonify({'error': f'Invalid stage: {stage}'}), 400
         
-        # Find all customers with projects in this stage
-        customers_with_projects = session.query(Customer).join(Project).filter(
+        current_app.logger.info(f"🔍 Searching for customers in/with projects in '{stage}' stage...")
+        
+        # ✅ Strategy 1: Find customers with projects in this stage
+        customers_with_projects_in_stage = session.query(Customer).join(Project).filter(
             Project.stage == stage
         ).distinct().all()
         
+        # ✅ Strategy 2: Find customers themselves in this stage (may not have separate projects)
+        customers_in_stage = session.query(Customer).filter(
+            Customer.stage == stage
+        ).all()
+        
+        # Combine both lists and deduplicate by customer ID
+        all_customers_dict = {}
+        
+        # Add customers with projects
+        for customer in customers_with_projects_in_stage:
+            all_customers_dict[customer.id] = customer
+        
+        # Add customers in the stage (this will include those without projects)
+        for customer in customers_in_stage:
+            all_customers_dict[customer.id] = customer
+        
+        current_app.logger.info(
+            f"📊 Found {len(customers_with_projects_in_stage)} customers with projects in '{stage}' + "
+            f"{len(customers_in_stage)} customers in '{stage}' stage = "
+            f"{len(all_customers_dict)} unique customers total"
+        )
+        
         # Prepare response
         result = []
-        for customer in customers_with_projects:
+        for customer in all_customers_dict.values():
             # Count projects at this specific stage
             projects_at_stage = session.query(Project).filter(
                 Project.customer_id == customer.id,
@@ -416,25 +443,46 @@ def get_customers_by_stage(stage):
             # Get total project count for this customer
             total_projects = session.query(Project).filter_by(customer_id=customer.id).count()
             
+            # Determine if this is a customer-level or project-level entry
+            has_separate_projects = total_projects > 0
+            
+            current_app.logger.info(
+                f"  ✅ Customer: {customer.name} | "
+                f"Customer Stage: {customer.stage} | "
+                f"Projects in {stage}: {len(projects_at_stage)} | "
+                f"Total projects: {total_projects} | "
+                f"Type: {'Project-based' if has_separate_projects else 'Customer-level'}"
+            )
+            
             result.append({
                 'id': customer.id,
                 'name': customer.name,
                 'email': customer.email,
                 'phone': customer.phone,
                 'address': customer.address,
-                'stage': stage,  # The stage we're filtering by
+                'stage': stage,
+                'customer_stage': customer.stage,  # ✅ NEW: Customer's actual stage
                 'projects_at_stage': len(projects_at_stage),
                 'project_details': [
                     {
                         'id': p.id,
                         'name': p.project_name,
-                        'type': p.project_type
+                        'type': p.project_type,
+                        'stage': p.stage
                     } for p in projects_at_stage
-                ],
-                'total_projects': total_projects
+                ] if projects_at_stage else [],
+                'total_projects': total_projects,
+                'has_separate_projects': has_separate_projects,  # ✅ NEW: Flag for UI
+                'is_customer_level': not has_separate_projects  # ✅ NEW: Customer-level vs project-level
             })
         
-        current_app.logger.info(f"✅ Found {len(result)} customers with projects in '{stage}' stage")
+        # Sort: Customers with projects first, then customer-level entries
+        result.sort(key=lambda x: (not x['has_separate_projects'], x['name']))
+        
+        if len(result) == 0:
+            current_app.logger.warning(f"⚠️ No customers found in/with projects in '{stage}' stage")
+        else:
+            current_app.logger.info(f"✅ Returning {len(result)} customers for stage '{stage}'")
         
         return jsonify(result), 200
         
