@@ -348,9 +348,11 @@ def update_customer_stage(customer_id):
             
             # ✅ AUTO-CREATE ASSIGNMENT FOR PRODUCTION TEAM WHEN MOVED TO ACCEPTED
             if new_stage == 'Accepted':
+                from datetime import timedelta
+                
                 assignment = Assignment(
                     id=str(uuid.uuid4()),
-                    type='project',
+                    type='job',  # ✅ Valid enum value
                     title=f"Order materials for {customer.name}",
                     date=(datetime.utcnow() + timedelta(days=1)).date(),
                     team_member='Production Team',
@@ -620,7 +622,7 @@ def update_job_stage(job_id):
             
             assignment = Assignment(
                 id=str(uuid.uuid4()),
-                type='job',
+                type='job',  # ✅ Valid enum value
                 title=f"Order materials for {customer_name}",
                 date=(datetime.utcnow() + timedelta(days=1)).date(),
                 team_member='Production Team',
