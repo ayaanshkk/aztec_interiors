@@ -937,8 +937,8 @@ def update_project_stage(project_id):
                 create_activity_notification(
                     session=session,
                     message=stage_config['message'],
+                    job_id=None,
                     customer_id=project.customer_id,
-                    message=stage_config['message'],
                     moved_by=updated_by_user
                 )
                 current_app.logger.info(f"📢 Created {new_stage} notification for project {project.id}")
