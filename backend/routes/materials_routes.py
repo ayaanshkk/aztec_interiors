@@ -376,20 +376,26 @@ def update_material_order(material_id):
 def delete_material_order(material_id):
     """
     Delete a material order
-    Only Manager role can delete material orders
+    Only Manager, HR, and Production roles can delete material orders
     """
-    # ✅ FIX: Use request.current_user instead of g.user
+    # ✅ FIX 1: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager can delete material orders
-    if user_role != 'manager':
-        return jsonify({'error': 'Unauthorized - Only Manager can delete material orders'}), 403
+    # ✅ FIX 2: Role check: Allow Manager, HR, and Production to delete orders
+    if user_role not in ['manager', 'hr', 'production']:
+        return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can delete material orders'}), 403
     
     session = SessionLocal()
     try:
         material_order = session.get(MaterialOrder, material_id)
         if not material_order:
             return jsonify({'error': 'Material order not found'}), 404
+        
+        # 🔑 CRITICAL FIX 3: Delete dependent MaterialChangeLog records first
+        # This prevents Foreign Key constraint errors on commit.
+        session.query(MaterialChangeLog).filter(
+            MaterialChangeLog.material_order_id == material_id
+        ).delete()
         
         session.delete(material_order)
         session.commit()
@@ -640,12 +646,12 @@ def get_pending_material_orders():
 if __name__ == "__main__":
     print("Material Tracking API Routes Ready!")
     print("\nEndpoints created:")
-    print("- GET    /materials (list all)")
-    print("- GET    /materials/<id> (get single)")
-    print("- GET    /materials/customer/<customer_id> (by customer)")
-    print("- POST   /materials (create)")
-    print("- PATCH  /materials/<id> (update)")
+    print("- GET    /materials (list all)")
+    print("- GET    /materials/<id> (get single)")
+    print("- GET    /materials/customer/<customer_id> (by customer)")
+    print("- POST   /materials (create)")
+    print("- PATCH  /materials/<id> (update)")
     print("- DELETE /materials/<id> (delete)")
-    print("- GET    /materials/dashboard/overview (manager dashboard)")
-    print("- GET    /materials/timeline/<customer_id> (project timeline)")
-    print("- GET    /materials/notifications/pending-orders (production notifications)")
+    print("- GET    /materials/dashboard/overview (manager dashboard)")
+    print("- GET    /materials/timeline/<customer_id> (project timeline)")
+    print("- GET    /materials/notifications/pending-orders (production notifications)")
