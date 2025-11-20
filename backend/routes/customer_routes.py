@@ -88,18 +88,19 @@ def token_required(f):
 @customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customers():
-    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED PROJECT STAGE.
-    
-    ✅ NOTE: Stages are only defined by Projects, not Jobs.
-    Jobs are created when projects reach Accepted/Production stage.
-    """
+    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED PROJECT STAGE."""
     
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
-        customers = session.query(Customer).all()
+        # ✅ FIX: Use eager loading to fetch all projects in ONE query
+        from sqlalchemy.orm import joinedload
+        
+        customers = session.query(Customer).options(
+            joinedload(Customer.projects)
+        ).all()
         
         current_app.logger.info(f"📊 Fetching data for {len(customers)} customers")
         
@@ -109,24 +110,23 @@ def get_customers():
             drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
             form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
             
-            # Get all linked projects (Jobs don't have stages)
-            customer_projects = session.query(Project).filter_by(customer_id=customer.id).all()
+            # ✅ NOW this uses the already-loaded projects (no extra query)
+            customer_projects = customer.projects  # Already loaded via joinedload
             
             total_project_count = len(customer_projects)
             
-            # ✅ FIXED: Collect stages ONLY from projects, not jobs
+            # Collect stages ONLY from projects
             all_stages = [customer.stage] if customer.stage else []
             all_stages.extend([project.stage for project in customer_projects if project.stage])
             
-            # Get the most advanced stage from projects only
+            # Get the most advanced stage
             display_stage = get_most_advanced_stage(all_stages)
             
-            # ✅ CRITICAL FIX: Ensure stage is always a string, never None
+            # Ensure stage is always a string, never None
             if not display_stage or display_stage == 'None':
                 display_stage = 'Lead'
-                current_app.logger.warning(f"⚠️ Customer {customer.id} ({customer.name}) had no valid stage, defaulting to Lead")
             
-            # ✅ OPTIMIZATION: Calculate total document count IN BACKEND
+            # Calculate total document count
             total_documents = int(drawing_count) + int(form_count) + int(form_doc_count)
             
             customer_data = {
@@ -147,7 +147,7 @@ def get_customers():
                 'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
                 'created_by': customer.created_by,
                 'updated_by': customer.updated_by,
-                'stage': display_stage,  # ✅ Most advanced PROJECT stage
+                'stage': display_stage,
                 'project_count': total_project_count,
                 'form_count': int(form_count),
                 'drawing_count': int(drawing_count),
@@ -174,11 +174,7 @@ def get_customers():
             customer_data['project_types'] = project_types_value
             result.append(customer_data)
 
-        # ✅ LOG SUMMARY
-        accepted_count = len([c for c in result if c['stage'] == 'Accepted'])
-        customers_without_docs = len([c for c in result if c['total_documents'] == 0])
-        
-        current_app.logger.info(f"📊 Total customers: {len(result)}, Accepted: {accepted_count}, Without documents: {customers_without_docs}")
+        current_app.logger.info(f"✅ Returning {len(result)} customers")
         
         return jsonify(result), 200
 
