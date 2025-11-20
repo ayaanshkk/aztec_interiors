@@ -95,25 +95,53 @@ def get_customers():
     
     session = SessionLocal()
     try:
-        # ✅ FIX: Use eager loading to fetch all projects in ONE query
         from sqlalchemy.orm import joinedload
+        from sqlalchemy import func
         
+        # ✅ FIX 1: Load customers with projects in one query
         customers = session.query(Customer).options(
             joinedload(Customer.projects)
         ).all()
         
         current_app.logger.info(f"📊 Fetching data for {len(customers)} customers")
         
+        # ✅ FIX 2: Get ALL counts in bulk queries (not one-by-one)
+        customer_ids = [c.id for c in customers]
+        
+        # Bulk count forms
+        form_counts = dict(
+            session.query(CustomerFormData.customer_id, func.count(CustomerFormData.id))
+            .filter(CustomerFormData.customer_id.in_(customer_ids))
+            .group_by(CustomerFormData.customer_id)
+            .all()
+        )
+        
+        # Bulk count drawings
+        drawing_counts = dict(
+            session.query(DrawingDocument.customer_id, func.count(DrawingDocument.id))
+            .filter(DrawingDocument.customer_id.in_(customer_ids))
+            .group_by(DrawingDocument.customer_id)
+            .all()
+        )
+        
+        # Bulk count form documents
+        form_doc_counts = dict(
+            session.query(FormDocument.customer_id, func.count(FormDocument.id))
+            .filter(FormDocument.customer_id.in_(customer_ids))
+            .group_by(FormDocument.customer_id)
+            .all()
+        )
+        
         result = []
         for customer in customers:
-            form_count = session.query(CustomerFormData).filter_by(customer_id=customer.id).count()
-            drawing_count = session.query(DrawingDocument).filter_by(customer_id=customer.id).count()
-            form_doc_count = session.query(FormDocument).filter_by(customer_id=customer.id).count()
-            
-            # ✅ NOW this uses the already-loaded projects (no extra query)
-            customer_projects = customer.projects  # Already loaded via joinedload
-            
+            # ✅ Use pre-loaded projects
+            customer_projects = customer.projects
             total_project_count = len(customer_projects)
+            
+            # ✅ Use bulk-loaded counts (default to 0 if customer not in dict)
+            form_count = form_counts.get(customer.id, 0)
+            drawing_count = drawing_counts.get(customer.id, 0)
+            form_doc_count = form_doc_counts.get(customer.id, 0)
             
             # Collect stages ONLY from projects
             all_stages = [customer.stage] if customer.stage else []
@@ -378,134 +406,6 @@ def update_customer_stage_direct(customer_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
-@customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
-@token_required
-def get_customers():
-    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED PROJECT STAGE."""
-    
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
-    session = SessionLocal()
-    try:
-        from sqlalchemy.orm import joinedload
-        from sqlalchemy import func
-        
-        # ✅ FIX 1: Load customers with projects in one query
-        customers = session.query(Customer).options(
-            joinedload(Customer.projects)
-        ).all()
-        
-        current_app.logger.info(f"📊 Fetching data for {len(customers)} customers")
-        
-        # ✅ FIX 2: Get ALL counts in bulk queries (not one-by-one)
-        customer_ids = [c.id for c in customers]
-        
-        # Bulk count forms
-        form_counts = dict(
-            session.query(CustomerFormData.customer_id, func.count(CustomerFormData.id))
-            .filter(CustomerFormData.customer_id.in_(customer_ids))
-            .group_by(CustomerFormData.customer_id)
-            .all()
-        )
-        
-        # Bulk count drawings
-        drawing_counts = dict(
-            session.query(DrawingDocument.customer_id, func.count(DrawingDocument.id))
-            .filter(DrawingDocument.customer_id.in_(customer_ids))
-            .group_by(DrawingDocument.customer_id)
-            .all()
-        )
-        
-        # Bulk count form documents
-        form_doc_counts = dict(
-            session.query(FormDocument.customer_id, func.count(FormDocument.id))
-            .filter(FormDocument.customer_id.in_(customer_ids))
-            .group_by(FormDocument.customer_id)
-            .all()
-        )
-        
-        result = []
-        for customer in customers:
-            # ✅ Use pre-loaded projects
-            customer_projects = customer.projects
-            total_project_count = len(customer_projects)
-            
-            # ✅ Use bulk-loaded counts (default to 0 if customer not in dict)
-            form_count = form_counts.get(customer.id, 0)
-            drawing_count = drawing_counts.get(customer.id, 0)
-            form_doc_count = form_doc_counts.get(customer.id, 0)
-            
-            # Collect stages ONLY from projects
-            all_stages = [customer.stage] if customer.stage else []
-            all_stages.extend([project.stage for project in customer_projects if project.stage])
-            
-            # Get the most advanced stage
-            display_stage = get_most_advanced_stage(all_stages)
-            
-            # Ensure stage is always a string, never None
-            if not display_stage or display_stage == 'None':
-                display_stage = 'Lead'
-            
-            # Calculate total document count
-            total_documents = int(drawing_count) + int(form_count) + int(form_doc_count)
-            
-            customer_data = {
-                'id': customer.id,
-                'name': customer.name,
-                'phone': customer.phone or '',
-                'email': customer.email or '',
-                'address': customer.address or '',
-                'postcode': customer.postcode or '',
-                'salesperson': customer.salesperson or '',
-                'contact_made': customer.contact_made or 'Unknown',
-                'preferred_contact_method': customer.preferred_contact_method or 'Phone',
-                'marketing_opt_in': bool(customer.marketing_opt_in),
-                'notes': customer.notes or '',
-                'status': customer.status or 'Active',
-                'date_of_measure': customer.date_of_measure.isoformat() if customer.date_of_measure else None,
-                'created_at': customer.created_at.isoformat() if customer.created_at else None,
-                'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
-                'created_by': customer.created_by,
-                'updated_by': customer.updated_by,
-                'stage': display_stage,
-                'project_count': total_project_count,
-                'form_count': int(form_count),
-                'drawing_count': int(drawing_count),
-                'form_document_count': int(form_doc_count),
-                'total_documents': total_documents,
-                'has_documents': total_documents > 0,
-                'has_drawings': drawing_count > 0,
-                'has_forms': form_count > 0 or form_doc_count > 0,
-            }
-            
-            # Handle project_types
-            project_types_value = customer.project_types
-            if project_types_value is None:
-                project_types_value = []
-            elif isinstance(project_types_value, str):
-                import json
-                try:
-                    project_types_value = json.loads(project_types_value)
-                except:
-                    project_types_value = []
-            elif not isinstance(project_types_value, list):
-                project_types_value = []
-            
-            customer_data['project_types'] = project_types_value
-            result.append(customer_data)
-
-        current_app.logger.info(f"✅ Returning {len(result)} customers")
-        
-        return jsonify(result), 200
-
-    except Exception as e:
-        current_app.logger.exception(f"❌ Error fetching customers: {e}")
-        return jsonify({'error': 'Failed to fetch customers'}), 500
-    finally:
-        session.close()
-
 
 @customer_bp.route('/customers/<string:customer_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
