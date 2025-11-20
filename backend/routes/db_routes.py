@@ -13,6 +13,7 @@ from .auth_helpers import token_required
 from sqlalchemy.exc import OperationalError
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
+from .notification_routes import create_activity_notification
 
 db_bp = Blueprint('database', __name__)
 
@@ -290,26 +291,27 @@ def update_customer_stage(customer_id):
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # ✅ Create notifications and assignments for important stages
+        # ✅ FIXED: Create notifications for important stages
         notification_created = False
         assignment_created = False
         
         try:
-            current_app.logger.info(f"🔍 Attempting to import notification function...")
+            current_app.logger.info(f"🔍 Checking if {new_stage} requires notification...")
+            
+            # Import here to avoid circular import
             from backend.routes.notification_routes import create_activity_notification
             from datetime import timedelta
-            current_app.logger.info(f"✅ Notification function imported successfully")
             
             # Define stage-specific notification messages
             stage_notifications = {
                 'Accepted': {
                     'emoji': '✅',
-                    'message': f"Customer '{customer.name}' accepted the quote and moved to Accepted stage",
+                    'message': f"✅ Customer '{customer.name}' accepted the quote and moved to Accepted stage",
                     'create': True
                 },
                 'Production': {
                     'emoji': '🏭',
-                    'message': f"Customer '{customer.name}' is now in Production - Manufacturing started",
+                    'message': f"🏭 Customer '{customer.name}' is now in Production - Manufacturing started",
                     'create': True
                 },
                 'Delivery': {
@@ -319,7 +321,7 @@ def update_customer_stage(customer_id):
                 },
                 'Installation': {
                     'emoji': '🔧',
-                    'message': f"Installation scheduled for customer '{customer.name}'",
+                    'message': f"🔧 Installation scheduled for customer '{customer.name}'",
                     'create': True
                 },
                 'Complete': {
@@ -338,6 +340,7 @@ def update_customer_stage(customer_id):
                 current_app.logger.info(f"👤 Moved by: {updated_by_user}")
                 current_app.logger.info(f"🆔 Customer ID: {customer.id}")
                 
+                # ✅ CRITICAL FIX: Use create_activity_notification helper
                 create_activity_notification(
                     session=session,
                     message=stage_config['message'],
@@ -356,7 +359,7 @@ def update_customer_stage(customer_id):
                 
                 assignment = Assignment(
                     id=str(uuid.uuid4()),
-                    type='job',  # ✅ Valid enum value
+                    type='job',
                     title=f"Order materials for {customer.name}",
                     date=(datetime.utcnow() + timedelta(days=1)).date(),
                     team_member='Production Team',

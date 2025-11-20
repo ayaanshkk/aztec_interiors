@@ -269,8 +269,8 @@ class Customer(Base):
             session.close()
 
             
-    def to_dict(self, include_projects=False):
-        """Convert customer to dictionary with optional project inclusion"""
+    def to_dict(self, include_projects=False, include_forms=False):
+        """Convert customer to dictionary with optional project and form inclusion"""
         
         # ✅ Handle JSON column properly
         project_types_value = self.project_types
@@ -292,15 +292,15 @@ class Customer(Base):
             'phone': self.phone or '',
             'email': self.email or '',
             'address': self.address or '',
-            'postcode': self.postcode or '',  # ✅ This should work now
-            'salesperson': self.salesperson or '',  # ✅ Will show empty string for NULL
+            'postcode': self.postcode or '',
+            'salesperson': self.salesperson or '',
             'contact_made': self.contact_made or 'Unknown',
             'preferred_contact_method': self.preferred_contact_method or 'Phone',
             'marketing_opt_in': bool(self.marketing_opt_in),
             'notes': self.notes or '',
             'stage': self.stage or 'Lead',
             'status': self.status or 'Active',
-            'project_types': project_types_value,  # ✅ Properly serialized
+            'project_types': project_types_value,
             'date_of_measure': self.date_of_measure.isoformat() if self.date_of_measure else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
@@ -311,6 +311,22 @@ class Customer(Base):
         
         if include_projects:
             data['projects'] = [project.to_dict(include_forms=False) for project in self.projects]
+        
+        # ✅ NEW: Include form submissions if requested
+        if include_forms:
+            import json
+            data['form_submissions'] = [
+                {
+                    'id': form.id,
+                    'submitted_at': form.submitted_at.isoformat() if form.submitted_at else None,
+                    'form_data': json.loads(form.form_data) if isinstance(form.form_data, str) else form.form_data,
+                    'token_used': form.token_used,
+                    'project_id': form.project_id,
+                    'created_by': form.created_by,
+                    'approval_status': form.approval_status or 'approved',
+                }
+                for form in self.form_data  # ✅ Uses the 'form_data' relationship
+            ]
         
         return data
 

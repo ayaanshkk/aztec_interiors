@@ -271,7 +271,7 @@ def create_customer():
 @customer_bp.route('/customers/<string:customer_id>', methods=['GET', 'OPTIONS'])
 @token_required
 def get_customer(customer_id):
-    """Get a single customer by ID with all their projects"""
+    """Get a single customer by ID with all their projects AND form submissions"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -289,8 +289,8 @@ def get_customer(customer_id):
             if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
                 return jsonify({'error': 'You do not have permission to view this customer'}), 403
         
-        # Return customer with all projects
-        return jsonify(customer.to_dict(include_projects=True)), 200
+        # ✅ Return customer with BOTH projects AND forms
+        return jsonify(customer.to_dict(include_projects=True, include_forms=True)), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching customer {customer_id}: {e}")
