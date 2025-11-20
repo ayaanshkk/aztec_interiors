@@ -512,7 +512,7 @@ def create_project(customer_id):
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Check permissions - Manager, HR, and Sales can create projects for any customer
+        # Check permissions
         allowed_roles = ['Manager', 'HR', 'Sales']
         
         if request.current_user.role not in allowed_roles:
@@ -542,32 +542,42 @@ def create_project(customer_id):
         )
         
         session.add(new_project)
+        session.flush()  # Get the project ID
         
-        # ✅ ENHANCED NOTIFICATION: Create notification for project creation
+        # ✅ Get user name
+        user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+        
+        # ✅ CRITICAL FIX: Use the imported helper function
         try:
-            user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+            notification_message = f"➕ New {data.get('project_type', 'project')} project created for customer '{customer.name}' - {data.get('project_name')}"
             
             create_activity_notification(
                 session=session,
-                message=f"➕ New {data.get('project_type', 'project')} created for customer '{customer.name}' - {data.get('project_name')}",
+                message=notification_message,
                 customer_id=customer_id,
                 moved_by=user_name
             )
+            
+            current_app.logger.info(f"✅ Created project creation notification")
+            
         except Exception as notif_error:
             current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
         
         # Update customer stage if this is the first project
+        old_customer_stage = customer.stage
+        new_stage = new_project.stage
+        
         existing_project_count = session.query(Project).filter_by(customer_id=customer_id).count()
         existing_job_count = session.query(Job).filter_by(customer_id=customer_id).count()
         
-        if existing_project_count == 1 and existing_job_count == 0 and new_project.stage:
-            old_customer_stage = customer.stage
-            customer.stage = new_project.stage
+        if existing_project_count == 1 and existing_job_count == 0 and new_stage:
+            customer.stage = new_stage
+            customer.updated_at = datetime.utcnow()
             
-            # ✅ ENHANCED: Create notification for ANY important stage change, not just Production
+            # ✅ CRITICAL FIX: Create notification for stage changes using helper function
             important_stages = ['Accepted', 'Production', 'Delivery', 'Installation', 'Complete']
             
-            if new_project.stage in important_stages and old_customer_stage != new_project.stage:
+            if new_stage in important_stages and old_customer_stage != new_stage:
                 try:
                     stage_emoji = {
                         'Accepted': '✅',
@@ -576,20 +586,25 @@ def create_project(customer_id):
                         'Installation': '🔧',
                         'Complete': '🎉'
                     }
-                    emoji = stage_emoji.get(new_project.stage, '🔄')
+                    emoji = stage_emoji.get(new_stage, '🔄')
+                    
+                    stage_message = f"{emoji} Customer '{customer.name}' moved from {old_customer_stage} to {new_stage} stage"
                     
                     create_activity_notification(
                         session=session,
-                        message=f"{emoji} Customer '{customer.name}' moved from {old_customer_stage} to {new_project.stage} stage",
+                        message=stage_message,
                         customer_id=customer_id,
                         moved_by=user_name
                     )
-                except Exception as notif_error:
-                    current_app.logger.warning(f"⚠️ Failed to create stage notification: {notif_error}")
+                    
+                    current_app.logger.info(f"✅ Created {new_stage} stage notification")
+                    
+                except Exception as stage_notif_error:
+                    current_app.logger.warning(f"⚠️ Failed to create stage notification: {stage_notif_error}")
         
         session.commit()
         
-        current_app.logger.info(f"Project {new_project.id} created for customer {customer_id}")
+        current_app.logger.info(f"✅ Project {new_project.id} created for customer {customer_id}")
         
         return jsonify({
             'success': True,
@@ -599,7 +614,7 @@ def create_project(customer_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error creating project: {e}")
+        current_app.logger.exception(f"❌ Error creating project: {e}")
         return jsonify({'error': f'Failed to create project: {str(e)}'}), 500
     finally:
         session.close()
@@ -969,5 +984,57 @@ def debug_accepted_customers():
     except Exception as e:
         current_app.logger.exception(f"❌ Debug error: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+@customer_bp.route('/customers/<string:customer_id>/forms', methods=['GET', 'OPTIONS'])
+@token_required
+def get_customer_forms(customer_id):
+    """Get all form submissions for a specific customer"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        customer = session.get(Customer, customer_id)
+        if not customer:
+            return jsonify({'error': 'Customer not found'}), 404
+        
+        # Check permissions
+        if request.current_user.role in ['Sales', 'Staff']:
+            if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
+                return jsonify({'error': 'You do not have permission to view forms for this customer'}), 403
+        
+        # Get all form submissions for this customer
+        forms = session.query(CustomerFormData).filter_by(
+            customer_id=customer_id
+        ).order_by(CustomerFormData.submitted_at.desc()).all()
+        
+        current_app.logger.info(f"📋 Found {len(forms)} form submissions for customer {customer_id}")
+        
+        result = []
+        for form in forms:
+            try:
+                form_data = json.loads(form.form_data) if form.form_data else {}
+                
+                result.append({
+                    'id': form.id,
+                    'submitted_at': form.submitted_at.isoformat() if form.submitted_at else None,
+                    'form_type': form_data.get('form_type', 'unknown'),
+                    'is_invoice': form_data.get('is_invoice', False),
+                    'is_receipt': form_data.get('is_receipt', False),
+                    'checklist_type': form_data.get('checklistType'),
+                    'approval_status': form.approval_status or 'approved',
+                    'form_data': form_data
+                })
+            except Exception as e:
+                current_app.logger.error(f"Error processing form {form.id}: {e}")
+                continue
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.exception(f"Error fetching customer forms: {e}")
+        return jsonify({'error': 'Failed to fetch forms'}), 500
     finally:
         session.close()
