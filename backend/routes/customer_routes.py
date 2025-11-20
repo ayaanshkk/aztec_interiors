@@ -379,119 +379,130 @@ def update_customer_stage_direct(customer_id):
     finally:
         session.close()
 
-@customer_bp.route('/customers/by-stage/<string:stage>', methods=['GET', 'OPTIONS'])
+@customer_bp.route('/customers', methods=['GET', 'OPTIONS'])
 @token_required
-def get_customers_by_stage(stage):
-    """Get customers who have at least one PROJECT in the specified stage,
-    OR customers themselves in that stage (even without projects)
+def get_customers():
+    """Get all customers with their project counts, form counts, drawing counts, and MOST ADVANCED PROJECT STAGE."""
     
-    This allows material orders for:
-    1. Customers with explicit projects in the stage
-    2. Customers in the stage without separate project entities
-    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
-        # Validate stage
-        if stage not in STAGE_HIERARCHY:
-            return jsonify({'error': f'Invalid stage: {stage}'}), 400
+        from sqlalchemy.orm import joinedload
+        from sqlalchemy import func
         
-        current_app.logger.info(f"🔍 Searching for customers in/with projects in '{stage}' stage...")
-        
-        # ✅ FIX: Query customer IDs first to avoid DISTINCT on JSON columns
-        # Strategy 1: Find customer IDs with projects in this stage
-        customer_ids_with_projects = session.query(Customer.id).join(
-            Project, Customer.id == Project.customer_id
-        ).filter(
-            Project.stage == stage
-        ).distinct().all()
-        
-        # Extract IDs
-        ids_with_projects = [row.id for row in customer_ids_with_projects]
-        
-        # Strategy 2: Find customer IDs themselves in this stage
-        customer_ids_in_stage = session.query(Customer.id).filter(
-            Customer.stage == stage
+        # ✅ FIX 1: Load customers with projects in one query
+        customers = session.query(Customer).options(
+            joinedload(Customer.projects)
         ).all()
         
-        # Extract IDs
-        ids_in_stage = [row.id for row in customer_ids_in_stage]
+        current_app.logger.info(f"📊 Fetching data for {len(customers)} customers")
         
-        # Combine and deduplicate
-        all_customer_ids = list(set(ids_with_projects + ids_in_stage))
+        # ✅ FIX 2: Get ALL counts in bulk queries (not one-by-one)
+        customer_ids = [c.id for c in customers]
         
-        current_app.logger.info(
-            f"📊 Found {len(ids_with_projects)} customers with projects in '{stage}' + "
-            f"{len(ids_in_stage)} customers in '{stage}' stage = "
-            f"{len(all_customer_ids)} unique customers total"
+        # Bulk count forms
+        form_counts = dict(
+            session.query(CustomerFormData.customer_id, func.count(CustomerFormData.id))
+            .filter(CustomerFormData.customer_id.in_(customer_ids))
+            .group_by(CustomerFormData.customer_id)
+            .all()
         )
         
-        if not all_customer_ids:
-            current_app.logger.warning(f"⚠️ No customers found in/with projects in '{stage}' stage")
-            return jsonify([]), 200
+        # Bulk count drawings
+        drawing_counts = dict(
+            session.query(DrawingDocument.customer_id, func.count(DrawingDocument.id))
+            .filter(DrawingDocument.customer_id.in_(customer_ids))
+            .group_by(DrawingDocument.customer_id)
+            .all()
+        )
         
-        # Now fetch full customer objects
-        all_customers = session.query(Customer).filter(
-            Customer.id.in_(all_customer_ids)
-        ).all()
+        # Bulk count form documents
+        form_doc_counts = dict(
+            session.query(FormDocument.customer_id, func.count(FormDocument.id))
+            .filter(FormDocument.customer_id.in_(customer_ids))
+            .group_by(FormDocument.customer_id)
+            .all()
+        )
         
-        # Prepare response
         result = []
-        for customer in all_customers:
-            # Count projects at this specific stage
-            projects_at_stage = session.query(Project).filter(
-                Project.customer_id == customer.id,
-                Project.stage == stage
-            ).all()
+        for customer in customers:
+            # ✅ Use pre-loaded projects
+            customer_projects = customer.projects
+            total_project_count = len(customer_projects)
             
-            # Get total project count for this customer
-            total_projects = session.query(Project).filter_by(customer_id=customer.id).count()
+            # ✅ Use bulk-loaded counts (default to 0 if customer not in dict)
+            form_count = form_counts.get(customer.id, 0)
+            drawing_count = drawing_counts.get(customer.id, 0)
+            form_doc_count = form_doc_counts.get(customer.id, 0)
             
-            # Determine if this is a customer-level or project-level entry
-            has_separate_projects = total_projects > 0
+            # Collect stages ONLY from projects
+            all_stages = [customer.stage] if customer.stage else []
+            all_stages.extend([project.stage for project in customer_projects if project.stage])
             
-            current_app.logger.info(
-                f"  ✅ Customer: {customer.name} | "
-                f"Customer Stage: {customer.stage} | "
-                f"Projects in {stage}: {len(projects_at_stage)} | "
-                f"Total projects: {total_projects} | "
-                f"Type: {'Project-based' if has_separate_projects else 'Customer-level'}"
-            )
+            # Get the most advanced stage
+            display_stage = get_most_advanced_stage(all_stages)
             
-            result.append({
+            # Ensure stage is always a string, never None
+            if not display_stage or display_stage == 'None':
+                display_stage = 'Lead'
+            
+            # Calculate total document count
+            total_documents = int(drawing_count) + int(form_count) + int(form_doc_count)
+            
+            customer_data = {
                 'id': customer.id,
                 'name': customer.name,
-                'email': customer.email,
-                'phone': customer.phone,
-                'address': customer.address,
-                'stage': stage,
-                'customer_stage': customer.stage,  # ✅ Customer's actual stage
-                'projects_at_stage': len(projects_at_stage),
-                'project_details': [
-                    {
-                        'id': p.id,
-                        'name': p.project_name,
-                        'type': p.project_type,
-                        'stage': p.stage
-                    } for p in projects_at_stage
-                ] if projects_at_stage else [],
-                'total_projects': total_projects,
-                'has_separate_projects': has_separate_projects,  # ✅ Flag for UI
-                'is_customer_level': not has_separate_projects  # ✅ Customer-level vs project-level
-            })
-        
-        # Sort: Customers with projects first, then customer-level entries
-        result.sort(key=lambda x: (not x['has_separate_projects'], x['name']))
-        
-        current_app.logger.info(f"✅ Returning {len(result)} customers for stage '{stage}'")
+                'phone': customer.phone or '',
+                'email': customer.email or '',
+                'address': customer.address or '',
+                'postcode': customer.postcode or '',
+                'salesperson': customer.salesperson or '',
+                'contact_made': customer.contact_made or 'Unknown',
+                'preferred_contact_method': customer.preferred_contact_method or 'Phone',
+                'marketing_opt_in': bool(customer.marketing_opt_in),
+                'notes': customer.notes or '',
+                'status': customer.status or 'Active',
+                'date_of_measure': customer.date_of_measure.isoformat() if customer.date_of_measure else None,
+                'created_at': customer.created_at.isoformat() if customer.created_at else None,
+                'updated_at': customer.updated_at.isoformat() if customer.updated_at else None,
+                'created_by': customer.created_by,
+                'updated_by': customer.updated_by,
+                'stage': display_stage,
+                'project_count': total_project_count,
+                'form_count': int(form_count),
+                'drawing_count': int(drawing_count),
+                'form_document_count': int(form_doc_count),
+                'total_documents': total_documents,
+                'has_documents': total_documents > 0,
+                'has_drawings': drawing_count > 0,
+                'has_forms': form_count > 0 or form_doc_count > 0,
+            }
+            
+            # Handle project_types
+            project_types_value = customer.project_types
+            if project_types_value is None:
+                project_types_value = []
+            elif isinstance(project_types_value, str):
+                import json
+                try:
+                    project_types_value = json.loads(project_types_value)
+                except:
+                    project_types_value = []
+            elif not isinstance(project_types_value, list):
+                project_types_value = []
+            
+            customer_data['project_types'] = project_types_value
+            result.append(customer_data)
+
+        current_app.logger.info(f"✅ Returning {len(result)} customers")
         
         return jsonify(result), 200
-        
+
     except Exception as e:
-        current_app.logger.exception(f"❌ Error fetching customers by stage: {e}")
-        return jsonify({'error': f'Failed to fetch customers in {stage} stage'}), 500
+        current_app.logger.exception(f"❌ Error fetching customers: {e}")
+        return jsonify({'error': 'Failed to fetch customers'}), 500
     finally:
         session.close()
 
