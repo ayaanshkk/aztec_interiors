@@ -83,40 +83,40 @@ def manager_required(f):
 # NEW CUSTOMER ROUTE: Fetch List of Customers for the Dropdown
 # ------------------------------------------------------------------------
 
-@form_bp.route('/customers', methods=['GET', 'OPTIONS'])
-@token_required
-def get_all_customers():
-    """
-    Retrieves a list of all customers, typically for selection in a dropdown.
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+# @form_bp.route('/customers', methods=['GET', 'OPTIONS'])
+# @token_required
+# def get_all_customers():
+#     """
+#     Retrieves a list of all customers, typically for selection in a dropdown.
+#     """
+#     if request.method == 'OPTIONS':
+#         return jsonify({}), 200
 
-    session = SessionLocal() # Start session for read operation
-    try:
-        # Fetch all customers (Already correct)
-        customers = session.query(Customer).all()
+#     session = SessionLocal() # Start session for read operation
+#     try:
+#         # Fetch all customers (Already correct)
+#         customers = session.query(Customer).all()
         
-        # Manually convert to the required simple JSON format for the frontend dropdown
-        customer_list = [
-            {
-                'id': c.id,
-                'name': c.name,
-                'address': c.address,
-                'phone': c.phone,
-                'email': c.email
-            }
-            for c in customers
-        ]
+#         # Manually convert to the required simple JSON format for the frontend dropdown
+#         customer_list = [
+#             {
+#                 'id': c.id,
+#                 'name': c.name,
+#                 'address': c.address,
+#                 'phone': c.phone,
+#                 'email': c.email
+#             }
+#             for c in customers
+#         ]
 
-        return jsonify(customer_list), 200
+#         return jsonify(customer_list), 200
 
-    except Exception as e:
-        session.rollback()
-        current_app.logger.exception(f"Error fetching all customers: {e}")
-        return jsonify({'error': 'Failed to fetch customer list'}), 500
-    finally:
-        session.close() # Close session
+#     except Exception as e:
+#         session.rollback()
+#         current_app.logger.exception(f"Error fetching all customers: {e}")
+#         return jsonify({'error': 'Failed to fetch customer list'}), 500
+#     finally:
+#         session.close() # Close session
 
 # ------------------------------------------------------------------------
 # APPROVAL SYSTEM ROUTES
