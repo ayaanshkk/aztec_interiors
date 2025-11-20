@@ -53,133 +53,133 @@ def handle_users():
 
 # ------------------ CUSTOMERS ------------------
 
-@db_bp.route('/customers', methods=['GET', 'POST', 'OPTIONS'])
-@token_required
-def handle_customers():
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+# @db_bp.route('/customers', methods=['GET', 'POST', 'OPTIONS'])
+# @token_required
+# def handle_customers():
+#     if request.method == 'OPTIONS':
+#         return jsonify({}), 200
 
-    session = SessionLocal()
-    try:
-        if request.method == 'POST':
-            data = request.json
-            customer = Customer(
-                name=data.get('name', ''),
-                # Ensure date parsing works correctly
-                date_of_measure=datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date() if data.get('date_of_measure') else None,
-                address=data.get('address', ''),
-                phone=data.get('phone', ''),
-                email=data.get('email', ''),
-                contact_made=data.get('contact_made', 'Unknown'),
-                preferred_contact_method=data.get('preferred_contact_method'),
-                marketing_opt_in=data.get('marketing_opt_in', False),
-                notes=data.get('notes', ''),
-                stage=data.get('stage', 'Lead'),
-                created_by=get_current_user_email(data),
-                status=data.get('status', 'Active'),
-                project_types=data.get('project_types', []),
-                salesperson=data.get('salesperson'),
-            )
-            session.add(customer)
-            session.commit()
-            return jsonify({'id': customer.id, 'message': 'Customer created successfully'}), 201
+#     session = SessionLocal()
+#     try:
+#         if request.method == 'POST':
+#             data = request.json
+#             customer = Customer(
+#                 name=data.get('name', ''),
+#                 # Ensure date parsing works correctly
+#                 date_of_measure=datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date() if data.get('date_of_measure') else None,
+#                 address=data.get('address', ''),
+#                 phone=data.get('phone', ''),
+#                 email=data.get('email', ''),
+#                 contact_made=data.get('contact_made', 'Unknown'),
+#                 preferred_contact_method=data.get('preferred_contact_method'),
+#                 marketing_opt_in=data.get('marketing_opt_in', False),
+#                 notes=data.get('notes', ''),
+#                 stage=data.get('stage', 'Lead'),
+#                 created_by=get_current_user_email(data),
+#                 status=data.get('status', 'Active'),
+#                 project_types=data.get('project_types', []),
+#                 salesperson=data.get('salesperson'),
+#             )
+#             session.add(customer)
+#             session.commit()
+#             return jsonify({'id': customer.id, 'message': 'Customer created successfully'}), 201
 
-        # GET all customers (FIXED: Uses session.query)
-        customers = session.query(Customer).order_by(Customer.created_at.desc()).all()
+#         # GET all customers (FIXED: Uses session.query)
+#         customers = session.query(Customer).order_by(Customer.created_at.desc()).all()
         
-        # FIX: Explicitly include 'postcode' in the customer list serialization
-        customer_list = []
-        for c in customers:
-            customer_dict = c.to_dict(include_projects=False)
-            # Assuming the postcode property exists on the Customer model instance
-            customer_dict['postcode'] = getattr(c, 'postcode', None) or getattr(c, 'post_code', None) or None
-            customer_list.append(customer_dict)
+#         # FIX: Explicitly include 'postcode' in the customer list serialization
+#         customer_list = []
+#         for c in customers:
+#             customer_dict = c.to_dict(include_projects=False)
+#             # Assuming the postcode property exists on the Customer model instance
+#             customer_dict['postcode'] = getattr(c, 'postcode', None) or getattr(c, 'post_code', None) or None
+#             customer_list.append(customer_dict)
 
-        return jsonify(customer_list)
+#         return jsonify(customer_list)
 
-    except Exception as e:
-        session.rollback()
-        current_app.logger.error(f"Error in /customers: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
+#     except Exception as e:
+#         session.rollback()
+#         current_app.logger.error(f"Error in /customers: {e}")
+#         return jsonify({'error': str(e)}), 500
+#     finally:
+#         session.close()
 
 
-@db_bp.route('/customers/<string:customer_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
-@token_required
-def handle_single_customer(customer_id):
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+# @db_bp.route('/customers/<string:customer_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+# @token_required
+# def handle_single_customer(customer_id):
+#     if request.method == 'OPTIONS':
+#         return jsonify({}), 200
 
-    session = SessionLocal()
-    try:
-        # FIXED: Uses session.query
-        customer = session.query(Customer).filter_by(id=customer_id).first()
-        if not customer:
-            return jsonify({'error': 'Customer not found'}), 404
+#     session = SessionLocal()
+#     try:
+#         # FIXED: Uses session.query
+#         customer = session.query(Customer).filter_by(id=customer_id).first()
+#         if not customer:
+#             return jsonify({'error': 'Customer not found'}), 404
 
-        if request.method == 'GET':
-            # FIXED: Uses session.query for CustomerFormData
-            form_entries = session.query(CustomerFormData).filter_by(customer_id=customer.id).order_by(CustomerFormData.submitted_at.desc()).all()
-            form_submissions = []
-            for f in form_entries:
-                try:
-                    # Robust handling of form data and dates
-                    parsed_data = json.loads(f.form_data) if getattr(f, 'form_data', None) else {}
-                    form_submissions.append({
-                        "id": f.id,
-                        "token_used": f.token_used,
-                        "submitted_at": f.submitted_at.isoformat() if f.submitted_at else None,
-                        "form_data": parsed_data,
-                        "project_id": getattr(f, 'project_id', None),
-                        "approval_status": getattr(f, 'approval_status', 'pending'),
-                        "approved_by": f.approved_by,
-                        "approval_date": f.approval_date.isoformat() if f.approval_date else None
-                    })
-                except Exception as inner_e:
-                    current_app.logger.error(f"Error processing form submission {getattr(f, 'id', 'unknown')}: {inner_e}")
+#         if request.method == 'GET':
+#             # FIXED: Uses session.query for CustomerFormData
+#             form_entries = session.query(CustomerFormData).filter_by(customer_id=customer.id).order_by(CustomerFormData.submitted_at.desc()).all()
+#             form_submissions = []
+#             for f in form_entries:
+#                 try:
+#                     # Robust handling of form data and dates
+#                     parsed_data = json.loads(f.form_data) if getattr(f, 'form_data', None) else {}
+#                     form_submissions.append({
+#                         "id": f.id,
+#                         "token_used": f.token_used,
+#                         "submitted_at": f.submitted_at.isoformat() if f.submitted_at else None,
+#                         "form_data": parsed_data,
+#                         "project_id": getattr(f, 'project_id', None),
+#                         "approval_status": getattr(f, 'approval_status', 'pending'),
+#                         "approved_by": f.approved_by,
+#                         "approval_date": f.approval_date.isoformat() if f.approval_date else None
+#                     })
+#                 except Exception as inner_e:
+#                     current_app.logger.error(f"Error processing form submission {getattr(f, 'id', 'unknown')}: {inner_e}")
             
-            customer_data = customer.to_dict(include_projects=True)
-            customer_data['form_submissions'] = form_submissions
-            return jsonify(customer_data)
+#             customer_data = customer.to_dict(include_projects=True)
+#             customer_data['form_submissions'] = form_submissions
+#             return jsonify(customer_data)
 
-        elif request.method == 'PUT':
-            data = request.json
-            # ... (Update logic for customer attributes) ...
-            customer.name = data.get('name', customer.name)
-            customer.address = data.get('address', customer.address)
-            customer.phone = data.get('phone', customer.phone)
-            customer.email = data.get('email', customer.email)
-            customer.contact_made = data.get('contact_made', customer.contact_made)
-            customer.preferred_contact_method = data.get('preferred_contact_method', customer.preferred_contact_method)
-            customer.marketing_opt_in = data.get('marketing_opt_in', customer.marketing_opt_in)
-            customer.notes = data.get('notes', customer.notes)
-            customer.updated_by = get_current_user_email(data)
-            customer.salesperson = data.get('salesperson', customer.salesperson)
-            customer.project_types = data.get('project_types', customer.project_types)
-            if data.get('date_of_measure'):
-                customer.date_of_measure = datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date()
-            if 'stage' in data:
-                customer.stage = data.get('stage', customer.stage)
+#         elif request.method == 'PUT':
+#             data = request.json
+#             # ... (Update logic for customer attributes) ...
+#             customer.name = data.get('name', customer.name)
+#             customer.address = data.get('address', customer.address)
+#             customer.phone = data.get('phone', customer.phone)
+#             customer.email = data.get('email', customer.email)
+#             customer.contact_made = data.get('contact_made', customer.contact_made)
+#             customer.preferred_contact_method = data.get('preferred_contact_method', customer.preferred_contact_method)
+#             customer.marketing_opt_in = data.get('marketing_opt_in', customer.marketing_opt_in)
+#             customer.notes = data.get('notes', customer.notes)
+#             customer.updated_by = get_current_user_email(data)
+#             customer.salesperson = data.get('salesperson', customer.salesperson)
+#             customer.project_types = data.get('project_types', customer.project_types)
+#             if data.get('date_of_measure'):
+#                 customer.date_of_measure = datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date()
+#             if 'stage' in data:
+#                 customer.stage = data.get('stage', customer.stage)
             
-            # Assuming this method exists on the model
-            if 'address' in data:
-                customer.postcode = customer.extract_postcode_from_address()
+#             # Assuming this method exists on the model
+#             if 'address' in data:
+#                 customer.postcode = customer.extract_postcode_from_address()
                 
-            session.commit()
-            return jsonify({'message': 'Customer updated successfully'})
+#             session.commit()
+#             return jsonify({'message': 'Customer updated successfully'})
 
-        elif request.method == 'DELETE':
-            session.delete(customer)
-            session.commit()
-            return jsonify({'message': 'Customer deleted successfully'})
+#         elif request.method == 'DELETE':
+#             session.delete(customer)
+#             session.commit()
+#             return jsonify({'message': 'Customer deleted successfully'})
 
-    except Exception as e:
-        session.rollback()
-        current_app.logger.error(f"Error handling customer {customer_id}: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
+#     except Exception as e:
+#         session.rollback()
+#         current_app.logger.error(f"Error handling customer {customer_id}: {e}")
+#         return jsonify({'error': str(e)}), 500
+#     finally:
+#         session.close()
 
 
 # ------------------ CUSTOMER STAGE ------------------
