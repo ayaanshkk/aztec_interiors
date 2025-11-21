@@ -995,6 +995,7 @@ class ProductionNotification(Base):
     __tablename__ = 'production_notifications'
     
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     job_id = Column(String(36), ForeignKey('jobs.id'), nullable=True)
     customer_id = Column(String(36), ForeignKey('customers.id'), nullable=True)
     checklist_id = Column(String(50), nullable=True)
@@ -1003,9 +1004,11 @@ class ProductionNotification(Base):
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     read = Column(Boolean, default=False)
+    dismissed = Column(Boolean, default=False)
     moved_by = Column(String(255), nullable=True)
     
     # relationships
+    user = relationship('User', backref='notifications')
     job = relationship('Job', backref='notifications')
     customer = relationship('Customer', backref='notifications')
 
@@ -1389,3 +1392,17 @@ class MaterialChangeLog(Base):
             'change_description': self.change_description,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+class ActionItem(Base):
+    __tablename__ = 'action_items'
+    
+    id = Column(String, primary_key=True)
+    customer_id = Column(String, ForeignKey('customers.id'), nullable=False)
+    stage = Column(String, nullable=False)  # The stage that triggered this action
+    priority = Column(String, default='High')  # High, Medium, Low
+    completed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    customer = relationship("Customer", backref="action_items")

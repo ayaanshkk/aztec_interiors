@@ -5,7 +5,7 @@ import traceback
 from ..models import (
     Job, Customer, Team, Fitter, Salesperson, 
     JobDocument, JobFormLink, FormSubmission, 
-    JobNote, Quotation, Assignment # Ensure Assignment is imported
+    JobNote, Quotation, Assignment
 )
 from ..db import SessionLocal
 from .auth_helpers import token_required
@@ -13,14 +13,21 @@ from sqlalchemy import func
 
 job_bp = Blueprint('jobs', __name__)
 
-def generate_job_reference():
-    """Generate auto job reference"""
-    now = datetime.now()
-    year = now.year
-    month = str(now.month).zfill(2)
-    day = str(now.day).zfill(2)
-    time = str(now.hour).zfill(2) + str(now.minute).zfill(2)
-    return f"AZT-{year}-{month}{day}-{time}"
+def generate_job_reference(session):
+    """Generate sequential job reference like AZ-JOB001"""
+    # Get the count of existing jobs
+    job_count = session.query(Job).count()
+    
+    # Generate reference with zero-padded number
+    reference_number = job_count + 1
+    job_reference = f"AZ-JOB{reference_number:03d}"
+    
+    # Ensure uniqueness (in case of deletions)
+    while session.query(Job).filter(Job.job_reference == job_reference).first():
+        reference_number += 1
+        job_reference = f"AZ-JOB{reference_number:03d}"
+    
+    return job_reference
 
 def serialize_job(job):
     """Serialize job object to dictionary"""
@@ -117,7 +124,7 @@ def create_job():
         print("Received data:", data)
         
         # Validate required fields
-        required_fields = ['customer_id', 'job_type']
+        required_fields = ['customer_id', 'job_type', 'measure_date', 'completion_date']
         missing_fields = []
         
         for field in required_fields:
@@ -134,24 +141,14 @@ def create_job():
         if not customer:
             return jsonify({'error': 'Customer not found'}), 400
         
-        # Generate job reference if not provided
-        job_reference = data.get('job_reference') or generate_job_reference()
-        
-        # Check if job reference is unique
-        existing_job = session.query(Job).filter(Job.job_reference == job_reference).first()
-        if existing_job:
-            counter = 1
-            base_ref = job_reference
-            while existing_job:
-                job_reference = f"{base_ref}-{counter:02d}"
-                existing_job = session.query(Job).filter(Job.job_reference == job_reference).first()
-                counter += 1
+        # Generate sequential job reference
+        job_reference = generate_job_reference(session)
+        print(f"Generated job reference: {job_reference}")
         
         # Parse dates safely
         def parse_date(date_str):
             if date_str:
                 try:
-                    # Accepts ISO format string and returns datetime object
                     return datetime.strptime(date_str.split('T')[0], '%Y-%m-%d')
                 except ValueError:
                     print(f"Invalid date format: {date_str}")
@@ -161,14 +158,20 @@ def create_job():
         # Use customer's address as installation address if not provided
         installation_address = data.get('installation_address') or customer.address
         
+        # Default priority to Medium if not provided
+        priority = data.get('priority', 'Medium')
+        
+        # Default stage to Lead
+        stage = data.get('stage', 'Lead')
+        
         job = Job(
             id=str(uuid.uuid4()),
             job_reference=job_reference,
             job_name=data.get('job_name'),
             customer_id=data['customer_id'],
             job_type=data['job_type'],
-            stage=data.get('stage', 'Lead'),
-            priority=data.get('priority', 'Medium'),
+            stage=stage,
+            priority=priority,
             measure_date=parse_date(data.get('measure_date')),
             delivery_date=parse_date(data.get('delivery_date')),
             completion_date=parse_date(data.get('completion_date')),
@@ -178,12 +181,12 @@ def create_job():
             deposit1=data.get('deposit1'),
             deposit2=data.get('deposit2'),
             deposit_due_date=parse_date(data.get('deposit_due_date')),
-            installation_address=installation_address,  # Use customer address
+            installation_address=installation_address,
             assigned_team_id=data.get('assigned_team') if data.get('assigned_team') else None,
             primary_fitter_id=data.get('primary_fitter') if data.get('primary_fitter') else None,
             salesperson_id=data.get('salesperson') if data.get('salesperson') else None,
             assigned_team_name=data.get('team_member'),
-            salesperson_name=data.get('salesperson_name') or customer.salesperson,  # Use from data or customer
+            salesperson_name=data.get('salesperson_name') or customer.salesperson,
             notes=data.get('notes', ''),
             has_counting_sheet=data.get('create_counting_sheet', False),
             has_schedule=data.get('create_schedule', False),
@@ -193,7 +196,7 @@ def create_job():
         session.add(job)
         session.flush()
         
-        print(f"Created job with ID: {job.id}")
+        print(f"✅ Created job with ID: {job.id}, Reference: {job_reference}")
         
         # Create notification
         try:
@@ -212,7 +215,7 @@ def create_job():
             
             print(f"✅ Notification created for job {job.id}")
         except ImportError:
-             print("⚠️ Warning: Notification function not found.")
+            print("⚠️ Warning: Notification function not found.")
         except Exception as notif_error:
             print(f"⚠️ Failed to create notification: {notif_error}")
         
@@ -247,7 +250,7 @@ def create_job():
         return jsonify(serialize_job(job)), 201
         
     except Exception as e:
-        print(f"Error creating job: {str(e)}")
+        print(f"❌ Error creating job: {str(e)}")
         traceback.print_exc()
         session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -308,7 +311,7 @@ def update_job(job_id):
 @job_bp.route('/jobs/<string:job_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
 def delete_job(job_id):
-    """Delete a job and its dependent records to prevent Foreign Key errors."""
+    """Delete a job and its dependent records"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
@@ -320,42 +323,29 @@ def delete_job(job_id):
             
         print(f"Attempting to delete job {job_id} and its dependencies.")
 
-        # 🔑 FIX: Delete dependent records first to satisfy Foreign Key constraints
-        
-        # 1. Delete Job Notes
+        # Delete dependent records
         session.query(JobNote).filter(JobNote.job_id == job_id).delete(synchronize_session='fetch')
-        
-        # 2. Delete Job Documents
         session.query(JobDocument).filter(JobDocument.job_id == job_id).delete(synchronize_session='fetch')
-        
-        # 3. Delete Job Form Links (links to FormSubmission)
         session.query(JobFormLink).filter(JobFormLink.job_id == job_id).delete(synchronize_session='fetch')
-        
-        # 4. Delete Assignments related to this job
         session.query(Assignment).filter(Assignment.job_id == job_id).delete(synchronize_session='fetch')
 
-        # NOTE: Quotation is often loosely linked. If a Quotation record references this job_id
-        # and has ON DELETE RESTRICT, you must deal with it here (e.g., delete it or set job_id to NULL).
-        # Assuming it needs to be deleted if the job is deleted for safety:
-        # session.query(Quotation).filter(Quotation.job_id == job_id).delete(synchronize_session='fetch')
-
-        session.flush() # Execute dependent deletions immediately
+        session.flush()
         
-        # 5. Delete the Job itself
         session.delete(job)
-        
         session.commit()
-        print(f"Successfully deleted job {job_id}.")
+        
+        print(f"✅ Successfully deleted job {job_id}.")
         return jsonify({'message': 'Job deleted successfully'})
         
     except Exception as e:
         traceback.print_exc()
-        print(f"FATAL Error deleting job {job_id}: {str(e)}")
+        print(f"❌ Error deleting job {job_id}: {str(e)}")
         session.rollback()
-        return jsonify({'error': f"Failed to delete job due to database error. Check server logs."}), 500
+        return jsonify({'error': f"Failed to delete job"}), 500
     finally:
         session.close()
 
+# Keep all other endpoints the same...
 @job_bp.route('/jobs/<string:job_id>/notes', methods=['GET'])
 def get_job_notes(job_id):
     """Get all notes for a job"""
@@ -463,7 +453,6 @@ def update_job_stage(job_id):
         job.stage = data['stage']
         job.updated_at = datetime.utcnow()
         
-        # Add system note about stage change
         stage_note = JobNote(
             job_id=job_id,
             content=f'Stage changed from "{old_stage}" to "{data["stage"]}"',
@@ -481,8 +470,6 @@ def update_job_stage(job_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
-# Supporting endpoints for form data
 
 @job_bp.route('/teams', methods=['GET'])
 def get_teams():
@@ -543,10 +530,8 @@ def get_unlinked_forms():
     try:
         customer_id = request.args.get('customer_id')
         
-        # Subquery to get form IDs that are already linked to jobs
         linked_form_ids = session.query(JobFormLink.form_submission_id).subquery()
         
-        # Query for unlinked forms
         query = session.query(FormSubmission).filter(
             ~FormSubmission.id.in_(linked_form_ids)
         )
@@ -569,26 +554,6 @@ def get_unlinked_forms():
     finally:
         session.close()
 
-@job_bp.route('/jobs/reference/generate', methods=['GET'])
-def generate_job_reference_endpoint():
-    """Generate a new unique job reference"""
-    session = SessionLocal()
-    try:
-        reference = generate_job_reference()
-        
-        # Ensure uniqueness
-        counter = 1
-        while session.query(Job).filter(Job.job_reference == reference).first():
-            reference = f"{generate_job_reference()}-{counter:02d}"
-            counter += 1
-        
-        return jsonify({'job_reference': reference})
-    except Exception as e:
-        print(f"Error generating job reference: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
 @job_bp.route('/jobs/stats', methods=['GET'])
 def get_job_stats():
     """Get job statistics"""
@@ -601,7 +566,6 @@ def get_job_stats():
             'by_priority': {}
         }
         
-        # Jobs by stage
         stage_counts = session.query(
             Job.stage, 
             func.count(Job.id)
@@ -610,7 +574,6 @@ def get_job_stats():
         for stage, count in stage_counts:
             stats['by_stage'][stage] = count
         
-        # Jobs by type
         type_counts = session.query(
             Job.job_type, 
             func.count(Job.id)
@@ -619,7 +582,6 @@ def get_job_stats():
         for job_type, count in type_counts:
             stats['by_type'][job_type] = count
         
-        # Jobs by priority
         priority_counts = session.query(
             Job.priority, 
             func.count(Job.id)

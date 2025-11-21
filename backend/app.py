@@ -111,7 +111,7 @@ def create_app():
     from backend.routes import (
         auth_routes, approvals_routes, form_routes, db_routes,
         notification_routes, assignment_routes, appliance_routes,
-        customer_routes, file_routes, materials_routes, job_routes,
+        customer_routes, file_routes, materials_routes, job_routes, action_items_routes,
     )
 
     app.register_blueprint(auth_routes.auth_bp)
@@ -125,6 +125,7 @@ def create_app():
     app.register_blueprint(file_routes.file_bp)
     app.register_blueprint(materials_routes.materials_bp)
     app.register_blueprint(job_routes.job_bp)
+    app.register_blueprint(action_items_routes.action_items_bp)  # ✅ FIXED
 
     # ============================================
     # HEALTH CHECK

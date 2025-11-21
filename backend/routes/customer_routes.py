@@ -364,7 +364,7 @@ def update_customer(customer_id):
 @customer_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage_direct(customer_id):
-    """Update customer stage directly - FIXED VERSION"""
+    """Update customer stage directly - WITH NOTIFICATIONS AND ACTION ITEMS"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -387,11 +387,71 @@ def update_customer_stage_direct(customer_id):
         customer.updated_by = str(request.current_user.id)
         customer.updated_at = datetime.utcnow()
         
-        # ✅ CRITICAL: Commit immediately
+        # ✅ CRITICAL: Commit customer update FIRST
         session.commit()
         session.refresh(customer)
         
         current_app.logger.info(f"✅ Customer stage updated: {old_stage} → {new_stage}")
+        
+        # ✅ Create action item when moved to Accepted
+        if new_stage == 'Accepted' and old_stage != 'Accepted':
+            try:
+                from ..models import ActionItem
+                import uuid
+                
+                # Check if action item already exists
+                existing = session.query(ActionItem).filter(
+                    ActionItem.customer_id == customer_id,
+                    ActionItem.stage == 'Accepted',
+                    ActionItem.completed == False
+                ).first()
+                
+                if not existing:
+                    action_item = ActionItem(
+                        id=str(uuid.uuid4()),
+                        customer_id=customer_id,
+                        stage='Accepted',
+                        priority='High',
+                        completed=False
+                    )
+                    session.add(action_item)
+                    session.commit()
+                    current_app.logger.info(f"✅ Created action item for customer {customer.name}")
+            except Exception as action_error:
+                current_app.logger.error(f"⚠️ Failed to create action item: {action_error}")
+                # Don't fail the request if action item creation fails
+        
+        # ✅ Create notification for important stages
+        important_stages = ['Accepted', 'Production', 'Delivery', 'Installation', 'Complete']
+        
+        if new_stage in important_stages and old_stage != new_stage:
+            try:
+                stage_emoji = {
+                    'Accepted': '✅',
+                    'Production': '🏭',
+                    'Delivery': '🚚',
+                    'Installation': '🔧',
+                    'Complete': '🎉'
+                }
+                emoji = stage_emoji.get(new_stage, '🔄')
+                
+                user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.email
+                
+                notification_message = f"{emoji} Customer '{customer.name}' moved to {new_stage} stage"
+                
+                # Use the helper function to create notification
+                create_activity_notification(
+                    session=session,
+                    message=notification_message,
+                    customer_id=customer_id,
+                    moved_by=user_name
+                )
+                
+                current_app.logger.info(f"✅ Created {new_stage} stage notification for customer {customer.name}")
+                
+            except Exception as notif_error:
+                current_app.logger.error(f"⚠️ Failed to create notification: {notif_error}")
+                # Don't fail the request if notification fails
         
         return jsonify({
             'success': True,
