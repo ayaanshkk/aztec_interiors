@@ -756,6 +756,39 @@ def update_project(project_id):
             old_customer_stage = customer.stage
             customer.stage = project.stage
             
+            # ✅ CREATE ACTION ITEM when project moves to Accepted
+            if project.stage == 'Accepted' and old_stage != 'Accepted':
+                current_app.logger.info(f"🎯 Project moved to Accepted, creating action item for customer {customer.name}...")
+                try:
+                    from ..models import ActionItem
+                    
+                    # Check if action item already exists for this customer
+                    existing = session.query(ActionItem).filter(
+                        ActionItem.customer_id == customer.id,
+                        ActionItem.stage == 'Accepted',
+                        ActionItem.completed == False
+                    ).first()
+                    
+                    if existing:
+                        current_app.logger.info(f"⏭️ Action item already exists for customer {customer.name}")
+                    else:
+                        action_item = ActionItem(
+                            id=str(uuid.uuid4()),
+                            customer_id=customer.id,
+                            stage='Accepted',
+                            priority='High',
+                            completed=False
+                        )
+                        session.add(action_item)
+                        session.flush()  # Get the ID without committing
+                        current_app.logger.info(f"✅ Successfully created action item {action_item.id} for customer {customer.name}")
+                except Exception as action_error:
+                    current_app.logger.error(f"❌ Failed to create action item: {str(action_error)}")
+                    import traceback
+                    current_app.logger.error(traceback.format_exc())
+                    # Don't fail the request if action item creation fails
+            
+            # Existing Production notification code
             if project.stage == 'Production' and old_customer_stage != 'Production':
                 notification = ProductionNotification(
                     id=str(uuid.uuid4()),
