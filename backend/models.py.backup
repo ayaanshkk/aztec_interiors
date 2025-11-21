@@ -931,8 +931,6 @@ class Assignment(Base):
     
     # Staff assignment - now just a string field
     team_member = Column(String(200))  # Store name as string
-
-    calendar_event_id = Column(String(255), nullable=True)
     
     # Job-related fields
     job_id = Column(String(36), ForeignKey('jobs.id'))
@@ -1944,8 +1942,6 @@ class Assignment(Base):
     date = Column(Date, nullable=False)
     
     team_member = Column(String(200))
-
-    calendar_event_id = Column(String(255), nullable=True)
     
     job_id = Column(String(36), ForeignKey('jobs.id'))
     customer_id = Column(String(36), ForeignKey('customers.id'))

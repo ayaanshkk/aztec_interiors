@@ -1183,49 +1183,53 @@ class Assignment(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     
-    # Basic assignment info
     type = Column(ASSIGNMENT_TYPE_ENUM, nullable=False, default='job')
     title = Column(String(255), nullable=False)
     date = Column(Date, nullable=False)
     
-    # Staff assignment - BOTH user_id (FK) and team_member (string for display)
-    user_id = Column(Integer, ForeignKey('users.id'))  # FK to User table
-    team_member = Column(String(200))  # Denormalized name for quick display
+    user_id = Column(Integer, ForeignKey('users.id'))
+    team_member = Column(String(200))
     
-    calendar_event_id = Column(String(255), nullable=True)
-    
-    # Who created/assigned this
     created_by = Column(Integer, ForeignKey('users.id'))
     
-    # Job-related fields
     job_id = Column(String(36), ForeignKey('jobs.id'))
     customer_id = Column(String(36), ForeignKey('customers.id'))
+    job_type = Column(String(100))  # ✅ ADD THIS LINE
     
-    # Time fields
     start_time = Column(Time)
     end_time = Column(Time)
     estimated_hours = Column(Float)
     
-    # Additional info
     notes = Column(Text)
     priority = Column(String(20), default='Medium')
     status = Column(String(20), default='Scheduled')
     
-    # Audit fields
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_by = Column(Integer)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # relationships
     job = relationship('Job', backref='assignments')
     customer = relationship('Customer', backref='assignments')
     assigned_user = relationship('User', foreign_keys=[user_id], backref='assignments')
     creator = relationship('User', foreign_keys=[created_by], backref='created_assignments')
     
-    def __repr__(self):
-        return f'<Assignment {self.id}: {self.title} on {self.date}>'
-    
     def to_dict(self):
+        # ✅ Get created_by and updated_by names
+        created_by_name = None
+        updated_by_name = None
+        
+        if self.creator:
+            created_by_name = self.creator.full_name
+        if self.updated_by:
+            from ..db import SessionLocal
+            session = SessionLocal()
+            try:
+                updated_user = session.get(User, self.updated_by)
+                if updated_user:
+                    updated_by_name = updated_user.full_name
+            finally:
+                session.close()
+        
         return {
             'id': self.id,
             'type': self.type,
@@ -1235,6 +1239,7 @@ class Assignment(Base):
             'team_member': self.team_member,
             'job_id': self.job_id,
             'customer_id': self.customer_id,
+            'job_type': self.job_type,  # ✅ ADD THIS
             'start_time': self.start_time.strftime('%H:%M') if self.start_time else None,
             'end_time': self.end_time.strftime('%H:%M') if self.end_time else None,
             'estimated_hours': self.estimated_hours,
@@ -1243,6 +1248,10 @@ class Assignment(Base):
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+            'created_by': self.created_by,
+            'created_by_name': created_by_name,  # ✅ ADD THIS
+            'updated_by': self.updated_by,
+            'updated_by_name': updated_by_name,  # ✅ ADD THIS
             'job_reference': self.job.job_reference if self.job else None,
             'customer_name': self.customer.name if self.customer else None,
         }
