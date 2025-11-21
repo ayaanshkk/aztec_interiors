@@ -1118,7 +1118,7 @@ class ApprovalNotification(Base):
     is_read = Column(Boolean, default=False)
     
     # relationships
-    user = relationship('User', backref='notifications')
+    user = relationship('User', backref='approval_notifications') 
     
     def __repr__(self):
         return f'<ApprovalNotification {self.id} for User {self.user_id}>'
