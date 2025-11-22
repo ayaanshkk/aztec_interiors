@@ -1191,7 +1191,7 @@ class Assignment(Base):
     team_member = Column(String(200))
     
     created_by = Column(Integer, ForeignKey('users.id'))
-    updated_by = Column(Integer, ForeignKey('users.id'))  # ✅ Changed from Column(Integer) to ForeignKey
+    updated_by = Column(Integer, ForeignKey('users.id'))
     
     job_id = Column(String(36), ForeignKey('jobs.id'))
     customer_id = Column(String(36), ForeignKey('customers.id'))
@@ -1237,31 +1237,77 @@ class Assignment(Base):
     )
     
     def to_dict(self):
-        return {
-            'id': self.id,
-            'type': self.type,
-            'title': self.title,
-            'date': self.date.isoformat() if self.date else None,
-            'user_id': self.user_id,
-            'team_member': self.team_member,
-            'job_id': self.job_id,
-            'customer_id': self.customer_id,
-            'job_type': self.job_type,
-            'start_time': self.start_time.strftime('%H:%M') if self.start_time else None,
-            'end_time': self.end_time.strftime('%H:%M') if self.end_time else None,
-            'estimated_hours': self.estimated_hours,
-            'notes': self.notes,
-            'priority': self.priority,
-            'status': self.status,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
-            'created_by': self.created_by,
-            'created_by_name': self.created_by_user.full_name if self.created_by_user else None,
-            'updated_by': self.updated_by,
-            'updated_by_name': self.updated_by_user.full_name if self.updated_by_user else None,
-            'job_reference': self.job.job_reference if self.job else None,
-            'customer_name': self.customer.name if self.customer else None,
-        }
+        """Convert assignment to dictionary with safe attribute access"""
+        try:
+            # ✅ Safely get created_by_name
+            created_by_name = None
+            try:
+                if self.created_by_user:
+                    created_by_name = self.created_by_user.full_name
+            except Exception as e:
+                print(f"Error getting created_by_user: {e}")
+            
+            # ✅ Safely get updated_by_name
+            updated_by_name = None
+            try:
+                if self.updated_by_user:
+                    updated_by_name = self.updated_by_user.full_name
+            except Exception as e:
+                print(f"Error getting updated_by_user: {e}")
+            
+            # ✅ Safely get job_reference
+            job_reference = None
+            try:
+                if self.job:
+                    job_reference = self.job.job_reference
+            except Exception as e:
+                print(f"Error getting job reference: {e}")
+            
+            # ✅ Safely get customer_name
+            customer_name = None
+            try:
+                if self.customer:
+                    customer_name = self.customer.name
+            except Exception as e:
+                print(f"Error getting customer name: {e}")
+            
+            return {
+                'id': self.id,
+                'type': self.type,
+                'title': self.title,
+                'date': self.date.isoformat() if self.date else None,
+                'user_id': self.user_id,
+                'team_member': self.team_member,
+                'job_id': self.job_id,
+                'customer_id': self.customer_id,
+                'job_type': self.job_type,
+                'start_time': self.start_time.strftime('%H:%M') if self.start_time else None,
+                'end_time': self.end_time.strftime('%H:%M') if self.end_time else None,
+                'estimated_hours': self.estimated_hours,
+                'notes': self.notes,
+                'priority': self.priority,
+                'status': self.status,
+                'created_at': self.created_at.isoformat() if self.created_at else None,
+                'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+                'created_by': self.created_by,
+                'created_by_name': created_by_name,
+                'updated_by': self.updated_by,
+                'updated_by_name': updated_by_name,
+                'job_reference': job_reference,
+                'customer_name': customer_name,
+            }
+        except Exception as e:
+            print(f"Error in Assignment.to_dict(): {e}")
+            import traceback
+            traceback.print_exc()
+            # Return minimal safe data
+            return {
+                'id': self.id,
+                'type': self.type,
+                'title': self.title,
+                'date': self.date.isoformat() if self.date else None,
+                'error': 'Error loading full assignment data'
+            }
 
 class FormDocument(Base):
     __tablename__ = 'form_documents'

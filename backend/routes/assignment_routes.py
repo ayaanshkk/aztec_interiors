@@ -226,15 +226,31 @@ def get_available_jobs():
             Job.stage.in_(['ready', 'in_progress', 'confirmed', 'Accepted', 'Production'])
         ).order_by(Job.created_at.desc()).all()
         
-        return jsonify([{
-            'id': j.id,
-            'job_reference': j.job_reference,
-            'customer_name': j.customer.name if j.customer else 'Unknown', 
-            'customer_id': j.customer_id,
-            'job_type': j.job_type or 'Interior Design',
-            'stage': j.stage
-        } for j in jobs])
+        result = []
+        for j in jobs:
+            try:
+                # ✅ Safely access customer relationship
+                customer_name = 'Unknown'
+                if j.customer:
+                    customer_name = j.customer.name
+                
+                result.append({
+                    'id': j.id,
+                    'job_reference': j.job_reference,
+                    'customer_name': customer_name,
+                    'customer_id': j.customer_id,
+                    'job_type': j.job_type or 'Interior Design',
+                    'stage': j.stage
+                })
+            except Exception as job_error:
+                print(f"Error processing job {j.id}: {job_error}")
+                continue
+        
+        return jsonify(result)
     except Exception as e:
+        print(f"Error in get_available_jobs: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -250,14 +266,25 @@ def get_active_customers():
             Customer.status == 'Active'
         ).order_by(Customer.name).all()
         
-        return jsonify([{
-            'id': c.id,
-            'name': c.name,
-            'address': c.address,
-            'phone': c.phone,
-            'stage': c.stage
-        } for c in customers])
+        result = []
+        for c in customers:
+            try:
+                result.append({
+                    'id': c.id,
+                    'name': c.name,
+                    'address': c.address or '',
+                    'phone': c.phone or '',
+                    'stage': c.stage or 'Lead'
+                })
+            except Exception as customer_error:
+                print(f"Error processing customer {c.id}: {customer_error}")
+                continue
+        
+        return jsonify(result)
     except Exception as e:
+        print(f"Error in get_active_customers: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
