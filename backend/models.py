@@ -1191,10 +1191,11 @@ class Assignment(Base):
     team_member = Column(String(200))
     
     created_by = Column(Integer, ForeignKey('users.id'))
+    updated_by = Column(Integer, ForeignKey('users.id'))  # ✅ Changed from Column(Integer) to ForeignKey
     
     job_id = Column(String(36), ForeignKey('jobs.id'))
     customer_id = Column(String(36), ForeignKey('customers.id'))
-    job_type = Column(String(100))  # ✅ ADD THIS LINE
+    job_type = Column(String(100))
     
     start_time = Column(Time)
     end_time = Column(Time)
@@ -1205,38 +1206,37 @@ class Assignment(Base):
     status = Column(String(20), default='Scheduled')
     
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_by = Column(Integer)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # ✅ FIXED RELATIONSHIPS - Clear naming, no conflicts
     job = relationship('Job', backref='assignments')
     customer = relationship('Customer', backref='assignments')
-    user = relationship('User', foreign_keys=[user_id], backref='user_assignments')
-    assigned_user = relationship('User', foreign_keys=[user_id], backref='assignments')
-    creator = relationship('User', foreign_keys=[created_by], backref='created_assignments')
+    
+    # User assigned to the task
+    user = relationship(
+        'User', 
+        foreign_keys=[user_id], 
+        backref='assigned_assignments',
+        overlaps="created_by_user,updated_by_user"
+    )
+    
+    # User who created the assignment
+    created_by_user = relationship(
+        'User', 
+        foreign_keys=[created_by], 
+        backref='created_assignments',
+        overlaps="user,updated_by_user"
+    )
+    
+    # User who last updated the assignment
+    updated_by_user = relationship(
+        'User', 
+        foreign_keys=[updated_by], 
+        backref='updated_assignments',
+        overlaps="user,created_by_user"
+    )
     
     def to_dict(self):
-        # ✅ Get created_by and updated_by names from relationships
-        created_by_name = None
-        updated_by_name = None
-        
-        if self.creator:
-            created_by_name = self.creator.full_name
-        
-        if self.updated_by:
-            # ✅ FIX: Use the existing session object passed to the model
-            # Instead of creating a new session, use the object's session
-            try:
-                from sqlalchemy.orm import object_session
-                session = object_session(self)
-                if session:
-                    updated_user = session.get(User, self.updated_by)
-                    if updated_user:
-                        updated_by_name = updated_user.full_name
-            except Exception as e:
-                # Fallback - just log and continue
-                import logging
-                logging.error(f"Error getting updated_by name: {e}")
-        
         return {
             'id': self.id,
             'type': self.type,
@@ -1256,9 +1256,9 @@ class Assignment(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'created_by': self.created_by,
-            'created_by_name': self.created_by_user.full_name if self.created_by_user else None,  # ✅ Use relationship
+            'created_by_name': self.created_by_user.full_name if self.created_by_user else None,
             'updated_by': self.updated_by,
-            'updated_by_name': self.updated_by_user.full_name if self.updated_by_user else None,  # ✅ Use relationship
+            'updated_by_name': self.updated_by_user.full_name if self.updated_by_user else None,
             'job_reference': self.job.job_reference if self.job else None,
             'customer_name': self.customer.name if self.customer else None,
         }

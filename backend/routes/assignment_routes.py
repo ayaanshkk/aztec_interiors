@@ -55,11 +55,12 @@ def handle_assignments():
                 notes=data.get('notes', ''),
                 priority=data.get('priority', 'Medium'),
                 status=data.get('status', 'Scheduled'),
-                job_type=data.get('job_type')  # ✅ ADD THIS LINE
+                job_type=data.get('job_type')
             )
             
             session.add(assignment)
             session.commit()
+            session.refresh(assignment)  # ✅ Refresh to load relationships
 
             return jsonify({
                 'message': 'Assignment created successfully',
@@ -85,7 +86,9 @@ def handle_assignments():
             
             assignments = query.order_by(Assignment.date.desc()).all()
 
-            return jsonify([a.to_dict() for a in assignments])
+            # ✅ Convert to dict while session is still open
+            result = [a.to_dict() for a in assignments]
+            return jsonify(result)
         except Exception as e:
             return jsonify({'error': str(e)}), 500
         finally:
@@ -118,7 +121,8 @@ def handle_single_assignment(assignment_id):
         
         # GET
         if request.method == 'GET':
-            return jsonify(assignment.to_dict())
+            result = assignment.to_dict()  # ✅ Call to_dict while session is open
+            return jsonify(result)
         
         # PUT
         elif request.method == 'PUT':
@@ -143,7 +147,7 @@ def handle_single_assignment(assignment_id):
                 assignment.priority = data['priority']
             if 'status' in data:
                 assignment.status = data['status']
-            if 'job_type' in data:  # ✅ ADD THIS
+            if 'job_type' in data:
                 assignment.job_type = data['job_type']
             if 'user_id' in data:
                 assignment.user_id = data['user_id']
@@ -155,10 +159,12 @@ def handle_single_assignment(assignment_id):
             assignment.updated_at = datetime.utcnow()
             
             session.commit()
+            session.refresh(assignment)  # ✅ Refresh to load relationships
             
+            result = assignment.to_dict()  # ✅ Call to_dict while session is open
             return jsonify({
                 'message': 'Assignment updated successfully',
-                'assignment': assignment.to_dict()
+                'assignment': result
             })
             
         # DELETE
@@ -201,7 +207,9 @@ def get_assignments_by_date_range():
             
         assignments = query.order_by(Assignment.date).all()
         
-        return jsonify([a.to_dict() for a in assignments])
+        # ✅ Convert to dict while session is still open
+        result = [a.to_dict() for a in assignments]
+        return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 400
     finally:
