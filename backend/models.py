@@ -1210,25 +1210,32 @@ class Assignment(Base):
     
     job = relationship('Job', backref='assignments')
     customer = relationship('Customer', backref='assignments')
+    user = relationship('User', foreign_keys=[user_id], backref='user_assignments')
     assigned_user = relationship('User', foreign_keys=[user_id], backref='assignments')
     creator = relationship('User', foreign_keys=[created_by], backref='created_assignments')
     
     def to_dict(self):
-        # ✅ Get created_by and updated_by names
+        # ✅ Get created_by and updated_by names from relationships
         created_by_name = None
         updated_by_name = None
         
         if self.creator:
             created_by_name = self.creator.full_name
+        
         if self.updated_by:
-            from ..db import SessionLocal
-            session = SessionLocal()
+            # ✅ FIX: Use the existing session object passed to the model
+            # Instead of creating a new session, use the object's session
             try:
-                updated_user = session.get(User, self.updated_by)
-                if updated_user:
-                    updated_by_name = updated_user.full_name
-            finally:
-                session.close()
+                from sqlalchemy.orm import object_session
+                session = object_session(self)
+                if session:
+                    updated_user = session.get(User, self.updated_by)
+                    if updated_user:
+                        updated_by_name = updated_user.full_name
+            except Exception as e:
+                # Fallback - just log and continue
+                import logging
+                logging.error(f"Error getting updated_by name: {e}")
         
         return {
             'id': self.id,
@@ -1239,7 +1246,7 @@ class Assignment(Base):
             'team_member': self.team_member,
             'job_id': self.job_id,
             'customer_id': self.customer_id,
-            'job_type': self.job_type,  # ✅ ADD THIS
+            'job_type': self.job_type,
             'start_time': self.start_time.strftime('%H:%M') if self.start_time else None,
             'end_time': self.end_time.strftime('%H:%M') if self.end_time else None,
             'estimated_hours': self.estimated_hours,
@@ -1249,9 +1256,9 @@ class Assignment(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'created_by': self.created_by,
-            'created_by_name': created_by_name,  # ✅ ADD THIS
+            'created_by_name': self.created_by_user.full_name if self.created_by_user else None,  # ✅ Use relationship
             'updated_by': self.updated_by,
-            'updated_by_name': updated_by_name,  # ✅ ADD THIS
+            'updated_by_name': self.updated_by_user.full_name if self.updated_by_user else None,  # ✅ Use relationship
             'job_reference': self.job.job_reference if self.job else None,
             'customer_name': self.customer.name if self.customer else None,
         }
