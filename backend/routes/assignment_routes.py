@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from ..models import User, Assignment, Job, Customer
 from .auth_routes import token_required
@@ -60,7 +60,7 @@ def handle_assignments():
             
             session.add(assignment)
             session.commit()
-            session.refresh(assignment)  # ✅ Refresh to load relationships
+            session.refresh(assignment)
 
             return jsonify({
                 'message': 'Assignment created successfully',
@@ -69,6 +69,9 @@ def handle_assignments():
 
         except Exception as e:
             session.rollback()
+            current_app.logger.error(f"Error creating assignment: {e}")
+            import traceback
+            traceback.print_exc()
             return jsonify({'error': str(e)}), 400
         finally:
             session.close()
@@ -86,10 +89,21 @@ def handle_assignments():
             
             assignments = query.order_by(Assignment.date.desc()).all()
 
-            # ✅ Convert to dict while session is still open
-            result = [a.to_dict() for a in assignments]
+            result = []
+            for a in assignments:
+                try:
+                    result.append(a.to_dict())
+                except Exception as dict_error:
+                    current_app.logger.error(f"Error converting assignment {a.id} to dict: {dict_error}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
             return jsonify(result)
         except Exception as e:
+            current_app.logger.error(f"Error in GET assignments: {e}")
+            import traceback
+            traceback.print_exc()
             return jsonify({'error': str(e)}), 500
         finally:
             session.close()
@@ -121,7 +135,7 @@ def handle_single_assignment(assignment_id):
         
         # GET
         if request.method == 'GET':
-            result = assignment.to_dict()  # ✅ Call to_dict while session is open
+            result = assignment.to_dict()
             return jsonify(result)
         
         # PUT
@@ -159,9 +173,9 @@ def handle_single_assignment(assignment_id):
             assignment.updated_at = datetime.utcnow()
             
             session.commit()
-            session.refresh(assignment)  # ✅ Refresh to load relationships
+            session.refresh(assignment)
             
-            result = assignment.to_dict()  # ✅ Call to_dict while session is open
+            result = assignment.to_dict()
             return jsonify({
                 'message': 'Assignment updated successfully',
                 'assignment': result
@@ -176,6 +190,9 @@ def handle_single_assignment(assignment_id):
         
     except Exception as e:
         session.rollback()
+        current_app.logger.error(f"Error in handle_single_assignment: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -207,10 +224,12 @@ def get_assignments_by_date_range():
             
         assignments = query.order_by(Assignment.date).all()
         
-        # ✅ Convert to dict while session is still open
         result = [a.to_dict() for a in assignments]
         return jsonify(result)
     except Exception as e:
+        current_app.logger.error(f"Error in get_assignments_by_date_range: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 400
     finally:
         session.close()
@@ -222,14 +241,17 @@ def get_available_jobs():
     """Get jobs that are ready to be scheduled"""
     session = SessionLocal()
     try:
+        current_app.logger.info("📋 Fetching available jobs...")
+        
         jobs = session.query(Job).filter(
             Job.stage.in_(['ready', 'in_progress', 'confirmed', 'Accepted', 'Production'])
         ).order_by(Job.created_at.desc()).all()
         
+        current_app.logger.info(f"✅ Found {len(jobs)} available jobs")
+        
         result = []
         for j in jobs:
             try:
-                # ✅ Safely access customer relationship
                 customer_name = 'Unknown'
                 if j.customer:
                     customer_name = j.customer.name
@@ -243,12 +265,12 @@ def get_available_jobs():
                     'stage': j.stage
                 })
             except Exception as job_error:
-                print(f"Error processing job {j.id}: {job_error}")
+                current_app.logger.error(f"Error processing job {j.id}: {job_error}")
                 continue
         
         return jsonify(result)
     except Exception as e:
-        print(f"Error in get_available_jobs: {e}")
+        current_app.logger.error(f"❌ Error in get_available_jobs: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
@@ -262,9 +284,13 @@ def get_active_customers():
     """Get active customers"""
     session = SessionLocal()
     try:
+        current_app.logger.info("📋 Fetching active customers...")
+        
         customers = session.query(Customer).filter(
             Customer.status == 'Active'
         ).order_by(Customer.name).all()
+        
+        current_app.logger.info(f"✅ Found {len(customers)} active customers")
         
         result = []
         for c in customers:
@@ -277,12 +303,12 @@ def get_active_customers():
                     'stage': c.stage or 'Lead'
                 })
             except Exception as customer_error:
-                print(f"Error processing customer {c.id}: {customer_error}")
+                current_app.logger.error(f"Error processing customer {c.id}: {customer_error}")
                 continue
         
         return jsonify(result)
     except Exception as e:
-        print(f"Error in get_active_customers: {e}")
+        current_app.logger.error(f"❌ Error in get_active_customers: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
