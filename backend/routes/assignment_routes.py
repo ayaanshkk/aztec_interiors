@@ -6,6 +6,22 @@ from ..db import SessionLocal
 
 assignment_bp = Blueprint('assignments', __name__)
 
+# ✅ VALID ASSIGNMENT FIELDS - Only these can be used to create/update
+VALID_ASSIGNMENT_FIELDS = [
+    'type', 'title', 'date', 'user_id', 'team_member',
+    'job_id', 'customer_id', 'job_type',
+    'start_time', 'end_time', 'estimated_hours',
+    'notes', 'priority', 'status'
+]
+
+def filter_assignment_data(data):
+    """Filter request data to only include valid Assignment fields"""
+    filtered = {}
+    for key in VALID_ASSIGNMENT_FIELDS:
+        if key in data:
+            filtered[key] = data[key]
+    return filtered
+
 @assignment_bp.route('/assignments', methods=['GET', 'POST'])
 @token_required
 def handle_assignments():
@@ -16,7 +32,11 @@ def handle_assignments():
         
         try:
             data = request.json
-            current_app.logger.info(f"📝 Creating assignment with data: {data}")
+            current_app.logger.info(f"📝 RAW data received: {data}")
+            
+            # ✅ CRITICAL: Filter out invalid fields like 'description'
+            data = filter_assignment_data(data)
+            current_app.logger.info(f"📝 Creating assignment with filtered data: {data}")
             
             # Parse date
             assignment_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
@@ -46,8 +66,9 @@ def handle_assignments():
 
             # Get assigned user info
             user_id = data.get('user_id')
-            team_member_name = None
-            if user_id:
+            team_member_name = data.get('team_member')  # Use team_member from data if provided
+            
+            if user_id and not team_member_name:
                 assigned_user = session.get(User, user_id) 
                 if assigned_user:
                     team_member_name = assigned_user.full_name
@@ -58,7 +79,7 @@ def handle_assignments():
             creator = session.get(User, current_user.id)
             created_by_name = creator.full_name if creator else None
                 
-            # Create assignment
+            # ✅ Create assignment with ONLY valid fields
             assignment = Assignment(
                 type=data.get('type', 'job'),
                 title=data.get('title', ''),
@@ -99,6 +120,13 @@ def handle_assignments():
             session.rollback()
             current_app.logger.error(f"Missing required field: {e}")
             return jsonify({'error': f'Missing required field: {str(e)}'}), 400
+        except TypeError as e:
+            # This catches the "invalid keyword argument" error
+            session.rollback()
+            current_app.logger.error(f"❌ TypeError (invalid field): {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Invalid field in request: {str(e)}'}), 400
         except Exception as e:
             session.rollback()
             current_app.logger.error(f"Error creating assignment: {e}")
@@ -202,7 +230,11 @@ def handle_single_assignment(assignment_id):
         # PUT
         elif request.method == 'PUT':
             data = request.json
-            current_app.logger.info(f"📝 Updating assignment {assignment_id} with data: {data}")
+            current_app.logger.info(f"📝 RAW update data received: {data}")
+            
+            # ✅ CRITICAL: Filter out invalid fields like 'description'
+            data = filter_assignment_data(data)
+            current_app.logger.info(f"📝 Updating assignment {assignment_id} with filtered data: {data}")
             
             if 'type' in data:
                 assignment.type = data['type']
@@ -243,6 +275,8 @@ def handle_single_assignment(assignment_id):
                 new_user = session.get(User, data['user_id'])
                 if new_user:
                     assignment.team_member = new_user.full_name
+            if 'team_member' in data:
+                assignment.team_member = data['team_member']
                 
             assignment.updated_by = current_user.id
             assignment.updated_at = datetime.utcnow()
@@ -273,6 +307,12 @@ def handle_single_assignment(assignment_id):
             
             return jsonify({'message': 'Assignment deleted successfully'})
         
+    except TypeError as e:
+        session.rollback()
+        current_app.logger.error(f"❌ TypeError (invalid field): {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Invalid field in request: {str(e)}'}), 400
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error in handle_single_assignment: {e}")
