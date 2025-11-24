@@ -992,12 +992,24 @@ def handle_assignments():
     try:
         if request.method == 'POST':
             data = request.json
+            
+            # ✅ CRITICAL: Use 'notes' instead of 'description'
             assignment = Assignment(
                 title=data.get('title', ''),
-                description=data.get('description', ''),
-                assigned_to=data.get('assigned_to'),
-                due_date=datetime.strptime(data['due_date'], '%Y-%m-%d').date() if data.get('due_date') else None,
-                created_by=get_current_user_email(data)
+                notes=data.get('notes', ''),  # ✅ CHANGED from 'description'
+                type=data.get('type', 'job'),
+                date=datetime.strptime(data['date'], '%Y-%m-%d').date() if data.get('date') else None,
+                user_id=data.get('user_id'),
+                team_member=data.get('team_member'),
+                job_id=data.get('job_id'),
+                customer_id=data.get('customer_id'),
+                start_time=datetime.strptime(data['start_time'], '%H:%M').time() if data.get('start_time') else None,
+                end_time=datetime.strptime(data['end_time'], '%H:%M').time() if data.get('end_time') else None,
+                estimated_hours=data.get('estimated_hours'),
+                priority=data.get('priority', 'Medium'),
+                status=data.get('status', 'Scheduled'),
+                job_type=data.get('job_type'),
+                created_by=request.current_user.id if hasattr(request, 'current_user') else None
             )
             session.add(assignment)
             session.commit()
@@ -1008,15 +1020,12 @@ def handle_assignments():
         
         # ✅ FILTER ASSIGNMENTS BY ROLE
         if current_user_role == 'Production':
-            # Production users only see assignments for "Production Team"
             assignments = session.query(Assignment).filter(
                 Assignment.team_member == 'Production Team'
             ).order_by(Assignment.date.asc()).all()
         elif current_user_role == 'Manager':
-            # Managers see all assignments
             assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
         else:
-            # Other roles see assignments assigned to them
             user_id = request.current_user.id if hasattr(request, 'current_user') else None
             assignments = session.query(Assignment).filter(
                 Assignment.user_id == user_id
@@ -1027,6 +1036,8 @@ def handle_assignments():
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error in /assignments: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
