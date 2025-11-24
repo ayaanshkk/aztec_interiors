@@ -281,11 +281,9 @@ def get_customer(customer_id):
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Check access permissions
-        if request.current_user.role == 'Sales':
-            if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
-                return jsonify({'error': 'You do not have permission to view this customer'}), 403
-        elif request.current_user.role == 'Staff':
+        # ✅ FIX: Only restrict Staff role
+        # Sales, Manager, HR, Production can view all customers
+        if request.current_user.role == 'Staff':
             if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
                 return jsonify({'error': 'You do not have permission to view this customer'}), 403
         
