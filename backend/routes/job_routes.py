@@ -39,6 +39,7 @@ def serialize_job(job):
         'customer_name': job.customer.name if job.customer else None,
         'job_type': job.job_type,
         'stage': job.stage,
+        'work_stage': job.work_stage if hasattr(job, 'work_stage') else 'Survey',  # ✅ NEW
         'priority': job.priority,
         'measure_date': job.measure_date.isoformat() if job.measure_date else None,
         'delivery_date': job.delivery_date.isoformat() if job.delivery_date else None,
@@ -75,6 +76,7 @@ def get_jobs():
     try:
         customer_id = request.args.get('customer_id')
         stage = request.args.get('stage')
+        work_stage = request.args.get('work_stage')  # ✅ NEW: Filter by work stage
         job_type = request.args.get('type')
         
         query = session.query(Job)
@@ -83,6 +85,8 @@ def get_jobs():
             query = query.filter(Job.customer_id == customer_id)
         if stage:
             query = query.filter(Job.stage == stage)
+        if work_stage:  # ✅ NEW
+            query = query.filter(Job.work_stage == work_stage)
         if job_type:
             query = query.filter(Job.job_type == job_type)
         
@@ -164,6 +168,9 @@ def create_job():
         # Default stage to Lead
         stage = data.get('stage', 'Lead')
         
+        # ✅ NEW: Default work_stage to Survey if not provided
+        work_stage = data.get('work_stage', 'Survey')
+        
         job = Job(
             id=str(uuid.uuid4()),
             job_reference=job_reference,
@@ -171,6 +178,7 @@ def create_job():
             customer_id=data['customer_id'],
             job_type=data['job_type'],
             stage=stage,
+            work_stage=work_stage,  # ✅ NEW
             priority=priority,
             measure_date=parse_date(data.get('measure_date')),
             delivery_date=parse_date(data.get('delivery_date')),
@@ -196,7 +204,7 @@ def create_job():
         session.add(job)
         session.flush()
         
-        print(f"✅ Created job with ID: {job.id}, Reference: {job_reference}")
+        print(f"✅ Created job with ID: {job.id}, Reference: {job_reference}, Work Stage: {work_stage}")
         
         # Create notification
         try:
@@ -281,7 +289,7 @@ def update_job(job_id):
             return None
         
         updateable_fields = [
-            'job_name', 'job_type', 'stage', 'priority', 'quote_id', 'quote_price',
+            'job_name', 'job_type', 'stage', 'work_stage', 'priority', 'quote_id', 'quote_price',  # ✅ Added work_stage
             'agreed_price', 'deposit1', 'deposit2', 'installation_address',
             'assigned_team_id', 'primary_fitter_id', 'salesperson_id', 
             'assigned_team_name', 'primary_fitter_name', 'salesperson_name', 'notes'
@@ -299,6 +307,8 @@ def update_job(job_id):
         job.updated_at = datetime.utcnow()
         
         session.commit()
+        
+        print(f"✅ Updated job {job_id}, work_stage: {job.work_stage if hasattr(job, 'work_stage') else 'N/A'}")
         
         return jsonify(serialize_job(job))
     except Exception as e:
@@ -562,6 +572,7 @@ def get_job_stats():
         stats = {
             'total_jobs': session.query(Job).count(),
             'by_stage': {},
+            'by_work_stage': {},  # ✅ NEW
             'by_type': {},
             'by_priority': {}
         }
@@ -573,6 +584,16 @@ def get_job_stats():
         
         for stage, count in stage_counts:
             stats['by_stage'][stage] = count
+        
+        # ✅ NEW: Work stage counts
+        if hasattr(Job, 'work_stage'):
+            work_stage_counts = session.query(
+                Job.work_stage, 
+                func.count(Job.id)
+            ).group_by(Job.work_stage).all()
+            
+            for work_stage, count in work_stage_counts:
+                stats['by_work_stage'][work_stage] = count
         
         type_counts = session.query(
             Job.job_type, 

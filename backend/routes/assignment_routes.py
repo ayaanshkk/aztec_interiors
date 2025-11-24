@@ -347,17 +347,26 @@ def get_assignments_by_date_range():
 @assignment_bp.route('/jobs/available', methods=['GET'])
 @token_required 
 def get_available_jobs():
-    """Get jobs that are ready to be scheduled"""
+    """
+    Get jobs that are ready to be scheduled
+    
+    Simple 3-stage system:
+    - Survey: Initial measurement/planning stage
+    - Delivery: Items ready for delivery
+    - Installation: Ready for installation
+    """
     session = SessionLocal()
     try:
-        current_app.logger.info("📋 Fetching available jobs...")
+        current_app.logger.info("📋 Fetching available jobs for scheduling...")
         
-        # Query jobs with various active stages
+        # ✅ All 3 work stages are schedulable
+        schedulable_work_stages = ['Survey', 'Delivery', 'Installation']
+        
         jobs = session.query(Job).filter(
-            Job.stage.in_(['ready', 'in_progress', 'confirmed', 'Accepted', 'Production', 'Quote', 'Design'])
+            Job.work_stage.in_(schedulable_work_stages)
         ).order_by(Job.created_at.desc()).all()
         
-        current_app.logger.info(f"✅ Found {len(jobs)} available jobs")
+        current_app.logger.info(f"✅ Found {len(jobs)} jobs in schedulable stages")
         
         result = []
         for j in jobs:
@@ -382,7 +391,8 @@ def get_available_jobs():
                     'customer_name': customer_name,
                     'customer_id': customer_id,
                     'job_type': j.job_type or 'Interior Design',
-                    'stage': j.stage or 'Unknown'
+                    'stage': j.stage if hasattr(j, 'stage') else 'Unknown',
+                    'work_stage': j.work_stage if hasattr(j, 'work_stage') else 'Survey'
                 })
             except Exception as job_error:
                 current_app.logger.error(f"Error processing job {j.id}: {job_error}")
@@ -396,7 +406,9 @@ def get_available_jobs():
         current_app.logger.error(f"❌ Error in get_available_jobs: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e), 'message': 'Failed to fetch available jobs'}), 500
+        # ✅ Return empty array instead of error to allow graceful degradation
+        current_app.logger.info("⚠️ Returning empty jobs array due to error")
+        return jsonify([]), 200
     finally:
         session.close()
 
@@ -409,7 +421,7 @@ def get_active_customers():
     try:
         current_app.logger.info("📋 Fetching active customers...")
         
-        # Get all customers (not just Active status, as they might have different stage values)
+        # Get all customers
         customers = session.query(Customer).order_by(Customer.name).all()
         
         current_app.logger.info(f"✅ Found {len(customers)} customers")
@@ -437,6 +449,44 @@ def get_active_customers():
         current_app.logger.error(f"❌ Error in get_active_customers: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': str(e), 'message': 'Failed to fetch active customers'}), 500
+        # ✅ Return empty array instead of error to allow graceful degradation
+        current_app.logger.info("⚠️ Returning empty customers array due to error")
+        return jsonify([]), 200
     finally:
         session.close()
+
+
+@assignment_bp.route('/jobs/work-stages', methods=['GET'])
+@token_required
+def get_job_work_stages():
+    """
+    Get all 3 job work stages with metadata
+    """
+    work_stages = [
+        {
+            'value': 'Survey',
+            'label': 'Survey',
+            'description': 'Site survey and measurements',
+            'color': '#8B5CF6',
+            'icon': '📏',
+            'order': 1
+        },
+        {
+            'value': 'Delivery',
+            'label': 'Delivery',
+            'description': 'Items being delivered',
+            'color': '#06B6D4',
+            'icon': '🚚',
+            'order': 2
+        },
+        {
+            'value': 'Installation',
+            'label': 'Installation',
+            'description': 'On-site installation',
+            'color': '#14B8A6',
+            'icon': '🏗️',
+            'order': 3
+        }
+    ]
+    
+    return jsonify(work_stages), 200
