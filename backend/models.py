@@ -432,6 +432,7 @@ class Job(Base):
     job_name = Column(String(200))
     job_type = Column(JOB_TYPE_ENUM, nullable=False, default='Kitchen')
     stage = Column(JOB_STAGE_ENUM, nullable=False, default='Lead')
+    work_stage = Column(String(50), default='Survey', nullable=True)  # ✅ NEW: Job work stage
     priority = Column(String(20), default='Medium')
 
     # Pricing
