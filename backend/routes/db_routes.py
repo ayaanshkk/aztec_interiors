@@ -979,7 +979,7 @@ def update_project_stage(project_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
+nt
 # ------------------ ASSIGNMENTS ------------------
 
 @db_bp.route('/assignments', methods=['GET', 'POST', 'OPTIONS'])

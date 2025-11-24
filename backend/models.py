@@ -1287,6 +1287,7 @@ class Assignment(Base):
                 'notes': self.notes,
                 'priority': self.priority,
                 'status': self.status,
+                'job_type': self.job_type,
                 'created_at': self.created_at.isoformat() if self.created_at else None,
                 'updated_at': self.updated_at.isoformat() if self.updated_at else None,
                 'created_by': self.created_by,
