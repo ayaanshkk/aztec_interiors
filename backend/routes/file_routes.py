@@ -739,3 +739,42 @@ def download_excel_file(filename):
     except Exception as e:
         current_app.logger.error(f"Error downloading: {e}", exc_info=True)
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
+
+@file_bp.route('/files/drawings/<drawing_id>', methods=['PATCH', 'OPTIONS'])
+@token_required
+def update_drawing_document(drawing_id):
+    """Update a drawing document (e.g., assign to project)"""
+    if request.method == 'OPTIONS':
+        resp = jsonify()
+        resp.headers.add('Access-Control-Allow-Origin', '*')
+        resp.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        resp.headers.add('Access-Control-Allow-Methods', 'PATCH, OPTIONS')
+        return resp
+
+    session = SessionLocal()
+    try:
+        drawing = session.get(DrawingDocument, drawing_id)
+        if not drawing:
+            return jsonify({'error': 'Drawing not found'}), 404
+
+        data = request.get_json()
+        
+        # Update project_id if provided
+        if 'project_id' in data:
+            drawing.project_id = data['project_id']
+            drawing.updated_at = datetime.utcnow()
+        
+        session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Drawing updated successfully',
+            'drawing': drawing.to_dict()
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error updating drawing {drawing_id}: {e}", exc_info=True)
+        return jsonify({'error': f'Failed to update drawing: {str(e)}'}), 500
+    finally:
+        session.close()

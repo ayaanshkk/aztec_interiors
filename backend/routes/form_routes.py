@@ -1695,3 +1695,37 @@ def detect_generic_form_changes(old_data, new_data):
                 changes.append(f"❌ Removed {field_name}")
     
     return changes if changes else ["Form data updated"]
+
+@form_bp.route('/form-submissions/<int:submission_id>', methods=['PATCH', 'OPTIONS'])
+@token_required
+def patch_form_submission(submission_id):
+    """Update form submission metadata (e.g., assign to project)"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    session = SessionLocal()
+    try:
+        submission = session.get(CustomerFormData, submission_id)
+        if not submission:
+            return jsonify({'error': 'Form submission not found'}), 404
+
+        data = request.get_json()
+        
+        # Update project_id if provided
+        if 'project_id' in data:
+            submission.project_id = data['project_id']
+            submission.updated_at = datetime.utcnow()
+        
+        session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Form submission updated successfully'
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error updating form submission {submission_id}: {e}")
+        return jsonify({'error': f'Failed to update form submission: {str(e)}'}), 500
+    finally:
+        session.close()
