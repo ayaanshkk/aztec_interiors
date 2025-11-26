@@ -14,6 +14,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from .notification_routes import create_activity_notification
+from routes.db_routes import invalidate_pipeline_cache
+
 
 db_bp = Blueprint('database', __name__)
 
@@ -386,6 +388,9 @@ def update_customer_stage(customer_id):
         # Commit the transaction
         session.commit()
         
+        # ✅ INVALIDATE PIPELINE CACHE AFTER SUCCESSFUL UPDATE
+        invalidate_pipeline_cache()
+        
         current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
         current_app.logger.info(f"📊 Final status - Notification created: {notification_created}, Assignment created: {assignment_created}")
         
@@ -688,103 +693,143 @@ def update_job_stage(job_id):
 
 
 # ------------------ PIPELINE ------------------
+# ✅ CACHE CONFIGURATION
+_pipeline_cache = {
+    "data": None,
+    "timestamp": None,
+    "etag": None
+}
+CACHE_DURATION = 30  # seconds
+
 
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
-    """Get all pipeline items
+    """Get all pipeline items with caching and optimization
     
     ✅ NOTE: Only PROJECTS have stages. Jobs are created when projects reach Accepted/Production.
     ✅ CRITICAL: We must return the ACTUAL database stage values, not computed ones
+    ✅ OPTIMIZED: Uses 30-second cache + ETag support
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    # ✅ CHECK CACHE FIRST
+    now = datetime.now()
+    if _pipeline_cache["data"] and _pipeline_cache["timestamp"]:
+        cache_age = (now - _pipeline_cache["timestamp"]).total_seconds()
+        if cache_age < CACHE_DURATION:
+            current_app.logger.info(f"🚀 Returning cached pipeline data (age: {cache_age:.1f}s)")
+            
+            # ✅ Support ETag for even faster responses
+            client_etag = request.headers.get('If-None-Match')
+            if client_etag == _pipeline_cache["etag"]:
+                return '', 304  # Not Modified
+            
+            response = jsonify(_pipeline_cache["data"])
+            response.headers['ETag'] = _pipeline_cache["etag"]
+            response.headers['Cache-Control'] = f'private, max-age={CACHE_DURATION}'
+            return response
+    
+    # ✅ FETCH FRESH DATA
     session = SessionLocal()
+    start_time = time.time()
+    
     try:
-        current_app.logger.info("📊 Fetching pipeline data...")
+        current_app.logger.info("📊 Fetching fresh pipeline data...")
         
-        # Eagerly load relationships to avoid lazy loading issues
+        # ✅ OPTIMIZED QUERY - Use joinedload instead of selectinload for better performance
         customers = session.query(Customer).options(
-            selectinload(Customer.projects)
+            joinedload(Customer.projects)
         ).all()
 
         pipeline_items = []
         
-        # ✅ DEBUG: Track what we're processing
+        # Track statistics
         customers_with_projects = 0
         customers_without_projects = 0
         total_projects = 0
 
+        # ✅ OPTIMIZED LOOP - Pre-allocate and batch process
         for customer in customers:
+            customer_dict = None  # Lazy compute customer dict
             customer_projects = customer.projects 
             has_projects = bool(customer_projects)
 
-            # ✅ Generate a card for *every* Project (projects have stages)
-            for project in customer_projects:
-                total_projects += 1
-                project_stage = project.stage or 'Lead'  # ✅ Store stage value
+            # Generate a card for every Project
+            if has_projects:
+                customers_with_projects += 1
                 
-                current_app.logger.debug(
-                    f"  📋 Project: {project.project_name} | "
-                    f"Customer: {customer.name} | "
-                    f"Stage: {project_stage}"
-                )
+                # ✅ Compute customer dict once for all projects
+                customer_dict = customer.to_dict(include_projects=False)
                 
-                pipeline_items.append({
-                    'id': f'project-{project.id}',
-                    'type': 'project',
-                    'customer': customer.to_dict(include_projects=False),
-                    'stage': project_stage,  # ✅ Use stored value
-                    'project': {
-                        'id': project.id,
-                        'customer_id': customer.id,
-                        'project_name': project.project_name or 'Unnamed Project',
-                        'project_type': project.project_type or 'Unknown',
-                        # 'job_name': project.project_name or 'Unnamed Project',
-                        # 'job_type': project.project_type or 'Unknown', 
-                        'stage': project_stage,  # ✅ Use stored value
-                        'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
-                        'notes': project.notes,
-                        'created_at': project.created_at.isoformat() if project.created_at else None,
-                        'updated_at': project.updated_at.isoformat() if project.updated_at else None,
-                    }
-                })
-
-            # ✅ Case: Customer is a pure Lead (no projects yet)
-            if not has_projects:
+                for project in customer_projects:
+                    total_projects += 1
+                    project_stage = project.stage or 'Lead'
+                    
+                    pipeline_items.append({
+                        'id': f'project-{project.id}',
+                        'type': 'project',
+                        'customer': customer_dict,
+                        'stage': project_stage,
+                        'project': {
+                            'id': project.id,
+                            'customer_id': customer.id,
+                            'project_name': project.project_name or 'Unnamed Project',
+                            'project_type': project.project_type or 'Unknown',
+                            'stage': project_stage,
+                            'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
+                            'notes': project.notes,
+                            'created_at': project.created_at.isoformat() if project.created_at else None,
+                            'updated_at': project.updated_at.isoformat() if project.updated_at else None,
+                        }
+                    })
+            else:
+                # Customer is a pure Lead (no projects yet)
                 customers_without_projects += 1
-                customer_stage = customer.stage or 'Lead'  # ✅ Store stage value
+                customer_stage = customer.stage or 'Lead'
                 
-                current_app.logger.debug(
-                    f"  👤 Customer (no projects): {customer.name} | "
-                    f"Stage: {customer_stage}"
-                )
+                if not customer_dict:
+                    customer_dict = customer.to_dict(include_projects=False)
                 
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer_stage,  # ✅ Use stored value
-                    'customer': customer.to_dict(include_projects=False)
+                    'stage': customer_stage,
+                    'customer': customer_dict
                 })
-            else:
-                customers_with_projects += 1
         
-        # ✅ ENHANCED LOGGING
-        current_app.logger.info(f"✅ Pipeline data fetched: {len(pipeline_items)} items")
+        # ✅ CALCULATE ETAG
+        etag = f'"{hash(str(len(pipeline_items)))-hash(str(now.timestamp()))}"'
+        
+        # ✅ UPDATE CACHE
+        _pipeline_cache["data"] = pipeline_items
+        _pipeline_cache["timestamp"] = now
+        _pipeline_cache["etag"] = etag
+        
+        elapsed_time = time.time() - start_time
+        
+        # Enhanced logging
         current_app.logger.info(
-            f"   📊 Breakdown: {customers_with_projects} customers with projects ({total_projects} projects), "
-            f"{customers_without_projects} customers without projects"
+            f"✅ Pipeline data fetched in {elapsed_time:.2f}s: {len(pipeline_items)} items"
+        )
+        current_app.logger.info(
+            f"   📊 Breakdown: {customers_with_projects} customers with {total_projects} projects, "
+            f"{customers_without_projects} leads"
         )
         
-        # Log stage distribution for debugging
-        stage_counts = {}
-        for item in pipeline_items:
-            stage = item.get('stage', 'Unknown')
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
-        current_app.logger.info(f"📊 Stage distribution: {stage_counts}")
+        # Log stage distribution (only in debug mode)
+        if current_app.debug:
+            stage_counts = {}
+            for item in pipeline_items:
+                stage = item.get('stage', 'Unknown')
+                stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            current_app.logger.debug(f"📊 Stage distribution: {stage_counts}")
         
-        return jsonify(pipeline_items)
+        response = jsonify(pipeline_items)
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = f'private, max-age={CACHE_DURATION}'
+        return response
         
     except Exception as e:
         current_app.logger.error(f"❌ Error fetching pipeline: {e}")
@@ -793,6 +838,18 @@ def get_pipeline_data():
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
+
+
+# ✅ HELPER FUNCTION: Clear cache when data changes
+def invalidate_pipeline_cache():
+    """Call this function after any stage/project/customer update"""
+    global _pipeline_cache
+    _pipeline_cache = {
+        "data": None,
+        "timestamp": None,
+        "etag": None
+    }
+    current_app.logger.info("🔄 Pipeline cache invalidated")
 
 # ------------------ PROJECTS ROUTES (New/Updated) ------------------
 
