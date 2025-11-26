@@ -14,10 +14,18 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 from .notification_routes import create_activity_notification
-from routes.db_routes import invalidate_pipeline_cache
+import time
 
 
 db_bp = Blueprint('database', __name__)
+
+# ✅ ADD CACHE CONFIGURATION HERE
+_pipeline_cache = {
+    "data": None,
+    "timestamp": None,
+    "etag": None
+}
+CACHE_DURATION = 30  # seconds
 
 # Helper function to get current user's email safely
 def get_current_user_email(data=None):
@@ -693,15 +701,6 @@ def update_job_stage(job_id):
 
 
 # ------------------ PIPELINE ------------------
-# ✅ CACHE CONFIGURATION
-_pipeline_cache = {
-    "data": None,
-    "timestamp": None,
-    "etag": None
-}
-CACHE_DURATION = 30  # seconds
-
-
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
