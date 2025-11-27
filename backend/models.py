@@ -1186,7 +1186,12 @@ class Assignment(Base):
     
     type = Column(ASSIGNMENT_TYPE_ENUM, nullable=False, default='job')
     title = Column(String(255), nullable=False)
-    date = Column(Date, nullable=False)
+    date = Column(Date, nullable=False)  # Keep for backward compatibility
+    
+    # ✅ NEW FIELDS: Add start_date and end_date for task date ranges
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    customer_name = Column(String(200), nullable=True)
     
     user_id = Column(Integer, ForeignKey('users.id'))
     team_member = Column(String(200))
@@ -1209,11 +1214,10 @@ class Assignment(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # ✅ FIXED RELATIONSHIPS - Clear naming, no conflicts
+    # ✅ RELATIONSHIPS (keep existing)
     job = relationship('Job', backref='assignments')
     customer = relationship('Customer', backref='assignments')
     
-    # User assigned to the task
     user = relationship(
         'User', 
         foreign_keys=[user_id], 
@@ -1221,7 +1225,6 @@ class Assignment(Base):
         overlaps="created_by_user,updated_by_user"
     )
     
-    # User who created the assignment
     created_by_user = relationship(
         'User', 
         foreign_keys=[created_by], 
@@ -1229,7 +1232,6 @@ class Assignment(Base):
         overlaps="user,updated_by_user"
     )
     
-    # User who last updated the assignment
     updated_by_user = relationship(
         'User', 
         foreign_keys=[updated_by], 
@@ -1240,7 +1242,6 @@ class Assignment(Base):
     def to_dict(self):
         """Convert assignment to dictionary with safe attribute access"""
         try:
-            # ✅ Safely get created_by_name
             created_by_name = None
             try:
                 if self.created_by_user:
@@ -1248,7 +1249,6 @@ class Assignment(Base):
             except Exception as e:
                 print(f"Error getting created_by_user: {e}")
             
-            # ✅ Safely get updated_by_name
             updated_by_name = None
             try:
                 if self.updated_by_user:
@@ -1256,7 +1256,6 @@ class Assignment(Base):
             except Exception as e:
                 print(f"Error getting updated_by_user: {e}")
             
-            # ✅ Safely get job_reference
             job_reference = None
             try:
                 if self.job:
@@ -1264,7 +1263,6 @@ class Assignment(Base):
             except Exception as e:
                 print(f"Error getting job reference: {e}")
             
-            # ✅ Safely get customer_name
             customer_name = None
             try:
                 if self.customer:
@@ -1277,6 +1275,10 @@ class Assignment(Base):
                 'type': self.type,
                 'title': self.title,
                 'date': self.date.isoformat() if self.date else None,
+                # ✅ NEW FIELDS IN RESPONSE
+                'start_date': self.start_date.isoformat() if self.start_date else None,
+                'end_date': self.end_date.isoformat() if self.end_date else None,
+                'customer_name': self.customer_name or customer_name,
                 'user_id': self.user_id,
                 'team_member': self.team_member,
                 'job_id': self.job_id,
@@ -1288,7 +1290,6 @@ class Assignment(Base):
                 'notes': self.notes,
                 'priority': self.priority,
                 'status': self.status,
-                'job_type': self.job_type,
                 'created_at': self.created_at.isoformat() if self.created_at else None,
                 'updated_at': self.updated_at.isoformat() if self.updated_at else None,
                 'created_by': self.created_by,
@@ -1296,13 +1297,11 @@ class Assignment(Base):
                 'updated_by': self.updated_by,
                 'updated_by_name': updated_by_name,
                 'job_reference': job_reference,
-                'customer_name': customer_name,
             }
         except Exception as e:
             print(f"Error in Assignment.to_dict(): {e}")
             import traceback
             traceback.print_exc()
-            # Return minimal safe data
             return {
                 'id': self.id,
                 'type': self.type,

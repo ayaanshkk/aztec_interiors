@@ -1062,7 +1062,7 @@ def submit_customer_form():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
-    session = SessionLocal() # 👈 Start session
+    session = SessionLocal()
     try:
         data = request.get_json(silent=True) or {}
         token = data.get('token')
@@ -1092,7 +1092,7 @@ def submit_customer_form():
             customer_id = token_data.get('customer_id')
             
             if customer_id:
-                customer = session.get(Customer, customer_id) # Use session.get()
+                customer = session.get(Customer, customer_id)
                 if not customer:
                     return jsonify({'success': False, 'error': 'Associated customer not found'}), 404
                 
@@ -1104,7 +1104,7 @@ def submit_customer_form():
             customer_id = form_data.get('customer_id') or request.args.get('customerId')
             
             if customer_id:
-                customer = session.get(Customer, customer_id) # Use session.get()
+                customer = session.get(Customer, customer_id)
                 if not customer:
                     return jsonify({'success': False, 'error': 'Specified customer not found'}), 404
             else:
@@ -1126,42 +1126,56 @@ def submit_customer_form():
                     created_by='Form Submission'
                 )
                 session.add(customer)
-                session.flush() # Flush to get customer ID
+                session.flush()
                 customer_id = customer.id
                 current_app.logger.info(f"Created new customer {customer_id} from form submission")
 
-        # --- 3. Save Form Submission ---       
-        project_id_from_data = form_data.get('project_id')
+        # --- 3. ✅ FIX: Get project_id from MULTIPLE possible sources ---
+        # Priority: URL query param > top-level data > formData
+        project_id = (
+            request.args.get('projectId') or           # From URL query param
+            data.get('projectId') or                   # From top-level request body
+            data.get('project_id') or                  # Alternative naming
+            form_data.get('project_id') or             # From formData (legacy)
+            form_data.get('projectId')                 # Alternative in formData
+        )
         
+        # Convert to None if empty string
+        if project_id == '' or project_id == 'null' or project_id == 'undefined':
+            project_id = None
+        
+        current_app.logger.info(f"📦 Submitting form with project_id: {project_id}")
+        
+        # --- 4. Save Form Submission ---
         customer_form_data = CustomerFormData(
             customer_id=customer_id,
-            # **PASS THE VALUE (which is likely None in this case)**
-            project_id=project_id_from_data, 
+            project_id=project_id,  # ✅ Now correctly captures project_id
             form_data=json.dumps(form_data),
             token_used=token or '',
             submitted_at=datetime.utcnow()
         )
         session.add(customer_form_data)
-        session.commit() # 👈 Commit transaction
+        session.commit()
         
         final_customer = session.get(Customer, customer_id)
         customer_name = final_customer.name if final_customer else 'Customer'
         
-        current_app.logger.info(f"Single form submission created for customer {customer_id}")
+        current_app.logger.info(f"✅ Form submission created for customer {customer_id}, project: {project_id}")
 
         return jsonify({
             'success': True,
             'customer_id': customer_id,
+            'project_id': project_id,  # Return this so frontend knows it was saved
             'form_submission_id': customer_form_data.id,
             'message': f'Form submitted successfully for {customer_name}'
         }), 201
 
     except Exception as e:
-        session.rollback() # 👈 Rollback on error
+        session.rollback()
         current_app.logger.exception(f"Database error during form submission for customer {customer_id}")
         return jsonify({'success': False, 'error': f'Form submission failed: {str(e)}'}), 500
     finally:
-        session.close() # 👈 Close session
+        session.close()
 
 
 @form_bp.route('/generate-form-link', methods=['POST', 'OPTIONS'])

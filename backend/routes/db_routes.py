@@ -52,137 +52,6 @@ def handle_users():
     finally:
         session.close()
 
-# ------------------ CUSTOMERS ------------------
-
-# @db_bp.route('/customers', methods=['GET', 'POST', 'OPTIONS'])
-# @token_required
-# def handle_customers():
-#     if request.method == 'OPTIONS':
-#         return jsonify({}), 200
-
-#     session = SessionLocal()
-#     try:
-#         if request.method == 'POST':
-#             data = request.json
-#             customer = Customer(
-#                 name=data.get('name', ''),
-#                 # Ensure date parsing works correctly
-#                 date_of_measure=datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date() if data.get('date_of_measure') else None,
-#                 address=data.get('address', ''),
-#                 phone=data.get('phone', ''),
-#                 email=data.get('email', ''),
-#                 contact_made=data.get('contact_made', 'Unknown'),
-#                 preferred_contact_method=data.get('preferred_contact_method'),
-#                 marketing_opt_in=data.get('marketing_opt_in', False),
-#                 notes=data.get('notes', ''),
-#                 stage=data.get('stage', 'Lead'),
-#                 created_by=get_current_user_email(data),
-#                 status=data.get('status', 'Active'),
-#                 project_types=data.get('project_types', []),
-#                 salesperson=data.get('salesperson'),
-#             )
-#             session.add(customer)
-#             session.commit()
-#             return jsonify({'id': customer.id, 'message': 'Customer created successfully'}), 201
-
-#         # GET all customers (FIXED: Uses session.query)
-#         customers = session.query(Customer).order_by(Customer.created_at.desc()).all()
-        
-#         # FIX: Explicitly include 'postcode' in the customer list serialization
-#         customer_list = []
-#         for c in customers:
-#             customer_dict = c.to_dict(include_projects=False)
-#             # Assuming the postcode property exists on the Customer model instance
-#             customer_dict['postcode'] = getattr(c, 'postcode', None) or getattr(c, 'post_code', None) or None
-#             customer_list.append(customer_dict)
-
-#         return jsonify(customer_list)
-
-#     except Exception as e:
-#         session.rollback()
-#         current_app.logger.error(f"Error in /customers: {e}")
-#         return jsonify({'error': str(e)}), 500
-#     finally:
-#         session.close()
-
-
-# @db_bp.route('/customers/<string:customer_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
-# @token_required
-# def handle_single_customer(customer_id):
-#     if request.method == 'OPTIONS':
-#         return jsonify({}), 200
-
-#     session = SessionLocal()
-#     try:
-#         # FIXED: Uses session.query
-#         customer = session.query(Customer).filter_by(id=customer_id).first()
-#         if not customer:
-#             return jsonify({'error': 'Customer not found'}), 404
-
-#         if request.method == 'GET':
-#             # FIXED: Uses session.query for CustomerFormData
-#             form_entries = session.query(CustomerFormData).filter_by(customer_id=customer.id).order_by(CustomerFormData.submitted_at.desc()).all()
-#             form_submissions = []
-#             for f in form_entries:
-#                 try:
-#                     # Robust handling of form data and dates
-#                     parsed_data = json.loads(f.form_data) if getattr(f, 'form_data', None) else {}
-#                     form_submissions.append({
-#                         "id": f.id,
-#                         "token_used": f.token_used,
-#                         "submitted_at": f.submitted_at.isoformat() if f.submitted_at else None,
-#                         "form_data": parsed_data,
-#                         "project_id": getattr(f, 'project_id', None),
-#                         "approval_status": getattr(f, 'approval_status', 'pending'),
-#                         "approved_by": f.approved_by,
-#                         "approval_date": f.approval_date.isoformat() if f.approval_date else None
-#                     })
-#                 except Exception as inner_e:
-#                     current_app.logger.error(f"Error processing form submission {getattr(f, 'id', 'unknown')}: {inner_e}")
-            
-#             customer_data = customer.to_dict(include_projects=True)
-#             customer_data['form_submissions'] = form_submissions
-#             return jsonify(customer_data)
-
-#         elif request.method == 'PUT':
-#             data = request.json
-#             # ... (Update logic for customer attributes) ...
-#             customer.name = data.get('name', customer.name)
-#             customer.address = data.get('address', customer.address)
-#             customer.phone = data.get('phone', customer.phone)
-#             customer.email = data.get('email', customer.email)
-#             customer.contact_made = data.get('contact_made', customer.contact_made)
-#             customer.preferred_contact_method = data.get('preferred_contact_method', customer.preferred_contact_method)
-#             customer.marketing_opt_in = data.get('marketing_opt_in', customer.marketing_opt_in)
-#             customer.notes = data.get('notes', customer.notes)
-#             customer.updated_by = get_current_user_email(data)
-#             customer.salesperson = data.get('salesperson', customer.salesperson)
-#             customer.project_types = data.get('project_types', customer.project_types)
-#             if data.get('date_of_measure'):
-#                 customer.date_of_measure = datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date()
-#             if 'stage' in data:
-#                 customer.stage = data.get('stage', customer.stage)
-            
-#             # Assuming this method exists on the model
-#             if 'address' in data:
-#                 customer.postcode = customer.extract_postcode_from_address()
-                
-#             session.commit()
-#             return jsonify({'message': 'Customer updated successfully'})
-
-#         elif request.method == 'DELETE':
-#             session.delete(customer)
-#             session.commit()
-#             return jsonify({'message': 'Customer deleted successfully'})
-
-#     except Exception as e:
-#         session.rollback()
-#         current_app.logger.error(f"Error handling customer {customer_id}: {e}")
-#         return jsonify({'error': str(e)}), 500
-#     finally:
-#         session.close()
-
-
 # ------------------ CUSTOMER STAGE ------------------
 
 PIPELINE_STAGE_ORDER = [
@@ -1003,55 +872,256 @@ def handle_assignments():
         if request.method == 'POST':
             data = request.json
             
-            # ✅ CRITICAL: Use 'notes' instead of 'description'
+            current_app.logger.info(f"📥 Received assignment creation request: {data}")
+            
+            # ✅ PARSE DATE FIELDS
+            date_value = None
+            start_date_value = None
+            end_date_value = None
+            
+            if data.get('start_date'):
+                try:
+                    start_date_value = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+                    date_value = start_date_value
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing start_date: {e}")
+                    return jsonify({'error': 'Invalid start_date format'}), 400
+            elif data.get('date'):
+                try:
+                    date_value = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                    start_date_value = date_value
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing date: {e}")
+                    return jsonify({'error': 'Invalid date format'}), 400
+            else:
+                return jsonify({'error': 'start_date or date is required'}), 400
+            
+            if data.get('end_date'):
+                try:
+                    end_date_value = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing end_date: {e}")
+                    return jsonify({'error': 'Invalid end_date format'}), 400
+            else:
+                end_date_value = start_date_value
+            
+            # ✅ GET CUSTOMER NAME
+            customer_name = None
+            customer_id = data.get('customer_id')
+            if customer_id:
+                customer = session.query(Customer).filter_by(id=customer_id).first()
+                if customer:
+                    customer_name = customer.name
+            
+            # ✅ PARSE TIME FIELDS
+            start_time_value = None
+            end_time_value = None
+            
+            if data.get('start_time'):
+                try:
+                    start_time_value = datetime.strptime(data['start_time'], '%H:%M').time()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing start_time: {e}")
+            
+            if data.get('end_time'):
+                try:
+                    end_time_value = datetime.strptime(data['end_time'], '%H:%M').time()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing end_time: {e}")
+            
+            # ✅ CREATE ASSIGNMENT
             assignment = Assignment(
                 title=data.get('title', ''),
-                notes=data.get('notes', ''),  # ✅ CHANGED from 'description'
+                notes=data.get('notes', ''),
                 type=data.get('type', 'job'),
-                date=datetime.strptime(data['date'], '%Y-%m-%d').date() if data.get('date') else None,
+                date=date_value,
+                start_date=start_date_value,
+                end_date=end_date_value,
+                customer_name=customer_name,
                 user_id=data.get('user_id'),
                 team_member=data.get('team_member'),
                 job_id=data.get('job_id'),
-                customer_id=data.get('customer_id'),
-                start_time=datetime.strptime(data['start_time'], '%H:%M').time() if data.get('start_time') else None,
-                end_time=datetime.strptime(data['end_time'], '%H:%M').time() if data.get('end_time') else None,
+                customer_id=customer_id,
+                start_time=start_time_value,
+                end_time=end_time_value,
                 estimated_hours=data.get('estimated_hours'),
                 priority=data.get('priority', 'Medium'),
                 status=data.get('status', 'Scheduled'),
                 job_type=data.get('job_type'),
                 created_by=request.current_user.id if hasattr(request, 'current_user') else None
             )
+            
             session.add(assignment)
             session.commit()
-            return jsonify({'id': assignment.id, 'message': 'Assignment created successfully'}), 201
+            session.refresh(assignment)
+            
+            current_app.logger.info(f"✅ Assignment created successfully: {assignment.id}")
+            
+            return jsonify({
+                'id': assignment.id,
+                'message': 'Assignment created successfully',
+                'assignment': assignment.to_dict()
+            }), 201
 
-        # GET - Filter by user role
-        current_user_role = request.current_user.role if hasattr(request, 'current_user') else None
-        
-        # ✅ FILTER ASSIGNMENTS BY ROLE
-        if current_user_role == 'Production':
-            assignments = session.query(Assignment).filter(
-                Assignment.team_member == 'Production Team'
-            ).order_by(Assignment.date.asc()).all()
-        elif current_user_role == 'Manager':
-            assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
-        else:
-            user_id = request.current_user.id if hasattr(request, 'current_user') else None
-            assignments = session.query(Assignment).filter(
-                Assignment.user_id == user_id
-            ).order_by(Assignment.date.asc()).all()
-        
-        return jsonify([a.to_dict() for a in assignments])
+        # ✅ GET - CORRECT LOCATION FOR GET LOGIC
+        if request.method == 'GET':
+            current_user_role = request.current_user.role if hasattr(request, 'current_user') else None
+            current_user_id = request.current_user.id if hasattr(request, 'current_user') else None
+            current_user_name = request.current_user.full_name if hasattr(request, 'current_user') else None
+            
+            current_app.logger.info(f"📊 Fetching assignments for user: {current_user_name} (Role: {current_user_role})")
+            
+            # ✅ FIXED: Better role-based filtering
+            if current_user_role == 'Manager':
+                # Managers see ALL assignments
+                assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
+                current_app.logger.info(f"✅ Manager sees all {len(assignments)} assignments")
+            
+            elif current_user_role == 'Production':
+                # Production team sees their own assignments
+                assignments = session.query(Assignment).filter(
+                    (Assignment.team_member == 'Production Team') |
+                    (Assignment.team_member == current_user_name) |
+                    (Assignment.user_id == current_user_id)
+                ).order_by(Assignment.date.asc()).all()
+                current_app.logger.info(f"✅ Production user sees {len(assignments)} assignments")
+                
+            elif current_user_role == 'Sales':
+                # ✅ CRITICAL FIX: Sales users see their own assignments + unassigned
+                assignments = session.query(Assignment).filter(
+                    (Assignment.team_member == current_user_name) |
+                    (Assignment.user_id == current_user_id) |
+                    (Assignment.user_id == None)  # Unassigned tasks
+                ).order_by(Assignment.date.asc()).all()
+                current_app.logger.info(f"✅ Sales user sees {len(assignments)} assignments")
+                
+            else:
+                # Other roles see their own assignments only
+                assignments = session.query(Assignment).filter(
+                    (Assignment.user_id == current_user_id) |
+                    (Assignment.team_member == current_user_name)
+                ).order_by(Assignment.date.asc()).all()
+                current_app.logger.info(f"✅ User sees {len(assignments)} assignments")
+            
+            result = [a.to_dict() for a in assignments]
+            
+            if result:
+                current_app.logger.info(f"📋 Sample assignment: {result[0]}")
+            
+            return jsonify(result)
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error in /assignments: {e}")
+        current_app.logger.error(f"❌ Error in /assignments: {e}")
         import traceback
-        traceback.print_exc()
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
+
+# 2. SINGLE /assignments/<id> ENDPOINT (for PUT and DELETE only)
+@db_bp.route('/assignments/<string:assignment_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_single_assignment(assignment_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        assignment = session.query(Assignment).filter_by(id=assignment_id).first()
+        
+        if not assignment:
+            current_app.logger.error(f"❌ Assignment {assignment_id} not found")
+            return jsonify({'error': 'Assignment not found'}), 404
+        
+        if request.method == 'PUT':
+            data = request.json
+            
+            current_app.logger.info(f"📝 Updating assignment {assignment_id}: {data}")
+            
+            # Update fields
+            if 'title' in data:
+                assignment.title = data['title']
+            if 'notes' in data:
+                assignment.notes = data['notes']
+            if 'type' in data:
+                assignment.type = data['type']
+            if 'team_member' in data:
+                assignment.team_member = data['team_member']
+            if 'priority' in data:
+                assignment.priority = data['priority']
+            if 'status' in data:
+                assignment.status = data['status']
+            if 'job_type' in data:
+                assignment.job_type = data['job_type']
+            if 'estimated_hours' in data:
+                assignment.estimated_hours = data['estimated_hours']
+            
+            # Update dates
+            if 'start_date' in data and data['start_date']:
+                assignment.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+                assignment.date = assignment.start_date
+            if 'end_date' in data and data['end_date']:
+                assignment.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+            if 'date' in data and data['date']:
+                assignment.date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                if not hasattr(assignment, 'start_date') or not assignment.start_date:
+                    assignment.start_date = assignment.date
+            
+            # Update times
+            if 'start_time' in data and data['start_time']:
+                assignment.start_time = datetime.strptime(data['start_time'], '%H:%M').time()
+            if 'end_time' in data and data['end_time']:
+                assignment.end_time = datetime.strptime(data['end_time'], '%H:%M').time()
+            
+            # Update customer
+            if 'customer_id' in data:
+                assignment.customer_id = data['customer_id']
+                if data['customer_id']:
+                    customer = session.query(Customer).filter_by(id=data['customer_id']).first()
+                    if customer:
+                        if hasattr(assignment, 'customer_name'):
+                            assignment.customer_name = customer.name
+            
+            assignment.updated_by = request.current_user.id if hasattr(request, 'current_user') else None
+            assignment.updated_at = datetime.utcnow()
+            
+            session.commit()
+            session.refresh(assignment)
+            
+            current_app.logger.info(f"✅ Assignment {assignment_id} updated successfully")
+            
+            return jsonify({
+                'message': 'Assignment updated successfully',
+                'assignment': assignment.to_dict()
+            })
+        
+        elif request.method == 'DELETE':
+            current_app.logger.info(f"🗑️ Deleting assignment: {assignment_id}")
+            
+            session.delete(assignment)
+            session.commit()
+            
+            current_app.logger.info(f"✅ Assignment {assignment_id} deleted successfully")
+            
+            # ✅ CRITICAL: Always return JSON
+            return jsonify({
+                'message': 'Assignment deleted successfully',
+                'id': assignment_id
+            }), 200
+    
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error handling assignment {assignment_id}: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        
+        # ✅ CRITICAL: Always return JSON, never HTML
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+        
 # ------------------ FITTERS ------------------
 
 @db_bp.route('/fitters', methods=['GET', 'POST', 'OPTIONS'])
