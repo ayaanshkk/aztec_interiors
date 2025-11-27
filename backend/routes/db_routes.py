@@ -679,17 +679,37 @@ def handle_single_project(project_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    current_user = request.current_user  # ✅ Get current user for logging
     session = SessionLocal()
+    
     try:
+        current_app.logger.info(f"📋 User {current_user.role} requesting {request.method} on project {project_id}")
+        
         project = session.query(Project).filter_by(id=project_id).first()
+        
         if not project:
+            current_app.logger.error(f"❌ Project {project_id} not found in database")
             return jsonify({'error': 'Project not found'}), 404
         
+        # ✅ GET - Anyone authenticated can view any project
         if request.method == 'GET':
+            current_app.logger.info(f"✅ {current_user.role} viewing project {project_id}: {project.project_name}")
             return jsonify(project.to_dict())
 
+        # ✅ PUT - Check permissions for editing
         elif request.method == 'PUT':
+            # Check if user has permission to edit
+            is_manager = current_user.role == 'Manager'
+            is_hr = current_user.role == 'HR'
+            is_creator = project.created_by == current_user.id if hasattr(project, 'created_by') else True
+            
+            if not (is_manager or is_hr or is_creator):
+                current_app.logger.warning(f"⚠️ {current_user.role} unauthorized to edit project {project_id}")
+                return jsonify({'error': 'Unauthorized to edit this project'}), 403
+            
             data = request.json
+            current_app.logger.info(f"📝 {current_user.role} updating project {project_id}: {data}")
+            
             old_stage = project.stage
 
             # Update attributes (ensuring 'stage' is included for drag-and-drop fix)
@@ -728,16 +748,37 @@ def handle_single_project(project_id):
             # 🔑 FIX: Refresh the object to ensure the latest state is captured 
             session.refresh(project)
             
+            current_app.logger.info(f"✅ Project {project_id} updated successfully by {current_user.role}")
+            
             return jsonify({'message': 'Project updated successfully', 'id': project.id, 'new_stage': project.stage}) # 🔑 FIX: Use project.stage (refreshed value)
 
+        # ✅ DELETE - Check permissions for deleting
         elif request.method == 'DELETE':
+            # Check if user has permission to delete
+            is_manager = current_user.role == 'Manager'
+            is_hr = current_user.role == 'HR'
+            is_creator = project.created_by == current_user.id if hasattr(project, 'created_by') else True
+            
+            if not (is_manager or is_hr or is_creator):
+                current_app.logger.warning(f"⚠️ {current_user.role} unauthorized to delete project {project_id}")
+                return jsonify({'error': 'Unauthorized to delete this project'}), 403
+            
+            current_app.logger.info(f"🗑️ {current_user.role} deleting project {project_id}")
+            
             session.delete(project)
             session.commit()
-            return jsonify({'message': 'Project deleted successfully'})
+            
+            current_app.logger.info(f"✅ Project {project_id} deleted successfully")
+            
+            # ✅ CRITICAL: Always return JSON
+            return jsonify({'message': 'Project deleted successfully'}), 200
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error handling single project {project_id}: {e}")
+        current_app.logger.error(f"❌ Error handling project {project_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        # ✅ CRITICAL: Always return JSON, never HTML
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -750,10 +791,16 @@ def update_project_stage(project_id):
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    current_user = request.current_user  # ✅ Get current user for logging
     session = SessionLocal()
+    
     try:
+        current_app.logger.info(f"📊 User {current_user.role} updating stage for project {project_id}")
+        
         project = session.query(Project).filter_by(id=project_id).first()
+        
         if not project:
+            current_app.logger.error(f"❌ Project {project_id} not found")
             return jsonify({'error': 'Project not found'}), 404
 
         data = request.json
@@ -769,11 +816,14 @@ def update_project_stage(project_id):
 
         old_stage = project.stage
         if old_stage == new_stage:
+            current_app.logger.info(f"ℹ️ Project {project_id} already in stage {new_stage}")
             return jsonify({
                 'message': 'Stage not changed',
                 'project_id': project.id,
                 'new_stage': new_stage
             }), 200
+
+        current_app.logger.info(f"📈 Project {project_id} stage: {old_stage} → {new_stage}")
 
         project.stage = new_stage
         project.updated_by = updated_by_user
@@ -844,6 +894,8 @@ def update_project_stage(project_id):
                 customer.updated_at = datetime.utcnow()
 
         session.commit()
+        
+        current_app.logger.info(f"✅ Project {project_id} stage updated: {old_stage} → {new_stage}")
 
         return jsonify({
             'message': 'Stage updated successfully',
@@ -854,7 +906,10 @@ def update_project_stage(project_id):
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error updating project stage: {e}")
+        current_app.logger.error(f"❌ Error updating project stage: {e}")
+        import traceback
+        traceback.print_exc()
+        # ✅ CRITICAL: Always return JSON
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
