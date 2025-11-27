@@ -971,37 +971,9 @@ def handle_assignments():
             
             current_app.logger.info(f"📊 Fetching assignments for user: {current_user_name} (Role: {current_user_role})")
             
-            # ✅ FIXED: Better role-based filtering
-            if current_user_role == 'Manager':
-                # Managers see ALL assignments
-                assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
-                current_app.logger.info(f"✅ Manager sees all {len(assignments)} assignments")
-            
-            elif current_user_role == 'Production':
-                # Production team sees their own assignments
-                assignments = session.query(Assignment).filter(
-                    (Assignment.team_member == 'Production Team') |
-                    (Assignment.team_member == current_user_name) |
-                    (Assignment.user_id == current_user_id)
-                ).order_by(Assignment.date.asc()).all()
-                current_app.logger.info(f"✅ Production user sees {len(assignments)} assignments")
-                
-            elif current_user_role == 'Sales':
-                # ✅ CRITICAL FIX: Sales users see their own assignments + unassigned
-                assignments = session.query(Assignment).filter(
-                    (Assignment.team_member == current_user_name) |
-                    (Assignment.user_id == current_user_id) |
-                    (Assignment.user_id == None)  # Unassigned tasks
-                ).order_by(Assignment.date.asc()).all()
-                current_app.logger.info(f"✅ Sales user sees {len(assignments)} assignments")
-                
-            else:
-                # Other roles see their own assignments only
-                assignments = session.query(Assignment).filter(
-                    (Assignment.user_id == current_user_id) |
-                    (Assignment.team_member == current_user_name)
-                ).order_by(Assignment.date.asc()).all()
-                current_app.logger.info(f"✅ User sees {len(assignments)} assignments")
+            # ✅ FIXED: Everyone sees ALL assignments (no role restrictions)
+            assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
+            current_app.logger.info(f"✅ Returning all {len(assignments)} assignments to {current_user_role}")
             
             result = [a.to_dict() for a in assignments]
             
@@ -1058,16 +1030,25 @@ def handle_single_assignment(assignment_id):
             if 'estimated_hours' in data:
                 assignment.estimated_hours = data['estimated_hours']
             
-            # Update dates
+            # ✅ CRITICAL: Handle date updates for drag and drop
+            # Update dates - priority order: start_date > date field
             if 'start_date' in data and data['start_date']:
                 assignment.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
                 assignment.date = assignment.start_date
-            if 'end_date' in data and data['end_date']:
-                assignment.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
-            if 'date' in data and data['date']:
+                current_app.logger.info(f"📅 Updated start_date to: {assignment.start_date}")
+            elif 'date' in data and data['date']:
                 assignment.date = datetime.strptime(data['date'], '%Y-%m-%d').date()
                 if not hasattr(assignment, 'start_date') or not assignment.start_date:
                     assignment.start_date = assignment.date
+                current_app.logger.info(f"📅 Updated date to: {assignment.date}")
+            
+            if 'end_date' in data and data['end_date']:
+                assignment.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                current_app.logger.info(f"📅 Updated end_date to: {assignment.end_date}")
+            elif 'start_date' in data and not ('end_date' in data):
+                # If only start_date provided, set end_date same as start_date
+                assignment.end_date = assignment.start_date
+                current_app.logger.info(f"📅 Set end_date same as start_date: {assignment.end_date}")
             
             # Update times
             if 'start_time' in data and data['start_time']:

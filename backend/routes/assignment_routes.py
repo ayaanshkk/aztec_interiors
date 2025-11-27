@@ -6,10 +6,10 @@ from ..db import SessionLocal
 
 assignment_bp = Blueprint('assignments', __name__)
 
-# ✅ VALID ASSIGNMENT FIELDS - Only these can be used to create/update
+# ✅ VALID ASSIGNMENT FIELDS - Added start_date, end_date, customer_name
 VALID_ASSIGNMENT_FIELDS = [
-    'type', 'title', 'date', 'user_id', 'team_member',
-    'job_id', 'customer_id', 'job_type',
+    'type', 'title', 'date', 'start_date', 'end_date', 'customer_name',
+    'user_id', 'team_member', 'job_id', 'customer_id', 'job_type',
     'start_time', 'end_time', 'estimated_hours',
     'notes', 'priority', 'status'
 ]
@@ -32,14 +32,50 @@ def handle_assignments():
         
         try:
             data = request.json
-            current_app.logger.info(f"📝 RAW data received: {data}")
+            current_app.logger.info(f"📥 RAW data received: {data}")
             
             # ✅ CRITICAL: Filter out invalid fields like 'description'
             data = filter_assignment_data(data)
-            current_app.logger.info(f"📝 Creating assignment with filtered data: {data}")
+            current_app.logger.info(f"📥 Creating assignment with filtered data: {data}")
             
-            # Parse date
-            assignment_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+            # ✅ PARSE DATE FIELDS - Handle both old and new format
+            date_value = None
+            start_date_value = None
+            end_date_value = None
+            
+            if data.get('start_date'):
+                try:
+                    start_date_value = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+                    date_value = start_date_value  # Also set date for backward compatibility
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing start_date: {e}")
+                    return jsonify({'error': 'Invalid start_date format'}), 400
+            elif data.get('date'):
+                try:
+                    date_value = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                    start_date_value = date_value  # Also set start_date
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing date: {e}")
+                    return jsonify({'error': 'Invalid date format'}), 400
+            else:
+                return jsonify({'error': 'start_date or date is required'}), 400
+            
+            if data.get('end_date'):
+                try:
+                    end_date_value = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing end_date: {e}")
+                    return jsonify({'error': 'Invalid end_date format'}), 400
+            else:
+                end_date_value = start_date_value  # Default: end_date = start_date
+            
+            # ✅ GET CUSTOMER NAME
+            customer_name = data.get('customer_name')
+            customer_id = data.get('customer_id')
+            if customer_id and not customer_name:
+                customer = session.query(Customer).filter_by(id=customer_id).first()
+                if customer:
+                    customer_name = customer.name
             
             # Parse times if provided
             start_time = None
@@ -66,7 +102,7 @@ def handle_assignments():
 
             # Get assigned user info
             user_id = data.get('user_id')
-            team_member_name = data.get('team_member')  # Use team_member from data if provided
+            team_member_name = data.get('team_member')
             
             if user_id and not team_member_name:
                 assigned_user = session.get(User, user_id) 
@@ -79,16 +115,19 @@ def handle_assignments():
             creator = session.get(User, current_user.id)
             created_by_name = creator.full_name if creator else None
                 
-            # ✅ Create assignment with ONLY valid fields
+            # ✅ Create assignment with date range support
             assignment = Assignment(
                 type=data.get('type', 'job'),
                 title=data.get('title', ''),
-                date=assignment_date,
+                date=date_value,
+                start_date=start_date_value,
+                end_date=end_date_value,
+                customer_name=customer_name,
                 user_id=user_id,
                 team_member=team_member_name,
                 created_by=current_user.id,
                 job_id=data.get('job_id'),
-                customer_id=data.get('customer_id'),
+                customer_id=customer_id,
                 start_time=start_time,
                 end_time=end_time,
                 estimated_hours=estimated_hours,
@@ -121,7 +160,6 @@ def handle_assignments():
             current_app.logger.error(f"Missing required field: {e}")
             return jsonify({'error': f'Missing required field: {str(e)}'}), 400
         except TypeError as e:
-            # This catches the "invalid keyword argument" error
             session.rollback()
             current_app.logger.error(f"❌ TypeError (invalid field): {e}")
             import traceback
@@ -136,21 +174,16 @@ def handle_assignments():
         finally:
             session.close()
     
-    # GET
+    # ✅ GET - FIXED: Everyone sees ALL assignments
     if request.method == 'GET':
         session = SessionLocal()
         try:
             current_app.logger.info(f"📋 Fetching assignments for user: {current_user.full_name} (role: {current_user.role})")
             
-            query = session.query(Assignment)
-
-            # Non-managers only see their own assignments
-            if current_user.role != 'Manager':
-                query = query.filter(Assignment.user_id == current_user.id)
+            # ✅ CRITICAL FIX: Everyone sees ALL assignments (no role filtering)
+            assignments = session.query(Assignment).order_by(Assignment.date.desc()).all()
             
-            assignments = query.order_by(Assignment.date.desc()).all()
-            
-            current_app.logger.info(f"✅ Found {len(assignments)} assignments")
+            current_app.logger.info(f"✅ Returning all {len(assignments)} assignments to {current_user.role}")
 
             result = []
             for a in assignments:
@@ -195,20 +228,20 @@ def handle_single_assignment(assignment_id):
         assignment = session.get(Assignment, assignment_id) 
         
         if not assignment:
+            current_app.logger.error(f"❌ Assignment {assignment_id} not found")
             return jsonify({'error': 'Assignment not found'}), 404
         
-        # Authorization Check
-        if request.method in ['PUT', 'DELETE', 'GET']:
+        # ✅ RELAXED Authorization: Anyone can view/update/delete (for drag & drop)
+        # Managers have full access, others can manage their own or unassigned tasks
+        if request.method in ['PUT', 'DELETE']:
             is_manager = current_user.role == 'Manager'
             is_assigned_user = assignment.user_id == current_user.id
             is_creator = assignment.created_by == current_user.id
+            is_unassigned = not assignment.user_id
             
-            if not is_manager and not is_assigned_user and not is_creator:
-                # Allow status updates for assigned users
-                if request.method == 'PUT' and list(request.json.keys()) == ['status']:
-                    pass 
-                else:
-                    return jsonify({'error': 'Unauthorized access to assignment'}), 403
+            # ✅ Allow if: Manager, assigned user, creator, or task is unassigned
+            if not (is_manager or is_assigned_user or is_creator or is_unassigned):
+                return jsonify({'error': 'Unauthorized access to assignment'}), 403
         
         # GET
         if request.method == 'GET':
@@ -227,12 +260,12 @@ def handle_single_assignment(assignment_id):
             
             return jsonify(result)
         
-        # PUT
+        # ✅ PUT - FIXED: Enhanced date handling for drag & drop
         elif request.method == 'PUT':
             data = request.json
             current_app.logger.info(f"📝 RAW update data received: {data}")
             
-            # ✅ CRITICAL: Filter out invalid fields like 'description'
+            # ✅ CRITICAL: Filter out invalid fields
             data = filter_assignment_data(data)
             current_app.logger.info(f"📝 Updating assignment {assignment_id} with filtered data: {data}")
             
@@ -240,8 +273,27 @@ def handle_single_assignment(assignment_id):
                 assignment.type = data['type']
             if 'title' in data:
                 assignment.title = data['title']
-            if 'date' in data:
+            
+            # ✅ CRITICAL: Handle date updates for drag and drop
+            # Priority order: start_date > date field
+            if 'start_date' in data and data['start_date']:
+                assignment.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+                assignment.date = assignment.start_date  # Keep date in sync
+                current_app.logger.info(f"📅 Updated start_date to: {assignment.start_date}")
+            elif 'date' in data and data['date']:
                 assignment.date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                if not hasattr(assignment, 'start_date') or not assignment.start_date:
+                    assignment.start_date = assignment.date
+                current_app.logger.info(f"📅 Updated date to: {assignment.date}")
+            
+            if 'end_date' in data and data['end_date']:
+                assignment.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                current_app.logger.info(f"📅 Updated end_date to: {assignment.end_date}")
+            elif 'start_date' in data and not ('end_date' in data):
+                # If only start_date provided, set end_date same as start_date
+                assignment.end_date = assignment.start_date
+                current_app.logger.info(f"📅 Set end_date same as start_date: {assignment.end_date}")
+            
             if 'start_time' in data:
                 try:
                     assignment.start_time = datetime.strptime(data['start_time'], '%H:%M').time() if data['start_time'] else None
@@ -268,8 +320,19 @@ def handle_single_assignment(assignment_id):
                 assignment.job_type = data['job_type']
             if 'job_id' in data:
                 assignment.job_id = data['job_id']
+            
+            # ✅ Update customer
             if 'customer_id' in data:
                 assignment.customer_id = data['customer_id']
+                if data['customer_id']:
+                    customer = session.query(Customer).filter_by(id=data['customer_id']).first()
+                    if customer:
+                        if hasattr(assignment, 'customer_name'):
+                            assignment.customer_name = customer.name
+            
+            if 'customer_name' in data:
+                assignment.customer_name = data['customer_name']
+            
             if 'user_id' in data:
                 assignment.user_id = data['user_id']
                 new_user = session.get(User, data['user_id'])
@@ -298,14 +361,18 @@ def handle_single_assignment(assignment_id):
                 'assignment': result
             })
             
-        # DELETE
+        # ✅ DELETE - FIXED: Always return JSON
         elif request.method == 'DELETE':
             current_app.logger.info(f"🗑️ Deleting assignment {assignment_id}")
             session.delete(assignment)
             session.commit()
             current_app.logger.info(f"✅ Assignment {assignment_id} deleted")
             
-            return jsonify({'message': 'Assignment deleted successfully'})
+            # ✅ CRITICAL: Always return JSON, never HTML
+            return jsonify({
+                'message': 'Assignment deleted successfully',
+                'id': assignment_id
+            }), 200
         
     except TypeError as e:
         session.rollback()
@@ -318,6 +385,7 @@ def handle_single_assignment(assignment_id):
         current_app.logger.error(f"Error in handle_single_assignment: {e}")
         import traceback
         traceback.print_exc()
+        # ✅ CRITICAL: Always return JSON, never HTML
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -341,15 +409,11 @@ def get_assignments_by_date_range():
         
         current_app.logger.info(f"📅 Fetching assignments from {start} to {end}")
         
-        query = session.query(Assignment).filter(
+        # ✅ FIXED: Everyone sees all assignments in date range
+        assignments = session.query(Assignment).filter(
             Assignment.date >= start,
             Assignment.date <= end
-        )
-        
-        if current_user.role != 'Manager':
-            query = query.filter(Assignment.user_id == current_user.id)
-            
-        assignments = query.order_by(Assignment.date).all()
+        ).order_by(Assignment.date).all()
         
         current_app.logger.info(f"✅ Found {len(assignments)} assignments in date range")
         
