@@ -687,21 +687,21 @@ def get_project(project_id):
     
     session = SessionLocal()
     try:
-        project = session.get(Project, project_id)
-        if not project:
-            return jsonify({'error': 'Project not found'}), 404
-            
-        customer = project.customer
+        current_app.logger.info(f"📋 User {request.current_user.role} requesting project {project_id}")
         
-        # Check permissions
-        if request.current_user.role in ['Sales', 'Staff']:
-            if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
-                return jsonify({'error': 'You do not have permission to view this project'}), 403
+        project = session.get(Project, project_id)
+        
+        if not project:
+            current_app.logger.error(f"❌ Project {project_id} not found in database")
+            return jsonify({'error': 'Project not found'}), 404
+        
+        # ✅ FIXED: All authenticated users can view any project
+        current_app.logger.info(f"✅ {request.current_user.role} viewing project {project_id}: {project.project_name}")
         
         return jsonify(project.to_dict(include_forms=True)), 200
         
     except Exception as e:
-        current_app.logger.exception(f"Error fetching project {project_id}: {e}")
+        current_app.logger.exception(f"❌ Error fetching project {project_id}: {e}")
         return jsonify({'error': 'Failed to fetch project'}), 500
     finally:
         session.close()
@@ -722,12 +722,20 @@ def update_project(project_id):
             
         customer = project.customer
         
-        # Check permissions
-        if request.current_user.role in ['Sales', 'Staff']:
-            if customer.created_by != str(request.current_user.id) and customer.salesperson != request.current_user.full_name:
-                return jsonify({'error': 'You do not have permission to edit this project'}), 403
+        # ✅ FIXED: Check permissions for EDITING (not viewing)
+        # Only Manager, HR, and creator can edit
+        is_manager = request.current_user.role == 'Manager'
+        is_hr = request.current_user.role == 'HR'
+        is_creator = customer.created_by == str(request.current_user.id) if hasattr(customer, 'created_by') else False
+        is_salesperson = customer.salesperson == request.current_user.full_name if hasattr(customer, 'salesperson') else False
+        
+        if not (is_manager or is_hr or is_creator or is_salesperson):
+            current_app.logger.warning(f"⚠️ {request.current_user.role} unauthorized to edit project {project_id}")
+            return jsonify({'error': 'You do not have permission to edit this project'}), 403
         
         data = request.get_json()
+        
+        current_app.logger.info(f"📝 {request.current_user.role} updating project {project_id}: {data}")
         
         old_stage = project.stage
         
@@ -800,7 +808,7 @@ def update_project(project_id):
         
         session.commit()
         
-        current_app.logger.info(f"Project {project_id} updated")
+        current_app.logger.info(f"✅ Project {project_id} updated successfully")
         
         return jsonify({
             'success': True,
@@ -810,7 +818,7 @@ def update_project(project_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error updating project: {e}")
+        current_app.logger.exception(f"❌ Error updating project: {e}")
         return jsonify({'error': f'Failed to update project: {str(e)}'}), 500
     finally:
         session.close()
@@ -825,8 +833,12 @@ def delete_project(project_id):
     
     session = SessionLocal()
     try:
+        # ✅ Authorization check for DELETE
         if request.current_user.role not in ['Manager', 'HR']:
+            current_app.logger.warning(f"⚠️ {request.current_user.role} unauthorized to delete project {project_id}")
             return jsonify({'error': 'You do not have permission to delete projects'}), 403
+        
+        current_app.logger.info(f"🗑️ {request.current_user.role} deleting project {project_id}")
         
         project = session.get(Project, project_id)
         if not project:
@@ -847,7 +859,7 @@ def delete_project(project_id):
                  customer.stage = 'Lead' 
                  session.commit()
 
-        current_app.logger.info(f"Project {project_id} deleted")
+        current_app.logger.info(f"✅ Project {project_id} deleted successfully")
         
         return jsonify({
             'success': True,
@@ -856,7 +868,7 @@ def delete_project(project_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error deleting project: {e}")
+        current_app.logger.exception(f"❌ Error deleting project: {e}")
         return jsonify({'error': 'Failed to delete project'}), 500
     finally:
         session.close()
