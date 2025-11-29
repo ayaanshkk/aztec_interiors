@@ -7,6 +7,55 @@ from datetime import datetime
 
 quotation_bp = Blueprint('quotations', __name__)
 
+# Helper function to get current user's email
+def get_current_user_email(data=None):
+    if hasattr(request, 'current_user') and hasattr(request.current_user, 'email'):
+        return request.current_user.email
+    return data.get('created_by', 'System') if isinstance(data, dict) else 'System'
+
+
+@quotation_bp.route('/quotations', methods=['GET', 'POST', 'OPTIONS'])
+@token_required
+def handle_quotations():
+    """GET all quotations or POST to create a new quotation"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    session = SessionLocal()
+    try:
+        if request.method == 'POST':
+            data = request.json
+            quotation = Quotation(
+                customer_id=data.get('customer_id'),
+                created_by=get_current_user_email(data),
+                notes=data.get('notes', '')
+            )
+            session.add(quotation)
+            session.commit()
+
+            items = data.get('items', [])
+            for item in items:
+                q_item = QuotationItem(
+                    quotation_id=quotation.id,
+                    product_name=item.get('product_name'),
+                    quantity=item.get('quantity', 1),
+                    price=item.get('price', 0)
+                )
+                session.add(q_item)
+            session.commit()
+            return jsonify({'id': quotation.id, 'message': 'Quotation created successfully'}), 201
+
+        # GET all quotations
+        quotations = session.query(Quotation).order_by(Quotation.created_at.desc()).all()
+        return jsonify([q.to_dict(include_items=True) for q in quotations])
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error in /quotations: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
 @quotation_bp.route('/quotations/generate-from-checklist/<string:form_submission_id>', methods=['POST'])
 @token_required
 def generate_quote_from_checklist(form_submission_id):
