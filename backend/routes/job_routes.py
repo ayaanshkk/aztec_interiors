@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify
 from datetime import datetime, date
 import uuid
 import traceback
@@ -10,44 +10,15 @@ from ..models import (
 from ..db import SessionLocal
 from .auth_helpers import token_required
 from sqlalchemy import func
-from sqlalchemy.orm import joinedload, selectinload
 
 job_bp = Blueprint('jobs', __name__)
 
-# ==========================================
-# SIMPLE IN-MEMORY CACHE (Replace with Redis in production)
-# ==========================================
-
-_cache = {}
-_cache_timeout = 300  # 5 minutes
-
-def simple_cache_get(key):
-    """Get cached data if not expired"""
-    if key in _cache:
-        cached_data, cached_time = _cache[key]
-        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
-            return cached_data
-    return None
-
-def simple_cache_set(key, data):
-    """Store data in cache with current timestamp"""
-    _cache[key] = (data, datetime.utcnow())
-
-def invalidate_cache(*patterns):
-    """Remove cache entries matching any of the patterns"""
-    for pattern in patterns:
-        keys_to_remove = [k for k in _cache.keys() if pattern in k]
-        for k in keys_to_remove:
-            _cache.pop(k, None)
-
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
-
 def generate_job_reference(session):
     """Generate sequential job reference like AZ-JOB001"""
+    # Get the count of existing jobs
     job_count = session.query(Job).count()
     
+    # Generate reference with zero-padded number
     reference_number = job_count + 1
     job_reference = f"AZ-JOB{reference_number:03d}"
     
@@ -59,10 +30,7 @@ def generate_job_reference(session):
     return job_reference
 
 def serialize_job(job):
-    """
-    Serialize job object to dictionary
-    OPTIMIZED: Uses eager-loaded relationships to avoid N+1 queries
-    """
+    """Serialize job object to dictionary"""
     return {
         'id': job.id,
         'job_reference': job.job_reference,
@@ -71,7 +39,7 @@ def serialize_job(job):
         'customer_name': job.customer.name if job.customer else None,
         'job_type': job.job_type,
         'stage': job.stage,
-        'work_stage': job.work_stage if hasattr(job, 'work_stage') else 'Survey',
+        'work_stage': job.work_stage if hasattr(job, 'work_stage') else 'Survey',  # ✅ NEW
         'priority': job.priority,
         'measure_date': job.measure_date.isoformat() if job.measure_date else None,
         'delivery_date': job.delivery_date.isoformat() if job.delivery_date else None,
@@ -97,89 +65,36 @@ def serialize_job(job):
         'updated_at': job.updated_at.isoformat() if job.updated_at else None,
     }
 
-# ==========================================
-# JOB ROUTES (OPTIMIZED)
-# ==========================================
-
 @job_bp.route('/jobs', methods=['GET', 'OPTIONS'])
 @token_required
 def get_jobs():
-    """
-    Get all jobs with optional filtering
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for job lists
-    - Eager loading of customer, team, fitter, salesperson
-    - Pagination support
-    - Single query with joins instead of N+1 queries
-    """
+    """Get all jobs with optional filtering"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
-    # Get filter parameters
-    customer_id = request.args.get('customer_id')
-    stage = request.args.get('stage')
-    work_stage = request.args.get('work_stage')
-    job_type = request.args.get('type')
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 100, type=int)
-    per_page = min(per_page, 500)  # Max 500 per page
-    
-    # Build cache key from filters
-    cache_key = f"jobs_{customer_id}_{stage}_{work_stage}_{job_type}_{page}_{per_page}"
-    
-    # Check cache first
-    cached = simple_cache_get(cache_key)
-    if cached:
-        current_app.logger.debug(f"Cache hit for jobs: {cache_key}")
-        return jsonify(cached), 200
-        
     session = SessionLocal()
     try:
-        # OPTIMIZED: Single query with eager loading
-        query = session.query(Job).options(
-            joinedload(Job.customer),
-            joinedload(Job.assigned_team),
-            joinedload(Job.primary_fitter),
-            joinedload(Job.salesperson)
-        )
+        customer_id = request.args.get('customer_id')
+        stage = request.args.get('stage')
+        work_stage = request.args.get('work_stage')  # ✅ NEW: Filter by work stage
+        job_type = request.args.get('type')
         
-        # Apply filters
+        query = session.query(Job)
+        
         if customer_id:
             query = query.filter(Job.customer_id == customer_id)
         if stage:
             query = query.filter(Job.stage == stage)
-        if work_stage:
+        if work_stage:  # ✅ NEW
             query = query.filter(Job.work_stage == work_stage)
         if job_type:
             query = query.filter(Job.job_type == job_type)
         
-        # Get total count
-        total_count = query.count()
+        jobs = query.order_by(Job.created_at.desc()).all()
         
-        # Apply pagination and ordering
-        jobs = query.order_by(Job.created_at.desc())\
-                   .limit(per_page)\
-                   .offset((page - 1) * per_page)\
-                   .all()
-        
-        result = {
-            'jobs': [serialize_job(job) for job in jobs],
-            'pagination': {
-                'page': page,
-                'per_page': per_page,
-                'total': total_count,
-                'pages': (total_count + per_page - 1) // per_page
-            }
-        }
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        return jsonify([serialize_job(job) for job in jobs])
     except Exception as e:
-        current_app.logger.error(f"Error fetching jobs: {str(e)}")
+        print(f"Error fetching jobs: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -187,47 +102,18 @@ def get_jobs():
 @job_bp.route('/jobs/<string:job_id>', methods=['GET', 'OPTIONS'])
 @token_required
 def get_job(job_id):
-    """
-    Get a specific job by ID
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for individual jobs
-    - Eager loading of all relationships
-    """
+    """Get a specific job by ID"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
-    
-    # Check cache first
-    cache_key = f"job_{job_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
         
     session = SessionLocal()
     try:
-        # OPTIMIZED: Eager load all relationships
-        job = session.query(Job)\
-            .options(
-                joinedload(Job.customer),
-                joinedload(Job.assigned_team),
-                joinedload(Job.primary_fitter),
-                joinedload(Job.salesperson)
-            )\
-            .filter(Job.id == job_id)\
-            .first()
-            
+        job = session.query(Job).filter(Job.id == job_id).first()
         if not job:
             return jsonify({'error': 'Job not found'}), 404
-        
-        result = serialize_job(job)
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        return jsonify(serialize_job(job))
     except Exception as e:
-        current_app.logger.error(f"Error fetching job {job_id}: {str(e)}")
+        print(f"Error fetching job {job_id}: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -235,17 +121,11 @@ def get_job(job_id):
 @job_bp.route('/jobs', methods=['POST'])
 @token_required
 def create_job():
-    """
-    Create a new job
-    
-    OPTIMIZATIONS:
-    - Cache invalidation for job lists
-    - Batch operations for related records
-    """
+    """Create a new job"""
     session = SessionLocal()
     try:
         data = request.get_json()
-        current_app.logger.info(f"Creating job with data: {data}")
+        print("Received data:", data)
         
         # Validate required fields
         required_fields = ['customer_id', 'job_type', 'measure_date', 'completion_date']
@@ -257,7 +137,7 @@ def create_job():
         
         if missing_fields:
             error_msg = f"Missing required fields: {', '.join(missing_fields)}"
-            current_app.logger.warning(f"Validation error: {error_msg}")
+            print("Validation error:", error_msg)
             return jsonify({'error': error_msg}), 400
         
         # Validate customer exists
@@ -267,7 +147,7 @@ def create_job():
         
         # Generate sequential job reference
         job_reference = generate_job_reference(session)
-        current_app.logger.info(f"Generated job reference: {job_reference}")
+        print(f"Generated job reference: {job_reference}")
         
         # Parse dates safely
         def parse_date(date_str):
@@ -275,16 +155,20 @@ def create_job():
                 try:
                     return datetime.strptime(date_str.split('T')[0], '%Y-%m-%d')
                 except ValueError:
-                    current_app.logger.warning(f"Invalid date format: {date_str}")
+                    print(f"Invalid date format: {date_str}")
                     return None
             return None
         
         # Use customer's address as installation address if not provided
         installation_address = data.get('installation_address') or customer.address
         
-        # Defaults
+        # Default priority to Medium if not provided
         priority = data.get('priority', 'Medium')
+        
+        # Default stage to Lead
         stage = data.get('stage', 'Lead')
+        
+        # ✅ NEW: Default work_stage to Survey if not provided
         work_stage = data.get('work_stage', 'Survey')
         
         job = Job(
@@ -294,7 +178,7 @@ def create_job():
             customer_id=data['customer_id'],
             job_type=data['job_type'],
             stage=stage,
-            work_stage=work_stage,
+            work_stage=work_stage,  # ✅ NEW
             priority=priority,
             measure_date=parse_date(data.get('measure_date')),
             delivery_date=parse_date(data.get('delivery_date')),
@@ -320,7 +204,7 @@ def create_job():
         session.add(job)
         session.flush()
         
-        current_app.logger.info(f"✅ Created job with ID: {job.id}, Reference: {job_reference}, Work Stage: {work_stage}")
+        print(f"✅ Created job with ID: {job.id}, Reference: {job_reference}, Work Stage: {work_stage}")
         
         # Create notification
         try:
@@ -337,45 +221,44 @@ def create_job():
                 moved_by=user_name
             )
             
-            current_app.logger.info(f"✅ Notification created for job {job.id}")
+            print(f"✅ Notification created for job {job.id}")
         except ImportError:
-            current_app.logger.warning("⚠️ Warning: Notification function not found.")
+            print("⚠️ Warning: Notification function not found.")
         except Exception as notif_error:
-            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
+            print(f"⚠️ Failed to create notification: {notif_error}")
         
-        # OPTIMIZED: Batch create form links
+        # Link attached forms
         attached_forms = data.get('attached_forms', [])
-        if attached_forms:
-            form_links = []
-            for form_id in attached_forms:
+        for form_id in attached_forms:
+            try:
                 form_link = JobFormLink(
                     job_id=job.id,
                     form_submission_id=form_id,
                     linked_by=data.get('created_by', 'System')
                 )
-                form_links.append(form_link)
-            
-            session.bulk_save_objects(form_links)
+                session.add(form_link)
+            except Exception as e:
+                print(f"Error linking form {form_id}: {e}")
         
-        # Create initial note if provided
+        # Create initial note
         if data.get('notes'):
-            initial_note = JobNote(
-                job_id=job.id,
-                content=data['notes'],
-                note_type='general',
-                author=data.get('created_by', 'System')
-            )
-            session.add(initial_note)
+            try:
+                initial_note = JobNote(
+                    job_id=job.id,
+                    content=data['notes'],
+                    note_type='general',
+                    author=data.get('created_by', 'System')
+                )
+                session.add(initial_note)
+            except Exception as e:
+                print(f"Error creating initial note: {e}")
         
         session.commit()
-        
-        # INVALIDATE CACHE
-        invalidate_cache('jobs', 'job_stats')
         
         return jsonify(serialize_job(job)), 201
         
     except Exception as e:
-        current_app.logger.error(f"❌ Error creating job: {str(e)}")
+        print(f"❌ Error creating job: {str(e)}")
         traceback.print_exc()
         session.rollback()
         return jsonify({'error': str(e)}), 500
@@ -385,12 +268,7 @@ def create_job():
 @job_bp.route('/jobs/<string:job_id>', methods=['PUT', 'OPTIONS'])
 @token_required
 def update_job(job_id):
-    """
-    Update an existing job
-    
-    OPTIMIZATIONS:
-    - Cache invalidation for updated job
-    """
+    """Update an existing job"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
@@ -411,7 +289,7 @@ def update_job(job_id):
             return None
         
         updateable_fields = [
-            'job_name', 'job_type', 'stage', 'work_stage', 'priority', 'quote_id', 'quote_price',
+            'job_name', 'job_type', 'stage', 'work_stage', 'priority', 'quote_id', 'quote_price',  # ✅ Added work_stage
             'agreed_price', 'deposit1', 'deposit2', 'installation_address',
             'assigned_team_id', 'primary_fitter_id', 'salesperson_id', 
             'assigned_team_name', 'primary_fitter_name', 'salesperson_name', 'notes'
@@ -430,15 +308,11 @@ def update_job(job_id):
         
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('jobs', f'job_{job_id}', 'job_stats')
-        
-        current_app.logger.info(f"✅ Updated job {job_id}, work_stage: {job.work_stage if hasattr(job, 'work_stage') else 'N/A'}")
+        print(f"✅ Updated job {job_id}, work_stage: {job.work_stage if hasattr(job, 'work_stage') else 'N/A'}")
         
         return jsonify(serialize_job(job))
-        
     except Exception as e:
-        current_app.logger.error(f"Error updating job {job_id}: {str(e)}")
+        print(f"Error updating job {job_id}: {str(e)}")
         session.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
@@ -447,13 +321,7 @@ def update_job(job_id):
 @job_bp.route('/jobs/<string:job_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
 def delete_job(job_id):
-    """
-    Delete a job and its dependent records
-    
-    OPTIMIZATIONS:
-    - Batch deletion of dependent records
-    - Cache invalidation
-    """
+    """Delete a job and its dependent records"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
@@ -463,9 +331,9 @@ def delete_job(job_id):
         if not job:
             return jsonify({'error': 'Job not found'}), 404
             
-        current_app.logger.info(f"Attempting to delete job {job_id} and its dependencies.")
+        print(f"Attempting to delete job {job_id} and its dependencies.")
 
-        # OPTIMIZED: Batch delete dependent records (faster than individual deletes)
+        # Delete dependent records
         session.query(JobNote).filter(JobNote.job_id == job_id).delete(synchronize_session='fetch')
         session.query(JobDocument).filter(JobDocument.job_id == job_id).delete(synchronize_session='fetch')
         session.query(JobFormLink).filter(JobFormLink.job_id == job_id).delete(synchronize_session='fetch')
@@ -476,95 +344,45 @@ def delete_job(job_id):
         session.delete(job)
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('jobs', f'job_{job_id}', 'job_stats')
-        
-        current_app.logger.info(f"✅ Successfully deleted job {job_id}.")
+        print(f"✅ Successfully deleted job {job_id}.")
         return jsonify({'message': 'Job deleted successfully'})
         
     except Exception as e:
         traceback.print_exc()
-        current_app.logger.error(f"❌ Error deleting job {job_id}: {str(e)}")
+        print(f"❌ Error deleting job {job_id}: {str(e)}")
         session.rollback()
         return jsonify({'error': f"Failed to delete job"}), 500
     finally:
         session.close()
 
-# ==========================================
-# JOB NOTES ROUTES (OPTIMIZED)
-# ==========================================
-
+# Keep all other endpoints the same...
 @job_bp.route('/jobs/<string:job_id>/notes', methods=['GET'])
 def get_job_notes(job_id):
-    """
-    Get all notes for a job
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for notes
-    - Pagination support
-    """
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    per_page = min(per_page, 200)
-    
-    # Check cache
-    cache_key = f"job_notes_{job_id}_{page}_{per_page}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all notes for a job"""
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
         if not job:
             return jsonify({'error': 'Job not found'}), 404
+            
+        notes = session.query(JobNote).filter(JobNote.job_id == job_id).order_by(JobNote.created_at.desc()).all()
         
-        # Get total count
-        total_count = session.query(JobNote).filter(JobNote.job_id == job_id).count()
-        
-        # Get paginated notes
-        notes = session.query(JobNote)\
-            .filter(JobNote.job_id == job_id)\
-            .order_by(JobNote.created_at.desc())\
-            .limit(per_page)\
-            .offset((page - 1) * per_page)\
-            .all()
-        
-        result = {
-            'notes': [{
-                'id': note.id,
-                'content': note.content,
-                'note_type': note.note_type,
-                'author': note.author,
-                'created_at': note.created_at.isoformat()
-            } for note in notes],
-            'pagination': {
-                'page': page,
-                'per_page': per_page,
-                'total': total_count,
-                'pages': (total_count + per_page - 1) // per_page
-            }
-        }
-        
-        # Cache result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        return jsonify([{
+            'id': note.id,
+            'content': note.content,
+            'note_type': note.note_type,
+            'author': note.author,
+            'created_at': note.created_at.isoformat()
+        } for note in notes])
     except Exception as e:
-        current_app.logger.error(f"Error fetching notes for job {job_id}: {str(e)}")
+        print(f"Error fetching notes for job {job_id}: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 @job_bp.route('/jobs/<string:job_id>/notes', methods=['POST'])
 def add_job_note(job_id):
-    """
-    Add a note to a job
-    
-    OPTIMIZATIONS:
-    - Cache invalidation for job notes
-    """
+    """Add a note to a job"""
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
@@ -586,9 +404,6 @@ def add_job_note(job_id):
         session.add(note)
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache(f'job_notes_{job_id}')
-        
         return jsonify({
             'id': note.id,
             'content': note.content,
@@ -596,44 +411,25 @@ def add_job_note(job_id):
             'author': note.author,
             'created_at': note.created_at.isoformat()
         }), 201
-        
     except Exception as e:
-        current_app.logger.error(f"Error adding note to job {job_id}: {str(e)}")
+        print(f"Error adding note to job {job_id}: {str(e)}")
         session.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-# ==========================================
-# JOB DOCUMENTS ROUTES (OPTIMIZED)
-# ==========================================
-
 @job_bp.route('/jobs/<string:job_id>/documents', methods=['GET'])
 def get_job_documents(job_id):
-    """
-    Get all documents for a job
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for documents
-    """
-    # Check cache
-    cache_key = f"job_documents_{job_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all documents for a job"""
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
         if not job:
             return jsonify({'error': 'Job not found'}), 404
             
-        documents = session.query(JobDocument)\
-            .filter(JobDocument.job_id == job_id)\
-            .order_by(JobDocument.created_at.desc())\
-            .all()
+        documents = session.query(JobDocument).filter(JobDocument.job_id == job_id).order_by(JobDocument.created_at.desc()).all()
         
-        result = [{
+        return jsonify([{
             'id': doc.id,
             'filename': doc.filename,
             'original_filename': doc.original_filename,
@@ -642,31 +438,16 @@ def get_job_documents(job_id):
             'category': doc.category,
             'uploaded_by': doc.uploaded_by,
             'created_at': doc.created_at.isoformat()
-        } for doc in documents]
-        
-        # Cache result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for doc in documents])
     except Exception as e:
-        current_app.logger.error(f"Error fetching documents for job {job_id}: {str(e)}")
+        print(f"Error fetching documents for job {job_id}: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-# ==========================================
-# JOB STAGE UPDATE (OPTIMIZED)
-# ==========================================
-
 @job_bp.route('/jobs/<string:job_id>/stage', methods=['PATCH'])
 def update_job_stage(job_id):
-    """
-    Update job stage
-    
-    OPTIMIZATIONS:
-    - Cache invalidation for job and job lists
-    """
+    """Update job stage"""
     session = SessionLocal()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
@@ -692,157 +473,73 @@ def update_job_stage(job_id):
         
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('jobs', f'job_{job_id}', f'job_notes_{job_id}', 'job_stats')
-        
         return jsonify(serialize_job(job))
-        
     except Exception as e:
-        current_app.logger.error(f"Error updating stage for job {job_id}: {str(e)}")
+        print(f"Error updating stage for job {job_id}: {str(e)}")
         session.rollback()
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-# ==========================================
-# LOOKUP ROUTES (CACHED)
-# ==========================================
-
 @job_bp.route('/teams', methods=['GET'])
 def get_teams():
-    """
-    Get all active teams
-    
-    OPTIMIZATIONS:
-    - 10-minute cache (teams don't change often)
-    """
-    cache_key = "teams"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all active teams"""
     session = SessionLocal()
     try:
-        teams = session.query(Team)\
-            .filter(Team.active == True)\
-            .order_by(Team.name)\
-            .all()
-        
-        result = [{
+        teams = session.query(Team).filter(Team.active == True).order_by(Team.name).all()
+        return jsonify([{
             'id': team.id,
             'name': team.name,
             'specialty': team.specialty
-        } for team in teams]
-        
-        # Cache for 10 minutes
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for team in teams])
     except Exception as e:
-        current_app.logger.error(f"Error fetching teams: {str(e)}")
+        print(f"Error fetching teams: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 @job_bp.route('/fitters', methods=['GET'])
 def get_fitters():
-    """
-    Get all active fitters
-    
-    OPTIMIZATIONS:
-    - 10-minute cache
-    - Eager loading of team relationship
-    """
-    cache_key = "fitters"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all active fitters"""
     session = SessionLocal()
     try:
-        fitters = session.query(Fitter)\
-            .options(joinedload(Fitter.team))\
-            .filter(Fitter.active == True)\
-            .order_by(Fitter.name)\
-            .all()
-        
-        result = [{
+        fitters = session.query(Fitter).filter(Fitter.active == True).order_by(Fitter.name).all()
+        return jsonify([{
             'id': fitter.id,
             'name': fitter.name,
             'team_id': fitter.team_id,
             'team_name': fitter.team.name if fitter.team else None
-        } for fitter in fitters]
-        
-        # Cache for 10 minutes
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for fitter in fitters])
     except Exception as e:
-        current_app.logger.error(f"Error fetching fitters: {str(e)}")
+        print(f"Error fetching fitters: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 @job_bp.route('/salespeople', methods=['GET'])
 def get_salespeople():
-    """
-    Get all active salespeople
-    
-    OPTIMIZATIONS:
-    - 10-minute cache
-    """
-    cache_key = "salespeople"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all active salespeople"""
     session = SessionLocal()
     try:
-        salespeople = session.query(Salesperson)\
-            .filter(Salesperson.active == True)\
-            .order_by(Salesperson.name)\
-            .all()
-        
-        result = [{
+        salespeople = session.query(Salesperson).filter(Salesperson.active == True).order_by(Salesperson.name).all()
+        return jsonify([{
             'id': person.id,
             'name': person.name,
             'email': person.email
-        } for person in salespeople]
-        
-        # Cache for 10 minutes
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for person in salespeople])
     except Exception as e:
-        current_app.logger.error(f"Error fetching salespeople: {str(e)}")
+        print(f"Error fetching salespeople: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-# ==========================================
-# FORMS & STATS (OPTIMIZED)
-# ==========================================
-
 @job_bp.route('/forms/unlinked', methods=['GET'])
 def get_unlinked_forms():
-    """
-    Get form submissions not linked to any job
-    
-    OPTIMIZATIONS:
-    - 5-minute cache
-    """
-    customer_id = request.args.get('customer_id')
-    
-    cache_key = f"unlinked_forms_{customer_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get form submissions not linked to any job"""
     session = SessionLocal()
     try:
+        customer_id = request.args.get('customer_id')
+        
         linked_form_ids = session.query(JobFormLink.form_submission_id).subquery()
         
         query = session.query(FormSubmission).filter(
@@ -854,49 +551,32 @@ def get_unlinked_forms():
         
         forms = query.order_by(FormSubmission.submitted_at.desc()).all()
         
-        result = [{
+        return jsonify([{
             'id': form.id,
             'customer_id': form.customer_id,
             'submitted_at': form.submitted_at.isoformat(),
             'processed': form.processed,
             'source': form.source
-        } for form in forms]
-        
-        # Cache result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for form in forms])
     except Exception as e:
-        current_app.logger.error(f"Error fetching unlinked forms: {str(e)}")
+        print(f"Error fetching unlinked forms: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 @job_bp.route('/jobs/stats', methods=['GET'])
 def get_job_stats():
-    """
-    Get job statistics
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for stats
-    """
-    cache_key = "job_stats"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get job statistics"""
     session = SessionLocal()
     try:
         stats = {
             'total_jobs': session.query(Job).count(),
             'by_stage': {},
-            'by_work_stage': {},
+            'by_work_stage': {},  # ✅ NEW
             'by_type': {},
             'by_priority': {}
         }
         
-        # Stage counts
         stage_counts = session.query(
             Job.stage, 
             func.count(Job.id)
@@ -905,7 +585,7 @@ def get_job_stats():
         for stage, count in stage_counts:
             stats['by_stage'][stage] = count
         
-        # Work stage counts
+        # ✅ NEW: Work stage counts
         if hasattr(Job, 'work_stage'):
             work_stage_counts = session.query(
                 Job.work_stage, 
@@ -915,7 +595,6 @@ def get_job_stats():
             for work_stage, count in work_stage_counts:
                 stats['by_work_stage'][work_stage] = count
         
-        # Job type counts
         type_counts = session.query(
             Job.job_type, 
             func.count(Job.id)
@@ -924,7 +603,6 @@ def get_job_stats():
         for job_type, count in type_counts:
             stats['by_type'][job_type] = count
         
-        # Priority counts
         priority_counts = session.query(
             Job.priority, 
             func.count(Job.id)
@@ -933,13 +611,9 @@ def get_job_stats():
         for priority, count in priority_counts:
             stats['by_priority'][priority] = count
         
-        # Cache result
-        simple_cache_set(cache_key, stats)
-        
         return jsonify(stats)
-        
     except Exception as e:
-        current_app.logger.error(f"Error fetching job stats: {str(e)}")
+        print(f"Error fetching job stats: {str(e)}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()

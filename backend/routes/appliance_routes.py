@@ -1,7 +1,6 @@
 # routes/appliance_routes.py
 from flask import Blueprint, request, jsonify, current_app
-from sqlalchemy import or_, func
-from sqlalchemy.orm import joinedload
+from sqlalchemy import or_
 from ..db import SessionLocal
 
 from ..models import Product, Brand, ApplianceCategory, DataImport, ProductQuoteItem
@@ -14,41 +13,8 @@ import threading
 
 appliance_bp = Blueprint('appliances', __name__)
 
-# ==========================================
-# SIMPLE IN-MEMORY CACHE (Replace with Redis in production)
-# ==========================================
-
-_cache = {}
-_cache_timeout = 300  # 5 minutes
-
-def simple_cache_get(key):
-    """Get cached data if not expired"""
-    if key in _cache:
-        cached_data, cached_time = _cache[key]
-        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
-            return cached_data
-    return None
-
-def simple_cache_set(key, data):
-    """Store data in cache with current timestamp"""
-    _cache[key] = (data, datetime.utcnow())
-
-def invalidate_cache(*patterns):
-    """Remove cache entries matching any of the patterns"""
-    for pattern in patterns:
-        keys_to_remove = [k for k in _cache.keys() if pattern in k]
-        for k in keys_to_remove:
-            _cache.pop(k, None)
-
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
-
 def serialize_product(product):
-    """
-    Serialize product object to dictionary
-    OPTIMIZED: Uses eager-loaded relationships
-    """
+    """Serialize product object to dictionary"""
     return {
         'id': product.id,
         'model_code': product.model_code,
@@ -85,21 +51,22 @@ def serialize_product(product):
 
 
 def safe_read_csv(file_path, **kwargs):
-    """Safely read CSV with support for both old and new pandas versions"""
+    """
+    Safely read CSV with support for both old and new pandas versions
+    """
     try:
+        # Try newer pandas syntax (>= 1.3.0)
         return pd.read_csv(file_path, **kwargs, on_bad_lines='skip')
     except TypeError:
+        # Fallback for pandas < 1.3.0
         kwargs_old = {k: v for k, v in kwargs.items() if k not in ['on_bad_lines']}
         return pd.read_csv(file_path, **kwargs_old, error_bad_lines=False, warn_bad_lines=False)
 
 
 def process_import_file(app, import_id, file_path, import_type):
     """
-    Background thread to process import
-    
-    OPTIMIZATIONS:
-    - Batch commits every 100 records instead of every row
-    - Cache invalidation after import
+    This function runs in a background thread to process the import.
+    It now handles the complex pivoted format for 'appliance_matrix'.
     """
     with app.app_context():
         session = SessionLocal()
@@ -112,6 +79,7 @@ def process_import_file(app, import_id, file_path, import_type):
 
         app.logger.info(f"Starting import processing for {import_id}: {file_path} ({import_type})")
 
+        # Verify file exists
         if not os.path.exists(file_path):
             import_record.status = 'failed'
             import_record.error_log = f"File not found: {file_path}"
@@ -127,13 +95,12 @@ def process_import_file(app, import_id, file_path, import_type):
         processed_count = 0
         failed_count = 0
         error_log = []
-        batch_size = 100  # OPTIMIZED: Batch commits
 
         try:
             # --- Logic for 'Appliance Matrix' (PIVOTED FORMAT) ---
             if import_type == 'appliance_matrix':
                 
-                # Load file without headers to sniff for brand
+                # 1. Load file without headers to sniff for brand
                 if file_path.endswith(('.xlsx', '.xls')):
                     df_sniff = pd.read_excel(file_path, header=None)
                 else:
@@ -159,16 +126,13 @@ def process_import_file(app, import_id, file_path, import_type):
                     session.commit()
                 brand = session.query(Brand).filter_by(name=brand_name).first()
 
-                # Reload DataFrame with correct header
+                # 2. Reload DataFrame with correct header (row 5, index 4)
                 if file_path.endswith(('.xlsx', '.xls')):
                     df = pd.read_excel(file_path, header=4)
                 else:
                     df = safe_read_csv(file_path, header=4, encoding='utf-8')
 
-                # OPTIMIZED: Batch processing
-                batch_products = []
-                
-                # Iterate and process rows
+                # 3. Iterate and process rows
                 for index, row in df.iterrows():
                     try:
                         product_name_category = str(row.iloc[0]).strip()
@@ -180,8 +144,9 @@ def process_import_file(app, import_id, file_path, import_type):
                         if not category:
                             category = ApplianceCategory(name=product_name_category, active=True)
                             session.add(category)
-                            session.flush()  # Get ID without committing
-                        
+                            session.commit()
+                        category = session.query(ApplianceCategory).filter_by(name=product_name_category).first()
+
                         # Helper to process a single product entry
                         def process_entry(model_codes_str, series, price, tier, current_session):
                             entry_processed_count = 0
@@ -224,28 +189,22 @@ def process_import_file(app, import_id, file_path, import_type):
                                 entry_processed_count += 1
                             return entry_processed_count
 
-                        # Process LOW tier
+                        # Process LOW tier (cols 1, 2, 3)
                         processed_count += process_entry(row.iloc[1], row.iloc[2], row.iloc[3], 'low', session)
                         
-                        # Process MID tier
+                        # Process MID tier (cols 5, 6, 7)
                         processed_count += process_entry(row.iloc[5], row.iloc[6], row.iloc[7], 'mid', session)
                         
-                        # Process HIGH tier
+                        # Process HIGH tier (cols 9, 10, 11)
                         processed_count += process_entry(row.iloc[9], row.iloc[10], row.iloc[11], 'high', session)
                         
-                        # OPTIMIZED: Batch commit every 100 records
-                        if processed_count % batch_size == 0:
-                            session.commit()
-                            app.logger.info(f"Batch committed: {processed_count} records processed")
+                        session.commit()
 
                     except Exception as row_e:
                         session.rollback()
                         failed_count += 1
                         error_log.append(f"Row {index + 6}: {str(row_e)}")
                         app.logger.error(f"Error processing row {index + 6}: {row_e}")
-
-                # Final commit for remaining records
-                session.commit()
 
             # --- Logic for 'KBB Pricelist' (FLAT FORMAT) ---
             elif import_type == 'kbb_pricelist':
@@ -263,11 +222,8 @@ def process_import_file(app, import_id, file_path, import_type):
                             continue
                         
                         # KBB processing logic here
-                        processed_count += 1
                         
-                        # OPTIMIZED: Batch commit
-                        if processed_count % batch_size == 0:
-                            session.commit()
+                        processed_count += 1
                         
                     except Exception as row_e:
                         session.rollback()
@@ -282,10 +238,6 @@ def process_import_file(app, import_id, file_path, import_type):
             import_record.records_processed = processed_count
             import_record.records_failed = failed_count
             import_record.error_log = "\n".join(error_log)
-            
-            # INVALIDATE CACHE after import
-            invalidate_cache('products', 'brands', 'categories', 'product_search')
-            
             app.logger.info(f"Import {import_id} completed: {processed_count} processed, {failed_count} failed")
             
         except Exception as e:
@@ -300,46 +252,22 @@ def process_import_file(app, import_id, file_path, import_type):
             session.close()
 
 
-# ==========================================
-# PRODUCT ENDPOINTS (OPTIMIZED)
-# ==========================================
-
+# Product endpoints
 @appliance_bp.route('/products', methods=['GET'])
 def get_products():
-    """
-    Get all products with filtering and search
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for product lists
-    - Eager loading of brand and category
-    - Proper pagination (not deprecated method)
-    - Filtering optimizations
-    """
-    search = request.args.get('search', '')
-    brand_ids = request.args.getlist('brand_id', type=int)
-    category_id = request.args.get('category_id', type=int)
-    series = request.args.get('series')
-    tier = request.args.get('tier')
-    active_only = request.args.get('active_only', 'true').lower() == 'true'
-    page = request.args.get('page', 1, type=int)
-    per_page = min(request.args.get('per_page', 50, type=int), 100)
-    
-    # Build cache key from filters
-    cache_key = f"products_{search}_{brand_ids}_{category_id}_{series}_{tier}_{active_only}_{page}_{per_page}"
-    
-    # Check cache first
-    cached = simple_cache_get(cache_key)
-    if cached:
-        current_app.logger.debug(f"Cache hit for products: {cache_key}")
-        return jsonify(cached), 200
-    
+    """Get all products with filtering and search"""
     session = SessionLocal()
     try:
-        # OPTIMIZED: Single query with eager loading
-        query = session.query(Product).options(
-            joinedload(Product.brand),
-            joinedload(Product.category)
-        )
+        search = request.args.get('search', '')
+        brand_ids = request.args.getlist('brand_id', type=int)
+        category_id = request.args.get('category_id', type=int)
+        series = request.args.get('series')
+        tier = request.args.get('tier')
+        active_only = request.args.get('active_only', 'true').lower() == 'true'
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 50, type=int), 100)
+        
+        query = session.query(Product)
         
         if active_only:
             query = query.filter(Product.active == True)
@@ -370,32 +298,24 @@ def get_products():
         elif tier == 'high':
             query = query.filter(Product.high_tier_price.isnot(None))
         
-        # OPTIMIZED: Proper ordering (brand already eager-loaded)
         query = query.join(Brand).order_by(Brand.name, Product.series, Product.model_code)
         
-        # OPTIMIZED: Manual pagination (not deprecated .paginate())
-        total_count = query.count()
-        products = query.limit(per_page).offset((page - 1) * per_page).all()
+        pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+        products = pagination.items
         
-        result = {
+        return jsonify({
             'products': [serialize_product(p) for p in products],
             'pagination': {
                 'page': page,
                 'per_page': per_page,
-                'total': total_count,
-                'pages': (total_count + per_page - 1) // per_page,
-                'has_next': page < ((total_count + per_page - 1) // per_page),
-                'has_prev': page > 1
+                'total': pagination.total,
+                'pages': pagination.pages,
+                'has_next': pagination.has_next,
+                'has_prev': pagination.has_prev
             }
-        }
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        })
     except Exception as e:
-        current_app.logger.exception(f"Error fetching products: {e}")
+        current_app.logger.error(f"Error fetching products: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -403,42 +323,16 @@ def get_products():
 
 @appliance_bp.route('/products/<int:product_id>', methods=['GET'])
 def get_product(product_id):
-    """
-    Get a specific product by ID
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for individual products
-    - Eager loading of brand and category
-    """
-    # Check cache first
-    cache_key = f"product_{product_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get a specific product by ID"""
     session = SessionLocal()
     try:
-        # OPTIMIZED: Eager load brand and category
-        product = session.query(Product)\
-            .options(
-                joinedload(Product.brand),
-                joinedload(Product.category)
-            )\
-            .filter(Product.id == product_id)\
-            .first()
-            
+        product = session.get(Product, product_id)
         if not product:
+            session.close()
             return jsonify({'error': 'Product not found'}), 404
-        
-        result = serialize_product(product)
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+            
+        return jsonify(serialize_product(product))
     except Exception as e:
-        current_app.logger.exception(f"Error fetching product {product_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -446,12 +340,7 @@ def get_product(product_id):
 
 @appliance_bp.route('/products', methods=['POST'])
 def create_product():
-    """
-    Create a new product
-    
-    OPTIMIZATIONS:
-    - Cache invalidation
-    """
+    """Create a new product"""
     session = SessionLocal()
     try:
         data = request.get_json()
@@ -459,9 +348,11 @@ def create_product():
         required_fields = ['model_code', 'name', 'brand_id', 'category_id']
         for field in required_fields:
             if not data.get(field):
+                session.close()
                 return jsonify({'error': f'{field} is required'}), 400
         
         if session.query(Product).filter_by(model_code=data['model_code']).first():
+            session.close()
             return jsonify({'error': 'Model code already exists'}), 400
         
         product = Product(
@@ -489,19 +380,9 @@ def create_product():
         
         session.add(product)
         session.commit()
+        product_dict = serialize_product(product)
         
-        # INVALIDATE CACHE
-        invalidate_cache('products', 'product_search')
-        
-        # Eager load for response
-        session.refresh(product)
-        product = session.query(Product)\
-            .options(joinedload(Product.brand), joinedload(Product.category))\
-            .filter(Product.id == product.id)\
-            .first()
-        
-        return jsonify(serialize_product(product)), 201
-        
+        return jsonify(product_dict), 201
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error creating product: {e}")
@@ -512,16 +393,12 @@ def create_product():
 
 @appliance_bp.route('/products/<int:product_id>', methods=['PUT'])
 def update_product(product_id):
-    """
-    Update an existing product
-    
-    OPTIMIZATIONS:
-    - Cache invalidation
-    """
+    """Update an existing product"""
     session = SessionLocal()
     try:
         product = session.get(Product, product_id)
         if not product:
+            session.close()
             return jsonify({'error': 'Product not found'}), 404
 
         data = request.get_json()
@@ -545,17 +422,7 @@ def update_product(product_id):
         product.updated_at = datetime.utcnow()
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('products', f'product_{product_id}', 'product_search')
-        
-        # Eager load for response
-        product = session.query(Product)\
-            .options(joinedload(Product.brand), joinedload(Product.category))\
-            .filter(Product.id == product_id)\
-            .first()
-        
         return jsonify(serialize_product(product))
-        
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error updating product: {e}")
@@ -566,27 +433,19 @@ def update_product(product_id):
 
 @appliance_bp.route('/products/<int:product_id>', methods=['DELETE'])
 def delete_product(product_id):
-    """
-    Delete a product (soft delete)
-    
-    OPTIMIZATIONS:
-    - Cache invalidation
-    """
+    """Delete a product (soft delete by setting active=False)"""
     session = SessionLocal()
     try:
         product = session.get(Product, product_id)
         if not product:
+            session.close()
             return jsonify({'error': 'Product not found'}), 404
         
         product.active = False
         product.updated_at = datetime.utcnow()
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('products', f'product_{product_id}', 'product_search', 'brands', 'categories')
-        
         return jsonify({'message': 'Product deactivated successfully'})
-        
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error deleting product: {e}")
@@ -595,50 +454,29 @@ def delete_product(product_id):
         session.close()
 
 
-# ==========================================
-# BRAND ENDPOINTS (OPTIMIZED)
-# ==========================================
-
+# Brand endpoints
 @appliance_bp.route('/brands', methods=['GET'])
 def get_brands():
-    """
-    Get all brands
-    
-    OPTIMIZATIONS:
-    - 10-minute cache (brands don't change often)
-    """
-    active_only = request.args.get('active_only', 'true').lower() == 'true'
-    
-    # Check cache first
-    cache_key = f"brands_{active_only}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all brands"""
     session = SessionLocal()
     try:
+        active_only = request.args.get('active_only', 'true').lower() == 'true'
+        
         query = session.query(Brand)
         if active_only:
             query = query.filter(Brand.active == True)
         
         brands = query.order_by(Brand.name).all()
         
-        result = [{
+        return jsonify([{
             'id': b.id,
             'name': b.name,
             'logo_url': b.logo_url,
             'website': b.website,
             'active': b.active,
             'product_count': len([p for p in b.products if p.active]) if active_only else len(b.products)
-        } for b in brands]
-        
-        # Cache the result (10 minutes)
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for b in brands])
     except Exception as e:
-        current_app.logger.exception(f"Error fetching brands: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -646,20 +484,17 @@ def get_brands():
 
 @appliance_bp.route('/brands', methods=['POST'])
 def create_brand():
-    """
-    Create a new brand
-    
-    OPTIMIZATIONS:
-    - Cache invalidation
-    """
+    """Create a new brand"""
     session = SessionLocal()
     try:
         data = request.get_json()
         
         if not data.get('name'):
+            session.close()
             return jsonify({'error': 'Brand name is required'}), 400
         
         if session.query(Brand).filter_by(name=data['name']).first():
+            session.close()
             return jsonify({'error': 'Brand already exists'}), 400
         
         brand = Brand(
@@ -672,9 +507,6 @@ def create_brand():
         session.add(brand)
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('brands')
-        
         return jsonify({
             'id': brand.id,
             'name': brand.name,
@@ -682,7 +514,6 @@ def create_brand():
             'website': brand.website,
             'active': brand.active
         }), 201
-        
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error creating brand: {e}")
@@ -691,49 +522,28 @@ def create_brand():
         session.close()
 
 
-# ==========================================
-# CATEGORY ENDPOINTS (OPTIMIZED)
-# ==========================================
-
+# Category endpoints
 @appliance_bp.route('/categories', methods=['GET'])
 def get_categories():
-    """
-    Get all appliance categories
-    
-    OPTIMIZATIONS:
-    - 10-minute cache (categories don't change often)
-    """
-    active_only = request.args.get('active_only', 'true').lower() == 'true'
-    
-    # Check cache first
-    cache_key = f"categories_{active_only}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get all appliance categories"""
     session = SessionLocal()
     try:
+        active_only = request.args.get('active_only', 'true').lower() == 'true'
+        
         query = session.query(ApplianceCategory)
         if active_only:
             query = query.filter(ApplianceCategory.active == True)
         
         categories = query.order_by(ApplianceCategory.name).all()
         
-        result = [{
+        return jsonify([{
             'id': c.id,
             'name': c.name,
             'description': c.description,
             'active': c.active,
             'product_count': len([p for p in c.products if p.active]) if active_only else len(c.products)
-        } for c in categories]
-        
-        # Cache the result (10 minutes)
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for c in categories])
     except Exception as e:
-        current_app.logger.exception(f"Error fetching categories: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -741,20 +551,17 @@ def get_categories():
 
 @appliance_bp.route('/categories', methods=['POST'])
 def create_category():
-    """
-    Create a new appliance category
-    
-    OPTIMIZATIONS:
-    - Cache invalidation
-    """
+    """Create a new appliance category"""
     session = SessionLocal()
     try:
         data = request.get_json()
         
         if not data.get('name'):
+            session.close()
             return jsonify({'error': 'Category name is required'}), 400
         
         if session.query(ApplianceCategory).filter_by(name=data['name']).first():
+            session.close()
             return jsonify({'error': 'Category already exists'}), 400
         
         category = ApplianceCategory(
@@ -766,16 +573,12 @@ def create_category():
         session.add(category)
         session.commit()
         
-        # INVALIDATE CACHE
-        invalidate_cache('categories')
-        
         return jsonify({
             'id': category.id,
             'name': category.name,
             'description': category.description,
             'active': category.active
         }), 201
-        
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error creating category: {e}")
@@ -784,41 +587,14 @@ def create_category():
         session.close()
 
 
-# ==========================================
-# SEARCH AND UTILITY ENDPOINTS (OPTIMIZED)
-# ==========================================
-
 @appliance_bp.route('/products/<int:product_id>/price/<tier>', methods=['GET'])
 def get_product_price_for_tier(product_id, tier):
-    """
-    Get product price for specific tier
-    
-    OPTIMIZATIONS:
-    - Uses cached product data if available
-    """
-    # Try to get from cache first
-    cache_key = f"product_{product_id}"
-    cached = simple_cache_get(cache_key)
-    
-    if cached:
-        price_map = {
-            'low': cached.get('pricing', {}).get('low_tier_price'),
-            'mid': cached.get('pricing', {}).get('mid_tier_price'),
-            'high': cached.get('pricing', {}).get('high_tier_price'),
-            'base': cached.get('pricing', {}).get('base_price')
-        }
-        price = price_map.get(tier)
-        
-        return jsonify({
-            'product_id': product_id,
-            'tier': tier,
-            'price': price
-        })
-    
+    """Get product price for specific tier"""
     session = SessionLocal()
     try:
         product = session.get(Product, product_id)
         if not product:
+            session.close()
             return jsonify({'error': 'Product not found'}), 404
             
         price = product.get_price_for_tier(tier)
@@ -828,9 +604,7 @@ def get_product_price_for_tier(product_id, tier):
             'tier': tier,
             'price': float(price) if price else None
         })
-        
     except Exception as e:
-        current_app.logger.exception(f"Error getting price for product {product_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -838,49 +612,29 @@ def get_product_price_for_tier(product_id, tier):
 
 @appliance_bp.route('/products/search', methods=['GET'])
 def search_products():
-    """
-    Search products with autocomplete support
-    
-    OPTIMIZATIONS:
-    - 2-minute cache for search results
-    - Eager loading of brand and category
-    """
-    query_text = request.args.get('q', '')
-    limit = min(request.args.get('limit', 10, type=int), 50)
-    
-    if len(query_text) < 2:
-        return jsonify([])
-    
-    # Check cache first
-    cache_key = f"product_search_{query_text}_{limit}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Search products with autocomplete support"""
     session = SessionLocal()
     try:
+        query_text = request.args.get('q', '')
+        limit = min(request.args.get('limit', 10, type=int), 50)
+        
+        if len(query_text) < 2:
+            return jsonify([])
+        
         search_filter = f"%{query_text}%"
+        products = session.query(Product).filter(
+            Product.active == True
+        ).filter(
+            or_(
+                Product.name.ilike(search_filter),
+                Product.model_code.ilike(search_filter),
+                Product.series.ilike(search_filter)
+            )
+        ).join(Brand).order_by(
+            Brand.name, Product.series, Product.model_code
+        ).limit(limit).all()
         
-        # OPTIMIZED: Eager load brand
-        products = session.query(Product)\
-            .options(
-                joinedload(Product.brand),
-                joinedload(Product.category)
-            )\
-            .filter(Product.active == True)\
-            .filter(
-                or_(
-                    Product.name.ilike(search_filter),
-                    Product.model_code.ilike(search_filter),
-                    Product.series.ilike(search_filter)
-                )
-            )\
-            .join(Brand)\
-            .order_by(Brand.name, Product.series, Product.model_code)\
-            .limit(limit)\
-            .all()
-        
-        result = [{
+        return jsonify([{
             'id': p.id,
             'model_code': p.model_code,
             'name': p.name,
@@ -888,45 +642,31 @@ def search_products():
             'series': p.series,
             'base_price': float(p.base_price) if p.base_price else None,
             'category_name': p.category.name if p.category else None
-        } for p in products]
-        
-        # Cache the result (2 minutes for fresh search results)
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        } for p in products])
     except Exception as e:
-        current_app.logger.exception(f"Error searching products: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-# ==========================================
-# IMPORT ENDPOINTS (OPTIMIZED)
-# ==========================================
-
 @appliance_bp.route('/import/upload', methods=['POST'])
 def upload_import_file():
-    """
-    Upload file for data import
-    
-    OPTIMIZATIONS:
-    - Background processing with batch commits
-    - Cache invalidation after import
-    """
+    """Upload file for data import and start processing in background"""
     session = SessionLocal()
     try:
         if 'file' not in request.files:
+            session.close()
             return jsonify({'error': 'No file provided'}), 400
         
         file = request.files['file']
         import_type = request.form.get('import_type', 'appliance_matrix')
         
         if file.filename == '':
+            session.close()
             return jsonify({'error': 'No file selected'}), 400
         
         if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
+            session.close()
             return jsonify({'error': 'Invalid file type. Please upload Excel or CSV file'}), 400
         
         # Save file
@@ -942,6 +682,7 @@ def upload_import_file():
             file.save(file_path)
         except Exception as save_error:
             current_app.logger.error(f"Error saving file: {save_error}")
+            session.close()
             return jsonify({'error': f'Failed to save file: {str(save_error)}'}), 500
         
         # Create import record
@@ -966,6 +707,7 @@ def upload_import_file():
             import_record.status = 'failed'
             import_record.error_log = f'Failed to start processing: {str(thread_error)}'
             session.commit()
+            session.close()
             return jsonify({'error': f'Failed to start processing: {str(thread_error)}'}), 500
 
         return jsonify({
@@ -984,26 +726,16 @@ def upload_import_file():
 
 @appliance_bp.route('/import/<int:import_id>/status', methods=['GET'])
 def get_import_status(import_id):
-    """
-    Get status of data import
-    
-    OPTIMIZATIONS:
-    - 1-minute cache for import status
-    """
-    # Check cache first (short TTL for status)
-    cache_key = f"import_status_{import_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
+    """Get status of data import"""
     session = SessionLocal()
     try:
         import_record = session.get(DataImport, import_id)
         
         if not import_record:
+            session.close()
             return jsonify({'error': 'Import record not found'}), 404
-        
-        result = {
+            
+        return jsonify({
             'id': import_record.id,
             'filename': import_record.filename,
             'import_type': import_record.import_type,
@@ -1013,15 +745,8 @@ def get_import_status(import_id):
             'error_log': import_record.error_log,
             'created_at': import_record.created_at.isoformat(),
             'completed_at': import_record.completed_at.isoformat() if import_record.completed_at else None
-        }
-        
-        # Cache the result (1 minute for import status)
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
-        
+        })
     except Exception as e:
-        current_app.logger.exception(f"Error fetching import status: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()

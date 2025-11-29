@@ -1,61 +1,31 @@
 from flask import Blueprint, request, jsonify, current_app, send_file
-from ..models import Customer, CustomerFormData, User, ApprovalNotification, ProductionNotification
+from ..models import Customer, CustomerFormData, User, ApprovalNotification
 import secrets
 import string
 import json
 from datetime import datetime, timedelta
 from io import BytesIO
 from fpdf import FPDF
-from ..db import SessionLocal
+from ..db import SessionLocal # Required for database access
 from functools import wraps
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import joinedload 
 from .notification_routes import create_activity_notification
+
 
 form_bp = Blueprint("form", __name__)
 
-# ==========================================
-# SIMPLE IN-MEMORY CACHE (Replace with Redis in production)
-# ==========================================
-
-_cache = {}
-_cache_timeout = 300  # 5 minutes
-
-def simple_cache_get(key):
-    """Get cached data if not expired"""
-    if key in _cache:
-        cached_data, cached_time = _cache[key]
-        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
-            return cached_data
-    return None
-
-def simple_cache_set(key, data):
-    """Store data in cache with current timestamp"""
-    _cache[key] = (data, datetime.utcnow())
-
-def invalidate_cache(*patterns):
-    """Remove cache entries matching any of the patterns"""
-    for pattern in patterns:
-        keys_to_remove = [k for k in _cache.keys() if pattern in k]
-        for k in keys_to_remove:
-            _cache.pop(k, None)
-
-# ==========================================
 # In-memory storage for form tokens (for production use Redis/DB)
-# ==========================================
-
 form_tokens = {}
 
 def generate_secure_token(length=32):
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
-# ==========================================
-# Token authentication decorator
-# ==========================================
-
+# Token authentication decorator (Relies on User.verify_jwt_token which handles its session)
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Allow OPTIONS requests without authentication
         if request.method == 'OPTIONS':
             return f(*args, **kwargs)
         
@@ -71,8 +41,13 @@ def token_required(f):
         if not token:
             return jsonify({'error': 'Token is missing'}), 401
         
+        # --- FIX: Session must be active for verify_jwt_token if it queries the DB ---
         session = SessionLocal() 
         try:
+            # We assume User.verify_jwt_token needs a session or relies on Model.query being replaced
+            # Note: The logic in the full auth_routes handles session passing to User.verify_jwt_token.
+            # If User.verify_jwt_token is a static method that needs a session, the logic inside 
+            # auth_routes.py is the primary fix. For this helper, we ensure a session exists around it.
             current_user = User.verify_jwt_token(token, current_app.config['SECRET_KEY'], session=session)
             if not current_user:
                 return jsonify({'error': 'Token is invalid or expired'}), 401
@@ -84,6 +59,7 @@ def token_required(f):
             return jsonify({'error': 'Token verification failed'}), 401
         finally:
             session.close()
+        # --------------------------------------------------------------------------
         
         return f(*args, **kwargs)
     
@@ -103,74 +79,73 @@ def manager_required(f):
     
     return decorated
 
-# ==========================================
-# APPROVAL SYSTEM ROUTES (OPTIMIZED)
-# ==========================================
+# ------------------------------------------------------------------------
+# NEW CUSTOMER ROUTE: Fetch List of Customers for the Dropdown
+# ------------------------------------------------------------------------
+
+# @form_bp.route('/customers', methods=['GET', 'OPTIONS'])
+# @token_required
+# def get_all_customers():
+#     """
+#     Retrieves a list of all customers, typically for selection in a dropdown.
+#     """
+#     if request.method == 'OPTIONS':
+#         return jsonify({}), 200
+
+#     session = SessionLocal() # Start session for read operation
+#     try:
+#         # Fetch all customers (Already correct)
+#         customers = session.query(Customer).all()
+        
+#         # Manually convert to the required simple JSON format for the frontend dropdown
+#         customer_list = [
+#             {
+#                 'id': c.id,
+#                 'name': c.name,
+#                 'address': c.address,
+#                 'phone': c.phone,
+#                 'email': c.email
+#             }
+#             for c in customers
+#         ]
+
+#         return jsonify(customer_list), 200
+
+#     except Exception as e:
+#         session.rollback()
+#         current_app.logger.exception(f"Error fetching all customers: {e}")
+#         return jsonify({'error': 'Failed to fetch customer list'}), 500
+#     finally:
+#         session.close() # Close session
+
+# ------------------------------------------------------------------------
+# APPROVAL SYSTEM ROUTES
+# ------------------------------------------------------------------------
 
 @form_bp.route('/approvals/pending', methods=['GET', 'OPTIONS'])
 @token_required
 @manager_required
 def get_pending_approvals():
-    """
-    Get all pending approvals (for managers)
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for pending approvals
-    - Eager loading of customer and creator data
-    - Pagination support
-    - Single query with joins instead of N+1 queries
-    """
+    """Get all pending approvals (for managers) (FIXED QUERIES)"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
-    per_page = min(per_page, 200)  # Max 200 per page
-    
-    # Check cache first
-    cache_key = f"pending_approvals_{page}_{per_page}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        current_app.logger.debug(f"Cache hit for pending approvals: {cache_key}")
-        return jsonify(cached), 200
-    
-    session = SessionLocal()
+    session = SessionLocal() # 👈 START SESSION FOR READ
     try:
-        # OPTIMIZED: Single query with eager loading
-        query = session.query(CustomerFormData)\
-            .options(
-                joinedload(CustomerFormData.customer),
-                joinedload(CustomerFormData.creator)  # Assuming relationship exists
-            )\
-            .filter_by(approval_status='pending')\
-            .order_by(CustomerFormData.submitted_at.desc())
-        
-        # Get total count
-        total_count = query.count()
-        
-        # Apply pagination
-        pending_submissions = query.limit(per_page)\
-                                  .offset((page - 1) * per_page)\
-                                  .all()
+        # FIXED QUERY: Use session.query(Model)
+        pending_submissions = session.query(CustomerFormData).filter_by(
+            approval_status='pending'
+        ).order_by(CustomerFormData.submitted_at.desc()).all()
         
         all_pending = []
         
         for submission in pending_submissions:
-            # Parse form_data once
             form_data = json.loads(submission.form_data)
             
-            # Get creator - try relationship first, fallback to query
-            if hasattr(submission, 'creator') and submission.creator:
-                creator = submission.creator
-            elif hasattr(submission, 'created_by') and submission.created_by:
-                creator = session.get(User, submission.created_by)
-            else:
-                creator = None
+            # FIXED QUERY: Use session.get() for related models
+            creator = session.get(User, submission.created_by) if hasattr(submission, 'created_by') and submission.created_by else None
+            customer = session.get(Customer, submission.customer_id)
             
-            # Get customer - use eager-loaded relationship
-            customer = submission.customer if hasattr(submission, 'customer') else session.get(Customer, submission.customer_id)
-            
-            # Determine document type
             doc_type = 'form'
             if form_data.get('is_invoice'):
                 doc_type = 'invoice'
@@ -191,44 +166,24 @@ def get_pending_approvals():
             }
             all_pending.append(pending_item)
         
-        result = {
-            'success': True,
-            'data': all_pending,
-            'pagination': {
-                'page': page,
-                'per_page': per_page,
-                'total': total_count,
-                'pages': (total_count + per_page - 1) // per_page
-            }
-        }
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result), 200
+        return jsonify({'success': True, 'data': all_pending}), 200
         
     except Exception as e:
         session.rollback()
         current_app.logger.exception(f"Error fetching pending approvals: {e}")
         return jsonify({'error': 'Failed to fetch pending approvals'}), 500
     finally:
-        session.close()
+        session.close() # 👈 CLOSE SESSION
 
 @form_bp.route('/approvals/approve', methods=['POST', 'OPTIONS'])
 @token_required
 @manager_required
 def approve_document():
-    """
-    Approve a document
-    
-    OPTIMIZATIONS:
-    - Cache invalidation on approval
-    - Batch notification updates (if needed in future)
-    """
+    """Approve a document"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    session = SessionLocal()
+    session = SessionLocal() # 👈 Start session
     try:
         data = request.get_json()
         document_id = data.get('documentId')
@@ -255,34 +210,26 @@ def approve_document():
             f"Document {document_id} ({doc_type}) approved by manager {request.current_user.id}"
         )
         
-        session.commit()
-        
-        # INVALIDATE CACHE
-        invalidate_cache('pending_approvals', f'form_submission_{document_id}')
+        session.commit() # 👈 Commit transaction
         
         return jsonify({'success': True, 'message': 'Document approved successfully'}), 200
         
     except Exception as e:
-        session.rollback()
+        session.rollback() # 👈 Rollback on error
         current_app.logger.exception(f"Error approving document: {e}")
         return jsonify({'error': 'Failed to approve document'}), 500
     finally:
-        session.close()
+        session.close() # 👈 Close session
 
 @form_bp.route('/approvals/reject', methods=['POST', 'OPTIONS'])
 @token_required
 @manager_required
 def reject_document():
-    """
-    Reject a document
-    
-    OPTIMIZATIONS:
-    - Cache invalidation on rejection
-    """
+    """Reject a document"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    session = SessionLocal()
+    session = SessionLocal() # 👈 Start session
     try:
         data = request.get_json()
         document_id = data.get('documentId')
@@ -314,64 +261,46 @@ def reject_document():
             f"Document {document_id} ({doc_type}) rejected by manager {request.current_user.id}. Reason: {reason}"
         )
         
-        session.commit()
-        
-        # INVALIDATE CACHE
-        invalidate_cache('pending_approvals', f'form_submission_{document_id}')
+        session.commit() # 👈 Commit transaction
         
         return jsonify({'success': True, 'message': 'Document rejected'}), 200
         
     except Exception as e:
-        session.rollback()
+        session.rollback() # 👈 Rollback on error
         current_app.logger.exception(f"Error rejecting document: {e}")
         return jsonify({'error': 'Failed to reject document'}), 500
     finally:
-        session.close()
+        session.close() # 👈 Close session
 
 @form_bp.route('/approvals/status/<int:document_id>', methods=['GET', 'OPTIONS'])
 @token_required
 def get_approval_status(document_id):
-    """
-    Get approval status for a specific document
-    
-    OPTIMIZATIONS:
-    - 5-minute cache for approval status
-    """
+    """Get approval status for a specific document (FIXED QUERIES)"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # Check cache first
-    cache_key = f"approval_status_{document_id}"
-    cached = simple_cache_get(cache_key)
-    if cached:
-        return jsonify(cached), 200
-    
-    session = SessionLocal()
+    session = SessionLocal() # 👈 START SESSION FOR READ
     try:
+        # FIXED: Replaced Model.query.get() with session.get()
         submission = session.get(CustomerFormData, document_id) 
         if not submission:
             return jsonify({'error': 'Document not found'}), 404
         
-        result = {
+        return jsonify({
             'approval_status': submission.approval_status,
             'rejection_reason': submission.rejection_reason,
             'approval_date': submission.approval_date.isoformat() if submission.approval_date else None
-        }
-        
-        # Cache the result
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result), 200
+        }), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching approval status: {e}")
         return jsonify({'error': 'Failed to fetch approval status'}), 500
     finally:
-        session.close()
-
-# ==========================================
-# INVOICE ROUTES (OPTIMIZED)
-# ==========================================
+        session.close() # 👈 CLOSE SESSION
+        
+# ------------------------------------------------------------------------
+# ROUTE: INVOICE PDF DOWNLOAD (WITH APPROVAL CHECK)
+# ------------------------------------------------------------------------
 
 @form_bp.route('/invoices/download-pdf', methods=['POST', 'OPTIONS'])
 @token_required
@@ -380,32 +309,25 @@ def download_invoice_pdf():
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
-    session = SessionLocal()
+    session = SessionLocal() # 👈 START SESSION FOR READ CHECK
     try:
         data = request.get_json(silent=True) or {}
         
         if not data:
             return jsonify({'error': 'Missing invoice data.'}), 400
 
-        # Check approval status (use cache if available)
+        # Check approval status (read-only query)
         submission_id = data.get('submission_id')
         if submission_id:
-            cache_key = f"approval_status_{submission_id}"
-            approval_data = simple_cache_get(cache_key)
-            
-            if approval_data:
-                approval_status = approval_data.get('approval_status')
-            else:
-                submission = session.get(CustomerFormData, submission_id)
-                approval_status = submission.approval_status if submission else None
-            
-            if approval_status and approval_status != 'approved':
+            # FIXED: Replaced Model.query.get() with session.get()
+            submission = session.get(CustomerFormData, submission_id) 
+            if submission and submission.approval_status != 'approved':
                 return jsonify({
                     'error': 'This invoice is not yet approved for download',
-                    'status': approval_status
+                    'status': submission.approval_status
                 }), 403
 
-        # PDF generation logic (same as before)
+        # ... (PDF generation logic remains the same) ...
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'Invoice'
         pdf.alias_nb_pages()
@@ -413,6 +335,8 @@ def download_invoice_pdf():
         pdf.set_auto_page_break(auto=True, margin=35) 
         pdf.set_font('Arial', '', 10)
         
+        # ... (Rest of PDF generation code) ...
+
         HEADER_FILL = (230, 230, 230)
         LINE_COLOR = (0, 0, 0)
         col_width = 190 / 2
@@ -519,6 +443,7 @@ def download_invoice_pdf():
         pdf.set_xy(10, pdf.get_y()) 
         pdf.multi_cell(0, 5, 'Please use your name and/or road name as reference.', 0, 'L')
 
+
         pdf_output = pdf.output(dest='S')
         pdf_file = BytesIO(pdf_output)
         customer_name = data.get('customerName', 'Customer').replace(' ', '_')
@@ -527,22 +452,21 @@ def download_invoice_pdf():
         return send_file(pdf_file, mimetype='application/pdf', as_attachment=True, download_name=filename)
 
     except Exception as e:
-        session.rollback()
+        session.rollback() # Rollback the session if needed (only if commit was attempted earlier)
         current_app.logger.exception(f"Invoice PDF generation failed: {e}")
         return jsonify({"error": f"Server failed to generate Invoice PDF: {str(e)}"}), 500
     finally:
-        session.close()
+        session.close() # 👈 CLOSE SESSION
+
+
+# ------------------------------------------------------------------------
+# ROUTE: INVOICE SAVE (WITH PENDING APPROVAL)
+# ------------------------------------------------------------------------
 
 @form_bp.route('/invoices/save', methods=['POST', 'OPTIONS'])
 @token_required
 def save_invoice():
-    """
-    Saves invoice data with pending approval status, notifies managers, and logs activity
-    
-    OPTIMIZATIONS:
-    - Batch notification creation (one query instead of N)
-    - Cache invalidation for pending approvals
-    """
+    """Saves invoice data with pending approval status, notifies managers, and logs activity"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -573,15 +497,13 @@ def save_invoice():
         session.add(customer_form_data)
         session.flush()
         
-        # OPTIMIZED: Batch create approval notifications
+        # Create approval notifications for managers
         try:
             managers = session.query(User).filter(
                 User.role.in_(['Manager', 'HR']),
                 User.is_active == True
             ).all()
             
-            # Create notifications in batch
-            notifications = []
             for manager in managers:
                 notification = ApprovalNotification(
                     user_id=manager.id,
@@ -592,15 +514,12 @@ def save_invoice():
                     created_at=datetime.utcnow(),
                     is_read=False
                 )
-                notifications.append(notification)
-            
-            # Bulk insert (much faster than individual adds)
-            session.bulk_save_objects(notifications)
+                session.add(notification)
             
         except Exception as e:
             current_app.logger.error(f"Error creating approval notifications: {e}")
         
-        # CREATE ACTIVITY NOTIFICATION
+        # 🔔 CREATE ACTIVITY NOTIFICATION (for general staff awareness)
         user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
         
         notification_message = f"💰 New Invoice #{data.get('invoiceNumber', 'N/A')} created by {user_name} for {customer.name} - Amount: £{data.get('totalAmount', 0):,.2f} (Pending Approval)"
@@ -613,9 +532,6 @@ def save_invoice():
         )
         
         session.commit()
-
-        # INVALIDATE CACHE
-        invalidate_cache('pending_approvals')
 
         return jsonify({
             "success": True,
@@ -630,13 +546,14 @@ def save_invoice():
         return jsonify({"error": f"Failed to save invoice: {str(e)}"}), 500
     finally:
         session.close()
-
-# ==========================================
-# RECEIPT ROUTES (Same optimization pattern as invoices)
-# ==========================================
+    
+# ------------------------------------------------------------------------
+# ROUTE: RECEIPT PDF DOWNLOAD
+# ------------------------------------------------------------------------
 
 @form_bp.route('/receipts/download-pdf', methods=['POST', 'OPTIONS'])
 def download_receipt_pdf():
+    # ... (PDF generation logic remains the same) ...
     if request.method == 'OPTIONS':
         return jsonify({}), 200
         
@@ -652,11 +569,15 @@ def download_receipt_pdf():
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=30) 
         
+        # Colors for Gray Theme
         HEADER_FILL = (230, 230, 230)
         TOTAL_FILL = (200, 200, 200)
 
         pdf.set_font('Arial', '', 10)
 
+        # --- 1. Customer and Date Details ---
+        pdf.set_fill_color(*HEADER_FILL)
+        pdf.set_draw_color(0, 0, 0)
         col_width = 190 / 2
         line_height = 7
         
@@ -665,6 +586,7 @@ def download_receipt_pdf():
         pdf.cell(col_width, line_height, 'Date', 'T', 1, 'R', 1)
         pdf.set_font('Arial', '', 10)
         
+        # Row 1: Name and Date
         pdf.set_font('Arial', 'B', 10)
         pdf.cell(30, line_height, 'Name:', 0, 0, 'L')
         pdf.set_font('Arial', '', 10)
@@ -672,11 +594,13 @@ def download_receipt_pdf():
         pdf.set_font('Arial', '', 10)
         pdf.cell(col_width, line_height, data.get('receiptDate', datetime.now().strftime('%d/%m/%Y')), 0, 1, 'R')
         
+        # Row 2: Address
         pdf.set_font('Arial', 'B', 10)
         pdf.cell(30, line_height, 'Address:', 0, 0, 'L')
         pdf.set_font('Arial', '', 10)
         pdf.multi_cell(col_width - 30, line_height, data.get('customerAddress', 'N/A'), 0, 'L', 0)
         
+        # Row 3: Phone
         y_after_address = pdf.get_y()
         pdf.set_font('Arial', 'B', 10)
         pdf.set_xy(10, y_after_address)
@@ -685,10 +609,12 @@ def download_receipt_pdf():
         pdf.cell(col_width - 30, line_height, data.get('customerPhone', 'N/A'), 'B', 1, 'L')
         pdf.ln(5)
 
+        # --- 2. Payment Confirmation Message ---
         pdf.set_font('Arial', '', 11)
         pdf.multi_cell(0, 6, f"Confirmation of payment received by BACS for {data.get('paymentDescription', 'your Kitchen/Bedroom Cabinetry')}", 0, 'L')
         pdf.ln(5)
 
+        # --- 3. Paid Amount (Highlight) ---
         pdf.set_fill_color(*TOTAL_FILL)
         pdf.set_font('Arial', 'B', 14)
         
@@ -699,13 +625,16 @@ def download_receipt_pdf():
         pdf.cell(col_width, 10, paid_amount_str, 1, 1, 'R', 1)
         pdf.ln(5)
 
+        # --- 4. Summary Details ---
         pdf.set_font('Arial', 'B', 11)
         
+        # Paid to Date
         paid_to_date_str = f"£{data.get('totalPaidToDate', 0):,.2f}"
         pdf.cell(col_width, 7, 'Paid to date:', 'T', 0, 'L')
         pdf.set_font('Arial', '', 11)
         pdf.cell(col_width, 7, paid_to_date_str, 'T', 1, 'R')
 
+        # Balance to Pay
         balance_str = f"£{data.get('balanceToPay', 0):,.2f}"
         pdf.set_font('Arial', 'B', 12)
         pdf.cell(col_width, 8, 'Balance to Pay:', 'T', 0, 'L')
@@ -713,12 +642,14 @@ def download_receipt_pdf():
         pdf.cell(col_width, 8, balance_str, 'T', 1, 'R')
         pdf.ln(10)
 
+        # --- 5. Signature ---
         pdf.set_font('Arial', '', 11)
         pdf.cell(0, 5, 'Many Thanks', 0, 1, 'L')
         pdf.ln(5)
         pdf.set_font('Arial', 'I', 12)
         pdf.cell(0, 5, 'Shahida Macci', 0, 1, 'L')
 
+        # --- 6. Return the PDF ---
         pdf_output = pdf.output(dest='S')
         pdf_file = BytesIO(pdf_output)
 
@@ -737,16 +668,15 @@ def download_receipt_pdf():
             current_app.logger.exception(f"Receipt PDF generation failed: {e}")
             return jsonify({"error": f"Server failed to generate Receipt PDF: {str(e)}"}), 500
 
+
+# ------------------------------------------------------------------------
+# ROUTE: RECEIPT SAVE (Saves Receipt Data as a Form Submission)
+# ------------------------------------------------------------------------
+
 @form_bp.route('/receipts/save', methods=['POST', 'OPTIONS'])
 @token_required
 def save_receipt():
-    """
-    Saves receipt data with pending approval status
-    
-    OPTIMIZATIONS:
-    - Batch notification creation
-    - Cache invalidation
-    """
+    """Saves receipt data with pending approval status, notifies managers, and logs activity"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -777,14 +707,13 @@ def save_receipt():
         session.add(customer_form_data)
         session.flush()
         
-        # OPTIMIZED: Batch create approval notifications
+        # Create approval notifications for managers
         try:
             managers = session.query(User).filter(
                 User.role.in_(['Manager', 'HR']),
                 User.is_active == True
             ).all()
             
-            notifications = []
             for manager in managers:
                 notification = ApprovalNotification(
                     user_id=manager.id,
@@ -795,13 +724,12 @@ def save_receipt():
                     created_at=datetime.utcnow(),
                     is_read=False
                 )
-                notifications.append(notification)
-            
-            session.bulk_save_objects(notifications)
+                session.add(notification)
             
         except Exception as e:
             current_app.logger.error(f"Error creating approval notifications: {e}")
         
+        # 🔔 CREATE ACTIVITY NOTIFICATION (for general staff awareness)
         user_name = request.current_user.full_name if hasattr(request.current_user, 'full_name') else request.current_user.username
         
         notification_message = f"🧾 New Receipt ({data.get('receiptType', 'Payment')}) created by {user_name} for {customer.name} - Amount: £{data.get('paidAmount', 0):,.2f} (Pending Approval)"
@@ -814,9 +742,6 @@ def save_receipt():
         )
         
         session.commit()
-
-        # INVALIDATE CACHE
-        invalidate_cache('pending_approvals')
 
         return jsonify({
             "success": True,
@@ -831,6 +756,7 @@ def save_receipt():
         return jsonify({"error": f"Failed to save receipt: {str(e)}"}), 500
     finally:
         session.close()
+
 
 # ------------------------------------------------------------------------
 # REMAINING ORIGINAL ROUTES (Checklist PDF, Checklist Save, Tokens, Delete)

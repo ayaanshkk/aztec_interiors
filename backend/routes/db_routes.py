@@ -3,7 +3,7 @@ import uuid
 from typing import Optional
 from flask import Blueprint, request, jsonify, current_app
 import json
-from datetime import datetime, date, timedelta
+from datetime import datetime, date # Import date separately for explicit use
 from ..db import SessionLocal, Base, engine
 from ..models import (
     User, Assignment, Customer, CustomerFormData, Fitter, Job,
@@ -11,87 +11,20 @@ from ..models import (
 )
 from .auth_helpers import token_required
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import func, and_, or_
-from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy import func
+from sqlalchemy.orm import selectinload
 from .notification_routes import create_activity_notification
 
 db_bp = Blueprint('database', __name__)
-
-# ============================================================================
-# ✅ CACHING UTILITIES
-# ============================================================================
-_cache = {}
-_cache_timeout = 300  # 5 minutes
-
-def simple_cache_get(key):
-    """Get cached data if not expired"""
-    if key in _cache:
-        cached_data, cached_time = _cache[key]
-        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
-            current_app.logger.info(f"✅ Cache hit: {key}")
-            return cached_data
-    return None
-
-def simple_cache_set(key, data):
-    """Set cached data"""
-    _cache[key] = (data, datetime.utcnow())
-
-def invalidate_cache(*patterns):
-    """Invalidate cache keys matching patterns"""
-    for pattern in patterns:
-        keys_to_remove = [k for k in _cache.keys() if pattern in k]
-        for k in keys_to_remove:
-            _cache.pop(k, None)
-            current_app.logger.info(f"🗑️ Cache invalidated: {k}")
 
 # Helper function to get current user's email safely
 def get_current_user_email(data=None):
     if hasattr(request, 'current_user') and hasattr(request.current_user, 'email'):
         return request.current_user.email
+    # Fallback to 'System' or data.get('created_by') from post body if needed
     return data.get('created_by', 'System') if isinstance(data, dict) else 'System'
 
-# ============================================================================
-# PIPELINE STAGE CONFIGURATION
-# ============================================================================
-PIPELINE_STAGE_ORDER = [
-    "Lead", "Survey", "Design", "Quote",
-    "Accepted", "Rejected", "Ordered",
-    "Production", "Delivery", "Installation",
-    "Complete", "Remedial", "Cancelled"
-]
 
-def _extract_stage_from_payload(data: dict) -> Optional[str]:
-    """Extract stage from payload - SIMPLIFIED VERSION"""
-    if not isinstance(data, dict):
-        return None
-
-    # Primary: Check for direct 'stage' field
-    stage = data.get('stage')
-    if stage and isinstance(stage, str):
-        stage = stage.strip()
-        if stage in PIPELINE_STAGE_ORDER:
-            return stage
-    
-    # Fallback: Check for object format
-    if isinstance(stage, dict):
-        for key in ('value', 'label', 'stage'):
-            inner = stage.get(key)
-            if isinstance(inner, str) and inner.strip() in PIPELINE_STAGE_ORDER:
-                return inner.strip()
-    
-    # Fallback: Check alternative field names
-    for field in ('target_stage', 'targetStage', 'new_stage', 'newStage'):
-        alt_stage = data.get(field)
-        if alt_stage and isinstance(alt_stage, str):
-            alt_stage = alt_stage.strip()
-            if alt_stage in PIPELINE_STAGE_ORDER:
-                return alt_stage
-    
-    return None
-
-# ============================================================================
-# ✅ OPTIMIZED: USERS ENDPOINT
-# ============================================================================
 @db_bp.route('/users', methods=['GET', 'POST'])
 @token_required
 def handle_users():
@@ -107,54 +40,98 @@ def handle_users():
             )
             session.add(user)
             session.commit()
-            
-            invalidate_cache('users')
-            
             return jsonify({'id': user.id, 'message': 'User created successfully'}), 201
         
-        # GET with caching
-        cached = simple_cache_get('users')
-        if cached:
-            return jsonify(cached)
-        
+        # FIXED: Uses session.query
         users = session.query(User).all()
-        result = [u.to_dict() for u in users]
-        
-        simple_cache_set('users', result)
-        
-        return jsonify(result)
+        return jsonify([u.to_dict() for u in users])
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error handling users: {e}")
+        current_app.logger.error(f"Error handling users: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
+# ------------------ CUSTOMER STAGE ------------------
 
-# ============================================================================
-# ✅ OPTIMIZED: UPDATE CUSTOMER STAGE
-# ============================================================================
+PIPELINE_STAGE_ORDER = [
+    "Lead", "Survey", "Design", "Quote",
+    "Accepted", "Rejected", "Ordered",
+    "Production", "Delivery", "Installation",
+    "Complete", "Remedial", "Cancelled"
+]
+
+
+def _extract_stage_from_payload(data: dict) -> Optional[str]:
+    """Extract stage from payload - SIMPLIFIED VERSION
+    
+    The frontend sends a simple payload like:
+    {
+        "stage": "Accepted",
+        "reason": "Moved via Kanban board",
+        "updated_by": "user@example.com"
+    }
+    
+    So we should just extract the 'stage' field directly.
+    """
+    
+    if not isinstance(data, dict):
+        return None
+
+    # ✅ PRIMARY: Check for direct 'stage' field (most common case)
+    stage = data.get('stage')
+    if stage and isinstance(stage, str):
+        stage = stage.strip()
+        if stage in PIPELINE_STAGE_ORDER:
+            return stage
+    
+    # ✅ FALLBACK: Check for object format (like {label: "Accepted", value: "Accepted"})
+    if isinstance(stage, dict):
+        for key in ('value', 'label', 'stage'):
+            inner = stage.get(key)
+            if isinstance(inner, str) and inner.strip() in PIPELINE_STAGE_ORDER:
+                return inner.strip()
+    
+    # ✅ FALLBACK: Check alternative field names
+    for field in ('target_stage', 'targetStage', 'new_stage', 'newStage'):
+        alt_stage = data.get(field)
+        if alt_stage and isinstance(alt_stage, str):
+            alt_stage = alt_stage.strip()
+            if alt_stage in PIPELINE_STAGE_ORDER:
+                return alt_stage
+    
+    # If nothing found, return None
+    return None
+
 @db_bp.route('/customers/<string:customer_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_customer_stage(customer_id):
-    """✅ OPTIMIZED: Update customer stage with cache invalidation"""
+    """Update customer stage - ENHANCED VERSION
+    
+    ✅ NOTE: Customer stages are synced with their PROJECT stages.
+    When a customer has no projects, they stay in Lead.
+    When they have projects, their stage reflects the most advanced project stage.
+    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
+        # Get the customer
         customer = session.query(Customer).filter_by(id=customer_id).first()
         if not customer:
             current_app.logger.error(f"❌ Customer {customer_id} not found")
             return jsonify({'error': 'Customer not found'}), 404
 
+        # Extract data
         data = request.json
         updated_by_user = get_current_user_email(data)
         new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         
-        current_app.logger.info(f"🔄 Stage update: {customer.stage} → {new_stage}")
+        current_app.logger.info(f"🔄 Stage update request for customer {customer_id}: {customer.stage} → {new_stage}")
         
+        # Validate stage
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
 
@@ -163,7 +140,9 @@ def update_customer_stage(customer_id):
 
         old_stage = customer.stage
         
+        # If stage hasn't changed, return early
         if old_stage == new_stage:
+            current_app.logger.info(f"ℹ️ Customer {customer_id} already in stage {new_stage}")
             return jsonify({
                 'message': 'Stage not changed', 
                 'stage_updated': False,
@@ -172,40 +151,65 @@ def update_customer_stage(customer_id):
                 'old_stage': old_stage
             }), 200
 
+        # Update customer stage
         customer.stage = new_stage
         customer.updated_by = updated_by_user
         customer.updated_at = datetime.utcnow()
         
+        # Add audit note
         note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage}. Reason: {reason}"
         customer.notes = (customer.notes or '') + note_entry
         
-        # Handle notifications and action items
+        # ✅ FIXED: Create notifications for important stages
         notification_created = False
         assignment_created = False
         
         try:
+            current_app.logger.info(f"🔍 Checking if {new_stage} requires notification...")
+            
+            # Import here to avoid circular import
+            from backend.routes.notification_routes import create_activity_notification
+            from datetime import timedelta
+            
+            # Define stage-specific notification messages
             stage_notifications = {
                 'Accepted': {
-                    'message': f"✅ Customer '{customer.name}' accepted the quote",
-                    'create_assignment': True
+                    'emoji': '✅',
+                    'message': f"✅ Customer '{customer.name}' accepted the quote and moved to Accepted stage",
+                    'create': True
                 },
                 'Production': {
-                    'message': f"🏭 Customer '{customer.name}' is now in Production",
+                    'emoji': '🏭',
+                    'message': f"🏭 Customer '{customer.name}' is now in Production - Manufacturing started",
+                    'create': True
                 },
                 'Delivery': {
-                    'message': f"🚚 Customer '{customer.name}' is ready for delivery!",
+                    'emoji': '🚚',
+                    'message': f"🚚 Customer '{customer.name}' is ready for delivery! Project completed and awaiting delivery",
+                    'create': True
                 },
                 'Installation': {
+                    'emoji': '🔧',
                     'message': f"🔧 Installation scheduled for customer '{customer.name}'",
+                    'create': True
                 },
                 'Complete': {
-                    'message': f"🎉 Project COMPLETED for customer '{customer.name}'!",
+                    'emoji': '🎉',
+                    'message': f"🎉 Project COMPLETED for customer '{customer.name}'! Job finished successfully",
+                    'create': True
                 }
             }
             
+            # Create notification if it's an important stage
             if new_stage in stage_notifications:
+                current_app.logger.info(f"📢 Stage '{new_stage}' requires notification - creating now...")
                 stage_config = stage_notifications[new_stage]
                 
+                current_app.logger.info(f"📝 Notification message: {stage_config['message']}")
+                current_app.logger.info(f"👤 Moved by: {updated_by_user}")
+                current_app.logger.info(f"🆔 Customer ID: {customer.id}")
+                
+                # ✅ CRITICAL FIX: Use create_activity_notification helper
                 create_activity_notification(
                     session=session,
                     message=stage_config['message'],
@@ -214,35 +218,45 @@ def update_customer_stage(customer_id):
                     moved_by=updated_by_user
                 )
                 notification_created = True
-                current_app.logger.info(f"✅ Created {new_stage} notification")
+                current_app.logger.info(f"✅ Successfully created {new_stage} notification for customer {customer_id}")
+            else:
+                current_app.logger.info(f"ℹ️ Stage '{new_stage}' does not require notification (not in: {list(stage_notifications.keys())})")
+            
+            # ✅ AUTO-CREATE ASSIGNMENT FOR PRODUCTION TEAM WHEN MOVED TO ACCEPTED
+            if new_stage == 'Accepted':
+                current_app.logger.info(f"📋 Creating assignment for customer {customer_id}...")
                 
-                # Create assignment for Accepted stage
-                if stage_config.get('create_assignment'):
-                    assignment = Assignment(
-                        id=str(uuid.uuid4()),
-                        type='job',
-                        title=f"Order materials for {customer.name}",
-                        date=(datetime.utcnow() + timedelta(days=1)).date(),
-                        team_member='Production Team',
-                        customer_id=customer.id,
-                        notes=f"Order all necessary materials for {customer.name}'s project",
-                        priority='High',
-                        status='Scheduled',
-                        created_by=None,
-                        created_at=datetime.utcnow()
-                    )
-                    session.add(assignment)
-                    assignment_created = True
+                assignment = Assignment(
+                    id=str(uuid.uuid4()),
+                    type='job',
+                    title=f"Order materials for {customer.name}",
+                    date=(datetime.utcnow() + timedelta(days=1)).date(),
+                    team_member='Production Team',
+                    customer_id=customer.id,
+                    notes=f"Order all necessary materials for {customer.name}'s project",
+                    priority='High',
+                    status='Scheduled',
+                    created_by=None,
+                    created_at=datetime.utcnow()
+                )
+                session.add(assignment)
+                assignment_created = True
+                current_app.logger.info(f"✅ Successfully created material order assignment for customer {customer_id}")
                 
+        except ImportError as import_error:
+            current_app.logger.error(f"❌ Failed to import notification function: {import_error}")
+            import traceback
+            current_app.logger.error(f"Import traceback: {traceback.format_exc()}")
         except Exception as notif_error:
-            current_app.logger.error(f"⚠️ Notification error: {notif_error}")
+            current_app.logger.error(f"❌ Failed to create notification or assignment: {notif_error}")
+            import traceback
+            current_app.logger.error(f"Notification error traceback: {traceback.format_exc()}")
         
+        # Commit the transaction
         session.commit()
         
-        # ✅ CRITICAL: Invalidate caches
-        invalidate_cache('pipeline', 'customers')
-        
-        current_app.logger.info(f"✅ Customer stage updated: {old_stage} → {new_stage}")
+        current_app.logger.info(f"✅ Customer {customer.id} stage updated from {old_stage} to {new_stage}")
+        current_app.logger.info(f"📊 Final status - Notification created: {notification_created}, Assignment created: {assignment_created}")
         
         return jsonify({
             'message': 'Stage updated successfully',
@@ -256,19 +270,18 @@ def update_customer_stage(customer_id):
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error updating customer stage: {e}")
+        current_app.logger.error(f"❌ Error updating customer {customer_id} stage: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
+# ------------------ JOBS ------------------
 
-# ============================================================================
-# ✅ OPTIMIZED: JOBS ENDPOINT
-# ============================================================================
 @db_bp.route('/jobs', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_jobs():
-    """✅ OPTIMIZED: Jobs with eager loading and caching"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -292,8 +305,7 @@ def handle_jobs():
                 notes=data.get('notes'),
                 salesperson_name=data.get('salesperson_name'),
                 assigned_team_name=data.get('assigned_team_name'),
-                primary_fitter_name=data.get('primary_fitter_name'),
-                work_stage=data.get('work_stage', 'Survey')  # ✅ Add work_stage
+                primary_fitter_name=data.get('primary_fitter_name')
             )
             
             if data.get('delivery_date'):
@@ -308,32 +320,18 @@ def handle_jobs():
             session.add(job)
             session.commit()
             
-            # ✅ Invalidate cache
-            invalidate_cache('jobs')
-            
             return jsonify({'id': job.id, 'message': 'Job created successfully'}), 201
         
-        # ✅ GET with caching and eager loading
-        cached = simple_cache_get('jobs')
-        if cached:
-            return jsonify(cached)
-        
-        # ✅ OPTIMIZATION: Eager load customer data
-        jobs = session.query(Job).options(
-            joinedload(Job.customer)
-        ).order_by(Job.created_at.desc()).all()
-        
-        result = []
-        for j in jobs:
-            job_dict = {
+        # GET all jobs (FIXED: Uses session.query)
+        jobs = session.query(Job).order_by(Job.created_at.desc()).all()
+        return jsonify([
+            {
                 'id': j.id,
                 'customer_id': j.customer_id,
-                'customer_name': j.customer.name if j.customer else None,
                 'job_reference': j.job_reference,
                 'job_name': j.job_name,
                 'job_type': j.job_type,
                 'stage': j.stage,
-                'work_stage': j.work_stage if hasattr(j, 'work_stage') else None,
                 'priority': j.priority,
                 'quote_price': float(j.quote_price) if j.quote_price else None,
                 'agreed_price': float(j.agreed_price) if j.agreed_price else None,
@@ -351,37 +349,27 @@ def handle_jobs():
                 'created_at': j.created_at.isoformat() if j.created_at else None,
                 'updated_at': j.updated_at.isoformat() if j.updated_at else None,
             }
-            result.append(job_dict)
-        
-        simple_cache_set('jobs', result)
-        
-        return jsonify(result)
+            for j in jobs
+        ])
     
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error handling jobs: {e}")
+        current_app.logger.error(f"Error handling jobs: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-# ============================================================================
-# ✅ OPTIMIZED: SINGLE JOB ENDPOINT
-# ============================================================================
 @db_bp.route('/jobs/<string:job_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
 @token_required
 def handle_single_job(job_id):
-    """✅ OPTIMIZED: Single job with eager loading"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
     session = SessionLocal()
     try:
-        # ✅ OPTIMIZATION: Eager load customer
-        job = session.query(Job).options(
-            joinedload(Job.customer)
-        ).filter_by(id=job_id).first()
-        
+        # FIXED: Uses session.query
+        job = session.query(Job).filter_by(id=job_id).first()
         if not job:
             return jsonify({'error': 'Job not found'}), 404
         
@@ -389,16 +377,14 @@ def handle_single_job(job_id):
             return jsonify({
                 'id': job.id,
                 'customer_id': job.customer_id,
-                'customer_name': job.customer.name if job.customer else None,
                 'job_reference': job.job_reference,
                 'job_name': job.job_name,
                 'job_type': job.job_type,
                 'stage': job.stage,
-                'work_stage': job.work_stage if hasattr(job, 'work_stage') else None,
                 'priority': job.priority,
                 'quote_price': float(job.quote_price) if job.quote_price else None,
                 'agreed_price': float(job.agreed_price) if job.agreed_price else None,
-                'sold_amount': float(job.sold_amount) if j.sold_amount else None,
+                'sold_amount': float(job.sold_amount) if job.sold_amount else None,
                 'deposit1': float(job.deposit1) if job.deposit1 else None,
                 'deposit2': float(job.deposit2) if job.deposit2 else None,
                 'delivery_date': job.delivery_date.isoformat() if job.delivery_date else None,
@@ -421,11 +407,6 @@ def handle_single_job(job_id):
             job.job_name = data.get('job_name', job.job_name)
             job.job_type = data.get('job_type', job.job_type)
             job.stage = data.get('stage', job.stage)
-            
-            # ✅ CRITICAL: Add work_stage support
-            if 'work_stage' in data:
-                job.work_stage = data['work_stage']
-            
             job.priority = data.get('priority', job.priority)
             job.quote_price = data.get('quote_price', job.quote_price)
             job.agreed_price = data.get('agreed_price', job.agreed_price)
@@ -449,87 +430,197 @@ def handle_single_job(job_id):
             
             session.commit()
             
-            # ✅ Invalidate cache
-            invalidate_cache('jobs')
-            
-            return jsonify({'message': 'Job updated successfully', 'work_stage': job.work_stage})
+            return jsonify({'message': 'Job updated successfully'})
         
         elif request.method == 'DELETE':
+            customer_id = job.customer_id
             session.delete(job)
             session.commit()
             
-            # ✅ Invalidate cache
-            invalidate_cache('jobs')
+            # Re-fetch customer to update stage after job deletion (FIXED: Uses session.query)
+            customer = session.query(Customer).filter_by(id=customer_id).first()
+            if customer:
+                # Update customer stage based on remaining jobs/projects if model supports it
+                pass 
             
             return jsonify({'message': 'Job deleted successfully'})
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error handling job {job_id}: {e}")
+        current_app.logger.error(f"Error handling single job {job_id}: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-# ============================================================================
-# ✅ HEAVILY OPTIMIZED: PIPELINE ENDPOINT (MOST CRITICAL)
-# ============================================================================
+@db_bp.route('/jobs/<string:job_id>/stage', methods=['PATCH', 'OPTIONS'])
+@token_required
+def update_job_stage(job_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    session = SessionLocal()
+    try:
+        job = session.query(Job).filter_by(id=job_id).first()
+        if not job:
+            return jsonify({'error': 'Job not found'}), 404
+
+        data = request.json
+        updated_by_user = get_current_user_email(data)
+        new_stage = _extract_stage_from_payload(data)
+        reason = data.get('reason', 'Stage updated via drag and drop')
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+
+        if new_stage not in PIPELINE_STAGE_ORDER:
+            return jsonify({'error': 'Invalid stage'}), 400
+
+        old_stage = job.stage
+        if old_stage == new_stage:
+            return jsonify({
+                'message': 'Stage not changed',
+                'job_id': job.id,
+                'new_stage': new_stage
+            }), 200
+
+        # Update job stage
+        job.stage = new_stage
+        job.updated_at = datetime.utcnow()
+        note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
+        job.notes = (job.notes or '') + note_entry
+
+        # Add notification if moving to Accepted
+        if new_stage == 'Accepted':
+            notification = ProductionNotification(
+                job_id=job.id,
+                customer_id=job.customer_id,
+                message=f"Job '{job.job_name or job.job_reference or job.id}' moved to Accepted",
+                moved_by=updated_by_user
+            )
+            session.add(notification)
+
+            from datetime import timedelta
+            
+            customer = session.query(Customer).filter_by(id=job.customer_id).first()
+            customer_name = customer.name if customer else "Unknown Customer"
+            
+            assignment = Assignment(
+                id=str(uuid.uuid4()),
+                type='job',  # ✅ Valid enum value
+                title=f"Order materials for {customer_name}",
+                date=(datetime.utcnow() + timedelta(days=1)).date(),
+                team_member='Production Team',
+                customer_id=job.customer_id,
+                job_id=job.id,
+                notes=f"Order all necessary materials for {customer_name}'s project",
+                priority='High',
+                status='Scheduled',
+                created_by=None,
+                created_at=datetime.utcnow()
+            )
+            session.add(assignment)
+            assignment_created = True
+            current_app.logger.info(f"📋 Created material order assignment for job {job.id}")
+
+        # Simplified customer sync logic
+        customer = session.query(Customer).filter_by(id=job.customer_id).first()
+        if customer:
+            job_count = session.query(Job).filter_by(customer_id=job.customer_id).count()
+            project_count = session.query(Project).filter_by(customer_id=job.customer_id).count()
+            total_linked = job_count + project_count
+            
+            if total_linked <= 1 and customer.stage != new_stage:
+                customer.stage = new_stage
+                customer.updated_at = datetime.utcnow()
+
+        # 🔑 CRITICAL FIX: Flush, commit, then refresh
+        session.flush()
+        session.commit()
+        session.refresh(job)
+
+        current_app.logger.info(f"✅ Job {job.id} stage updated from {old_stage} to {new_stage}")
+
+        return jsonify({
+            'message': 'Stage updated successfully',
+            'job_id': job.id,
+            'old_stage': old_stage,
+            'new_stage': new_stage
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating job stage: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ------------------ PIPELINE ------------------
+# ✅ CACHE CONFIGURATION
+_pipeline_cache = {
+    "data": None,
+    "timestamp": None,
+    "etag": None
+}
+CACHE_DURATION = 30  # seconds
+
+
 @db_bp.route('/pipeline', methods=['GET', 'OPTIONS'])
 @token_required
 def get_pipeline_data():
-    """
-    ✅ HEAVILY OPTIMIZED: Get pipeline data with aggressive caching
-    - 5-minute cache (pipeline rarely changes)
-    - Single query with eager loading
-    - Minimal JSON serialization
-    - Performance: 3-5s → 200-500ms (85% faster)
+    """Get all pipeline items
+    
+    ✅ NOTE: Only PROJECTS have stages. Jobs are created when projects reach Accepted/Production.
+    ✅ CRITICAL: We must return the ACTUAL database stage values, not computed ones
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ OPTIMIZATION 1: Check cache first
-    cached = simple_cache_get('pipeline')
-    if cached:
-        current_app.logger.info(f"✅ Pipeline cache hit - returning {len(cached)} items")
-        return jsonify(cached)
-    
     session = SessionLocal()
     try:
-        start_time = datetime.utcnow()
-        current_app.logger.info("📊 Fetching fresh pipeline data...")
+        current_app.logger.info("📊 Fetching pipeline data...")
         
-        # ✅ OPTIMIZATION 2: Single query with eager loading
+        # Eagerly load relationships to avoid lazy loading issues
         customers = session.query(Customer).options(
             selectinload(Customer.projects)
         ).all()
 
         pipeline_items = []
         
+        # ✅ DEBUG: Track what we're processing
+        customers_with_projects = 0
+        customers_without_projects = 0
+        total_projects = 0
+
         for customer in customers:
-            customer_projects = customer.projects
+            customer_projects = customer.projects 
             has_projects = bool(customer_projects)
 
-            # Generate card for each project
+            # ✅ Generate a card for *every* Project (projects have stages)
             for project in customer_projects:
-                project_stage = project.stage or 'Lead'
+                total_projects += 1
+                project_stage = project.stage or 'Lead'  # ✅ Store stage value
+                
+                current_app.logger.debug(
+                    f"  📋 Project: {project.project_name} | "
+                    f"Customer: {customer.name} | "
+                    f"Stage: {project_stage}"
+                )
                 
                 pipeline_items.append({
                     'id': f'project-{project.id}',
                     'type': 'project',
-                    'customer': {
-                        'id': customer.id,
-                        'name': customer.name,
-                        'phone': customer.phone,
-                        'email': customer.email,
-                        'address': customer.address,
-                    },
-                    'stage': project_stage,
+                    'customer': customer.to_dict(include_projects=False),
+                    'stage': project_stage,  # ✅ Use stored value
                     'project': {
                         'id': project.id,
                         'customer_id': customer.id,
                         'project_name': project.project_name or 'Unnamed Project',
                         'project_type': project.project_type or 'Unknown',
-                        'stage': project_stage,
+                        # 'job_name': project.project_name or 'Unnamed Project',
+                        # 'job_type': project.project_type or 'Unknown', 
+                        'stage': project_stage,  # ✅ Use stored value
                         'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
                         'notes': project.notes,
                         'created_at': project.created_at.isoformat() if project.created_at else None,
@@ -537,53 +628,179 @@ def get_pipeline_data():
                     }
                 })
 
-            # Customer with no projects (pure Lead)
+            # ✅ Case: Customer is a pure Lead (no projects yet)
             if not has_projects:
-                customer_stage = customer.stage or 'Lead'
+                customers_without_projects += 1
+                customer_stage = customer.stage or 'Lead'  # ✅ Store stage value
+                
+                current_app.logger.debug(
+                    f"  👤 Customer (no projects): {customer.name} | "
+                    f"Stage: {customer_stage}"
+                )
                 
                 pipeline_items.append({
                     'id': f'customer-{customer.id}',
                     'type': 'customer',
-                    'stage': customer_stage,
-                    'customer': {
-                        'id': customer.id,
-                        'name': customer.name,
-                        'phone': customer.phone,
-                        'email': customer.email,
-                        'address': customer.address,
-                    }
+                    'stage': customer_stage,  # ✅ Use stored value
+                    'customer': customer.to_dict(include_projects=False)
                 })
+            else:
+                customers_with_projects += 1
         
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
-        current_app.logger.info(f"✅ Pipeline fetched: {len(pipeline_items)} items in {elapsed:.2f}s")
+        # ✅ ENHANCED LOGGING
+        current_app.logger.info(f"✅ Pipeline data fetched: {len(pipeline_items)} items")
+        current_app.logger.info(
+            f"   📊 Breakdown: {customers_with_projects} customers with projects ({total_projects} projects), "
+            f"{customers_without_projects} customers without projects"
+        )
         
-        # ✅ OPTIMIZATION 3: Cache for 5 minutes
-        simple_cache_set('pipeline', pipeline_items)
+        # Log stage distribution for debugging
+        stage_counts = {}
+        for item in pipeline_items:
+            stage = item.get('stage', 'Unknown')
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        current_app.logger.info(f"📊 Stage distribution: {stage_counts}")
         
         return jsonify(pipeline_items)
         
     except Exception as e:
         current_app.logger.error(f"❌ Error fetching pipeline: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+# ------------------ PROJECTS ROUTES (New/Updated) ------------------
+
+@db_bp.route('/projects/<string:project_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_single_project(project_id):
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    current_user = request.current_user  # ✅ Get current user for logging
+    session = SessionLocal()
+    
+    try:
+        current_app.logger.info(f"📋 User {current_user.role} requesting {request.method} on project {project_id}")
+        
+        project = session.query(Project).filter_by(id=project_id).first()
+        
+        if not project:
+            current_app.logger.error(f"❌ Project {project_id} not found in database")
+            return jsonify({'error': 'Project not found'}), 404
+        
+        # ✅ GET - Anyone authenticated can view any project
+        if request.method == 'GET':
+            current_app.logger.info(f"✅ {current_user.role} viewing project {project_id}: {project.project_name}")
+            return jsonify(project.to_dict())
+
+        # ✅ PUT - Check permissions for editing
+        elif request.method == 'PUT':
+            # Check if user has permission to edit
+            is_manager = current_user.role == 'Manager'
+            is_hr = current_user.role == 'HR'
+            is_creator = project.created_by == current_user.id if hasattr(project, 'created_by') else True
+            
+            if not (is_manager or is_hr or is_creator):
+                current_app.logger.warning(f"⚠️ {current_user.role} unauthorized to edit project {project_id}")
+                return jsonify({'error': 'Unauthorized to edit this project'}), 403
+            
+            data = request.json
+            current_app.logger.info(f"📝 {current_user.role} updating project {project_id}: {data}")
+            
+            old_stage = project.stage
+
+            # Update attributes (ensuring 'stage' is included for drag-and-drop fix)
+            project.project_name = data.get('project_name', project.project_name)
+            project.project_type = data.get('project_type', project.project_type)
+            project.stage = data.get('stage', project.stage) # CRITICAL: Update stage here
+            project.notes = data.get('notes', project.notes)
+            project.updated_by = get_current_user_email(data)
+            project.updated_at = datetime.utcnow()
+
+            if 'date_of_measure' in data and data['date_of_measure']:
+                if isinstance(data['date_of_measure'], str):
+                    project.date_of_measure = datetime.strptime(data['date_of_measure'], '%Y-%m-%d').date()
+                elif isinstance(data['date_of_measure'], date):
+                    project.date_of_measure = data['date_of_measure']
+            
+            # Optionally sync customer stage if this is the only linked entity
+            customer = project.customer
+            new_stage = project.stage
+            if customer:
+                # Check for other jobs/projects linked to the customer
+                job_count = session.query(Job).filter_by(customer_id=customer.id).count()
+                # Exclude the current project from the count of linked projects
+                total_linked = job_count + len([p for p in customer.projects if p.id != project.id])
+                
+                if total_linked == 0 and customer.stage != new_stage:
+                    customer.stage = new_stage
+                    customer.updated_at = datetime.utcnow()
+                    note_entry_cust = f"\n[{datetime.utcnow().isoformat()}] Stage synced from {old_stage} to {new_stage} by {project.updated_by}. Reason: Linked project moved."
+                    customer.notes = (customer.notes or '') + note_entry_cust
+                    session.add(customer)
+
+            # ✅ FIX: Commit BEFORE refresh (Ensures persistence)
+            session.commit()
+            
+            # 🔑 FIX: Refresh the object to ensure the latest state is captured 
+            session.refresh(project)
+            
+            current_app.logger.info(f"✅ Project {project_id} updated successfully by {current_user.role}")
+            
+            return jsonify({'message': 'Project updated successfully', 'id': project.id, 'new_stage': project.stage}) # 🔑 FIX: Use project.stage (refreshed value)
+
+        # ✅ DELETE - Check permissions for deleting
+        elif request.method == 'DELETE':
+            # Check if user has permission to delete
+            is_manager = current_user.role == 'Manager'
+            is_hr = current_user.role == 'HR'
+            is_creator = project.created_by == current_user.id if hasattr(project, 'created_by') else True
+            
+            if not (is_manager or is_hr or is_creator):
+                current_app.logger.warning(f"⚠️ {current_user.role} unauthorized to delete project {project_id}")
+                return jsonify({'error': 'Unauthorized to delete this project'}), 403
+            
+            current_app.logger.info(f"🗑️ {current_user.role} deleting project {project_id}")
+            
+            session.delete(project)
+            session.commit()
+            
+            current_app.logger.info(f"✅ Project {project_id} deleted successfully")
+            
+            # ✅ CRITICAL: Always return JSON
+            return jsonify({'message': 'Project deleted successfully'}), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error handling project {project_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        # ✅ CRITICAL: Always return JSON, never HTML
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-# ============================================================================
-# ✅ OPTIMIZED: UPDATE PROJECT STAGE
-# ============================================================================
 @db_bp.route('/projects/<string:project_id>/stage', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_project_stage(project_id):
-    """✅ OPTIMIZED: Update project stage with cache invalidation"""
+    """Update project stage - ENHANCED VERSION with all important stage notifications"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
+    current_user = request.current_user  # ✅ Get current user for logging
     session = SessionLocal()
+    
     try:
+        current_app.logger.info(f"📊 User {current_user.role} updating stage for project {project_id}")
+        
         project = session.query(Project).filter_by(id=project_id).first()
         
         if not project:
+            current_app.logger.error(f"❌ Project {project_id} not found")
             return jsonify({'error': 'Project not found'}), 404
 
         data = request.json
@@ -591,53 +808,94 @@ def update_project_stage(project_id):
         new_stage = _extract_stage_from_payload(data)
         reason = data.get('reason', 'Stage updated via drag and drop')
         
-        if not new_stage or new_stage not in PIPELINE_STAGE_ORDER:
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+
+        if new_stage not in PIPELINE_STAGE_ORDER:
             return jsonify({'error': 'Invalid stage'}), 400
 
         old_stage = project.stage
         if old_stage == new_stage:
+            current_app.logger.info(f"ℹ️ Project {project_id} already in stage {new_stage}")
             return jsonify({
                 'message': 'Stage not changed',
                 'project_id': project.id,
                 'new_stage': new_stage
             }), 200
 
+        current_app.logger.info(f"📈 Project {project_id} stage: {old_stage} → {new_stage}")
+
         project.stage = new_stage
         project.updated_by = updated_by_user
         project.updated_at = datetime.utcnow()
-        
-        note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage: {old_stage} → {new_stage} by {updated_by_user}. {reason}"
+        note_entry = f"\n[{datetime.utcnow().isoformat()}] Stage changed from {old_stage} to {new_stage} by {updated_by_user}. Reason: {reason}"
         project.notes = (project.notes or '') + note_entry
 
-        # Create notifications for important stages
+        # ✅ ENHANCED: Create notifications for all important stages
         try:
+            from backend.routes.notification_routes import create_activity_notification
+            
+            project_display_name = project.project_name or f"Project #{project.id[:8]}"
+            customer_name = project.customer.name if project.customer else "Unknown Customer"
+            
+            # Define stage-specific notification messages for projects
             stage_notifications = {
-                'Accepted': f"✅ Project '{project.project_name}' accepted",
-                'Production': f"🏭 Project '{project.project_name}' in Production",
-                'Delivery': f"🚚 Project '{project.project_name}' ready for delivery!",
-                'Installation': f"🔧 Installation started for '{project.project_name}'",
-                'Complete': f"🎉 Project '{project.project_name}' COMPLETED!",
+                'Accepted': {
+                    'emoji': '✅',
+                    'message': f"Project '{project_display_name}' for {customer_name} has been accepted",
+                },
+                'Production': {
+                    'emoji': '🏭',
+                    'message': f"Project '{project_display_name}' for {customer_name} is now in Production",
+                },
+                'Delivery': {
+                    'emoji': '🚚',
+                    'message': f"🚚 Project '{project_display_name}' for {customer_name} is ready for delivery!",
+                },
+                'Installation': {
+                    'emoji': '🔧',
+                    'message': f"Installation started for project '{project_display_name}' - {customer_name}",
+                },
+                'Complete': {
+                    'emoji': '🎉',
+                    'message': f"🎉 Project '{project_display_name}' for {customer_name} has been COMPLETED!",
+                }
             }
             
+            # Create notification if it's an important stage
             if new_stage in stage_notifications:
+                stage_config = stage_notifications[new_stage]
+                
                 create_activity_notification(
                     session=session,
-                    message=stage_notifications[new_stage],
+                    message=stage_config['message'],
                     job_id=None,
                     customer_id=project.customer_id,
                     moved_by=updated_by_user
                 )
-                current_app.logger.info(f"📢 Created {new_stage} notification")
+                current_app.logger.info(f"📢 Created {new_stage} notification for project {project.id}")
                 
         except Exception as notif_error:
-            current_app.logger.warning(f"⚠️ Notification error: {notif_error}")
+            current_app.logger.warning(f"⚠️ Failed to create notification: {notif_error}")
 
         session.flush()
         session.commit()
         session.refresh(project)
 
-        # ✅ CRITICAL: Invalidate caches
-        invalidate_cache('pipeline', 'projects')
+        # Simplified customer sync
+        customer = project.customer
+        if customer:
+            job_count = session.query(Job).filter_by(customer_id=customer.id).count()
+            other_projects = [p for p in customer.projects if p.id != project.id]
+            total_linked = job_count + len(other_projects)
+
+            if total_linked == 0 and customer.stage != new_stage:
+                customer.stage = new_stage
+                customer.updated_at = datetime.utcnow()
+
+        session.commit()
+        
+        current_app.logger.info(f"✅ Project {project_id} stage updated: {old_stage} → {new_stage}")
 
         return jsonify({
             'message': 'Stage updated successfully',
@@ -649,18 +907,18 @@ def update_project_stage(project_id):
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"❌ Error updating project stage: {e}")
+        import traceback
+        traceback.print_exc()
+        # ✅ CRITICAL: Always return JSON
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
+        
+# ------------------ ASSIGNMENTS ------------------
 
-
-# ============================================================================
-# ✅ OPTIMIZED: ASSIGNMENTS ENDPOINT
-# ============================================================================
 @db_bp.route('/assignments', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_assignments():
-    """✅ OPTIMIZED: Assignments with date range filtering and caching"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
 
@@ -669,28 +927,40 @@ def handle_assignments():
         if request.method == 'POST':
             data = request.json
             
-            current_app.logger.info(f"📥 Creating assignment: {data.get('title')}")
+            current_app.logger.info(f"📥 Received assignment creation request: {data}")
             
-            # Parse dates
+            # ✅ PARSE DATE FIELDS
             date_value = None
             start_date_value = None
             end_date_value = None
             
             if data.get('start_date'):
-                start_date_value = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
-                date_value = start_date_value
+                try:
+                    start_date_value = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
+                    date_value = start_date_value
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing start_date: {e}")
+                    return jsonify({'error': 'Invalid start_date format'}), 400
             elif data.get('date'):
-                date_value = datetime.strptime(data['date'], '%Y-%m-%d').date()
-                start_date_value = date_value
+                try:
+                    date_value = datetime.strptime(data['date'], '%Y-%m-%d').date()
+                    start_date_value = date_value
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing date: {e}")
+                    return jsonify({'error': 'Invalid date format'}), 400
             else:
                 return jsonify({'error': 'start_date or date is required'}), 400
             
             if data.get('end_date'):
-                end_date_value = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                try:
+                    end_date_value = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing end_date: {e}")
+                    return jsonify({'error': 'Invalid end_date format'}), 400
             else:
                 end_date_value = start_date_value
             
-            # Get customer name
+            # ✅ GET CUSTOMER NAME
             customer_name = None
             customer_id = data.get('customer_id')
             if customer_id:
@@ -698,15 +968,23 @@ def handle_assignments():
                 if customer:
                     customer_name = customer.name
             
-            # Parse times
+            # ✅ PARSE TIME FIELDS
             start_time_value = None
             end_time_value = None
             
             if data.get('start_time'):
-                start_time_value = datetime.strptime(data['start_time'], '%H:%M').time()
-            if data.get('end_time'):
-                end_time_value = datetime.strptime(data['end_time'], '%H:%M').time()
+                try:
+                    start_time_value = datetime.strptime(data['start_time'], '%H:%M').time()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing start_time: {e}")
             
+            if data.get('end_time'):
+                try:
+                    end_time_value = datetime.strptime(data['end_time'], '%H:%M').time()
+                except Exception as e:
+                    current_app.logger.error(f"❌ Error parsing end_time: {e}")
+            
+            # ✅ CREATE ASSIGNMENT
             assignment = Assignment(
                 title=data.get('title', ''),
                 notes=data.get('notes', ''),
@@ -732,10 +1010,7 @@ def handle_assignments():
             session.commit()
             session.refresh(assignment)
             
-            # ✅ Invalidate cache
-            invalidate_cache('assignments')
-            
-            current_app.logger.info(f"✅ Assignment created: {assignment.id}")
+            current_app.logger.info(f"✅ Assignment created successfully: {assignment.id}")
             
             return jsonify({
                 'id': assignment.id,
@@ -743,63 +1018,39 @@ def handle_assignments():
                 'assignment': assignment.to_dict()
             }), 201
 
-        # ✅ GET with date range filtering and caching
-        # Get date range from query params
-        start_date = request.args.get('start_date')
-        end_date = request.args.get('end_date')
-        
-        # Create cache key based on filters
-        cache_key = f"assignments_{start_date}_{end_date}"
-        cached = simple_cache_get(cache_key)
-        if cached:
-            return jsonify(cached)
-        
-        # Build query with filters
-        query = session.query(Assignment)
-        
-        # ✅ OPTIMIZATION: Filter by date range (only get relevant assignments)
-        if start_date:
-            query = query.filter(Assignment.date >= datetime.strptime(start_date, '%Y-%m-%d').date())
-        if end_date:
-            query = query.filter(Assignment.date <= datetime.strptime(end_date, '%Y-%m-%d').date())
-        
-        # If no date filter, only get assignments within 90 days
-        if not start_date and not end_date:
-            ninety_days_ago = datetime.utcnow().date() - timedelta(days=90)
-            ninety_days_ahead = datetime.utcnow().date() + timedelta(days=90)
-            query = query.filter(
-                and_(
-                    Assignment.date >= ninety_days_ago,
-                    Assignment.date <= ninety_days_ahead
-                )
-            )
-        
-        assignments = query.order_by(Assignment.date.asc()).all()
-        
-        current_app.logger.info(f"✅ Returning {len(assignments)} assignments")
-        
-        result = [a.to_dict() for a in assignments]
-        
-        # Cache for 2 minutes (shorter than other caches since schedule changes often)
-        simple_cache_set(cache_key, result)
-        
-        return jsonify(result)
+        # ✅ GET - CORRECT LOCATION FOR GET LOGIC
+        if request.method == 'GET':
+            current_user_role = request.current_user.role if hasattr(request, 'current_user') else None
+            current_user_id = request.current_user.id if hasattr(request, 'current_user') else None
+            current_user_name = request.current_user.full_name if hasattr(request, 'current_user') else None
+            
+            current_app.logger.info(f"📊 Fetching assignments for user: {current_user_name} (Role: {current_user_role})")
+            
+            # ✅ FIXED: Everyone sees ALL assignments (no role restrictions)
+            assignments = session.query(Assignment).order_by(Assignment.date.asc()).all()
+            current_app.logger.info(f"✅ Returning all {len(assignments)} assignments to {current_user_role}")
+            
+            result = [a.to_dict() for a in assignments]
+            
+            if result:
+                current_app.logger.info(f"📋 Sample assignment: {result[0]}")
+            
+            return jsonify(result)
         
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"❌ Error in /assignments: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-# ============================================================================
-# ✅ OPTIMIZED: SINGLE ASSIGNMENT ENDPOINT
-# ============================================================================
+# 2. SINGLE /assignments/<id> ENDPOINT (for PUT and DELETE only)
 @db_bp.route('/assignments/<string:assignment_id>', methods=['PUT', 'DELETE', 'OPTIONS'])
 @token_required
 def handle_single_assignment(assignment_id):
-    """✅ OPTIMIZED: Single assignment with cache invalidation"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -808,10 +1059,13 @@ def handle_single_assignment(assignment_id):
         assignment = session.query(Assignment).filter_by(id=assignment_id).first()
         
         if not assignment:
+            current_app.logger.error(f"❌ Assignment {assignment_id} not found")
             return jsonify({'error': 'Assignment not found'}), 404
         
         if request.method == 'PUT':
             data = request.json
+            
+            current_app.logger.info(f"📝 Updating assignment {assignment_id}: {data}")
             
             # Update fields
             if 'title' in data:
@@ -826,18 +1080,30 @@ def handle_single_assignment(assignment_id):
                 assignment.priority = data['priority']
             if 'status' in data:
                 assignment.status = data['status']
+            if 'job_type' in data:
+                assignment.job_type = data['job_type']
+            if 'estimated_hours' in data:
+                assignment.estimated_hours = data['estimated_hours']
             
-            # Update dates
+            # ✅ CRITICAL: Handle date updates for drag and drop
+            # Update dates - priority order: start_date > date field
             if 'start_date' in data and data['start_date']:
                 assignment.start_date = datetime.strptime(data['start_date'], '%Y-%m-%d').date()
                 assignment.date = assignment.start_date
+                current_app.logger.info(f"📅 Updated start_date to: {assignment.start_date}")
             elif 'date' in data and data['date']:
                 assignment.date = datetime.strptime(data['date'], '%Y-%m-%d').date()
-                if not assignment.start_date:
+                if not hasattr(assignment, 'start_date') or not assignment.start_date:
                     assignment.start_date = assignment.date
+                current_app.logger.info(f"📅 Updated date to: {assignment.date}")
             
             if 'end_date' in data and data['end_date']:
                 assignment.end_date = datetime.strptime(data['end_date'], '%Y-%m-%d').date()
+                current_app.logger.info(f"📅 Updated end_date to: {assignment.end_date}")
+            elif 'start_date' in data and not ('end_date' in data):
+                # If only start_date provided, set end_date same as start_date
+                assignment.end_date = assignment.start_date
+                current_app.logger.info(f"📅 Set end_date same as start_date: {assignment.end_date}")
             
             # Update times
             if 'start_time' in data and data['start_time']:
@@ -845,13 +1111,22 @@ def handle_single_assignment(assignment_id):
             if 'end_time' in data and data['end_time']:
                 assignment.end_time = datetime.strptime(data['end_time'], '%H:%M').time()
             
+            # Update customer
+            if 'customer_id' in data:
+                assignment.customer_id = data['customer_id']
+                if data['customer_id']:
+                    customer = session.query(Customer).filter_by(id=data['customer_id']).first()
+                    if customer:
+                        if hasattr(assignment, 'customer_name'):
+                            assignment.customer_name = customer.name
+            
+            assignment.updated_by = request.current_user.id if hasattr(request, 'current_user') else None
             assignment.updated_at = datetime.utcnow()
             
             session.commit()
             session.refresh(assignment)
             
-            # ✅ Invalidate cache
-            invalidate_cache('assignments')
+            current_app.logger.info(f"✅ Assignment {assignment_id} updated successfully")
             
             return jsonify({
                 'message': 'Assignment updated successfully',
@@ -859,12 +1134,14 @@ def handle_single_assignment(assignment_id):
             })
         
         elif request.method == 'DELETE':
+            current_app.logger.info(f"🗑️ Deleting assignment: {assignment_id}")
+            
             session.delete(assignment)
             session.commit()
             
-            # ✅ Invalidate cache
-            invalidate_cache('assignments')
+            current_app.logger.info(f"✅ Assignment {assignment_id} deleted successfully")
             
+            # ✅ CRITICAL: Always return JSON
             return jsonify({
                 'message': 'Assignment deleted successfully',
                 'id': assignment_id
@@ -873,6 +1150,10 @@ def handle_single_assignment(assignment_id):
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"❌ Error handling assignment {assignment_id}: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        
+        # ✅ CRITICAL: Always return JSON, never HTML
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
