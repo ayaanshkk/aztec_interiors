@@ -1,7 +1,7 @@
 # db.py
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event, pool
+from sqlalchemy import create_engine, event, pool, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 import logging
@@ -151,7 +151,7 @@ def test_connection():
     try:
         with engine.connect() as conn:
             # Execute a simple query to verify connection
-            result = conn.execute("SELECT 1")
+            result = conn.execute(text("SELECT 1"))
             result.fetchone()
             logger.info("✅ Database connection test successful")
             return True
@@ -282,7 +282,7 @@ def health_check():
     try:
         # Test connection
         with engine.connect() as conn:
-            result = conn.execute("SELECT version()")
+            result = conn.execute(text("SELECT version()"))
             version = result.fetchone()[0] if result else "unknown"
             health["database"] = "postgresql"
             health["connection"] = True

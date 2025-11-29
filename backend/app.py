@@ -4,6 +4,8 @@ import os
 from dotenv import load_dotenv
 from .db import Base, engine, SessionLocal, test_connection, init_db
 from datetime import datetime
+from sqlalchemy import text
+
 
 load_dotenv()
 
@@ -227,12 +229,12 @@ def create_app():
         # Optional: Test database connectivity
         try:
             if hasattr(g, 'db_session'):
-                g.db_session.execute("SELECT 1")
+                g.db_session.execute(text("SELECT 1"))
                 health_status["database"] = "connected"
             else:
                 # Quick connectivity test
                 session = SessionLocal()
-                session.execute("SELECT 1")
+                session.execute(text("SELECT 1"))
                 session.close()
                 health_status["database"] = "connected"
         except Exception as e:
