@@ -15,7 +15,7 @@ blinker==1.9.0
 Brotli==1.1.0
 psycopg2-binary
 bs4==0.0.2
-cachelib==0.13.0
+cachelib==0.9.0
 cachetools==5.5.2
 catalogue==2.0.10
 certifi==2025.4.26
