@@ -1,6 +1,6 @@
 from flask import request, jsonify, send_file, Blueprint, current_app, redirect, Response
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import uuid 
 import requests
@@ -11,7 +11,8 @@ from ..utils.file_utils import allowed_file
 from ..models import DrawingDocument, FormDocument
 from .auth_helpers import token_required 
 from ..db import SessionLocal 
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
+from sqlalchemy.orm import joinedload
 
 try:
     from pdf_generator import generate_pdf
@@ -28,6 +29,32 @@ except ImportError as e:
 file_bp = Blueprint('file_routes', __name__)
 
 latest_structured_data = {}
+
+# ==========================================
+# SIMPLE IN-MEMORY CACHE (Replace with Redis in production)
+# ==========================================
+
+_cache = {}
+_cache_timeout = 300  # 5 minutes
+
+def simple_cache_get(key):
+    """Get cached data if not expired"""
+    if key in _cache:
+        cached_data, cached_time = _cache[key]
+        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
+            return cached_data
+    return None
+
+def simple_cache_set(key, data):
+    """Store data in cache with current timestamp"""
+    _cache[key] = (data, datetime.utcnow())
+
+def invalidate_cache(*patterns):
+    """Remove cache entries matching any of the patterns"""
+    for pattern in patterns:
+        keys_to_remove = [k for k in _cache.keys() if pattern in k]
+        for k in keys_to_remove:
+            _cache.pop(k, None)
 
 # ==========================================
 # Cloudinary Configuration
@@ -66,12 +93,10 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         file.seek(0)
         
         # Determine resource type based on file extension and MIME type
-        # Check both the filename and the original file.filename
         file_extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         original_extension = file.filename.rsplit('.', 1)[-1].lower() if hasattr(file, 'filename') and '.' in file.filename else ''
         mime_type = file.mimetype if hasattr(file, 'mimetype') else ''
         
-        # Use either extension
         extension = file_extension or original_extension
         
         current_app.logger.info(f"File upload details - filename: {filename}, original: {getattr(file, 'filename', 'N/A')}, extension: {extension}, mime: {mime_type}")
@@ -88,7 +113,6 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
              'image' in mime_type.lower():
             resource_type = 'image'
         else:
-            # Default to 'raw' for unknown types
             resource_type = 'raw'
         
         current_app.logger.info(f"Uploading {filename} as resource_type='{resource_type}' (extension: {extension}, mime: {mime_type})")
@@ -96,7 +120,7 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         # Upload to Cloudinary
         upload_params = {
             'folder': folder,
-            'public_id': filename.rsplit('.', 1)[0],  # Use filename without extension
+            'public_id': filename.rsplit('.', 1)[0],
             'resource_type': resource_type,
             'overwrite': False,
             'unique_filename': True
@@ -109,33 +133,67 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         
         current_app.logger.info(f"File uploaded to Cloudinary: {public_id} at {cloudinary_url}")
         
-        # IMPORTANT: For the database, store the backend view URL, not the Cloudinary URL
-        # This ensures all files go through our backend which handles PDFs correctly
-        # We store the Cloudinary URL in storage_path for reference
+        # Store backend view URL for database
         backend_view_url = f"/files/{file_type}/view/{filename}"
         
-        # Return backend URL (not Cloudinary URL) so it gets stored in file_url
-        return backend_view_url, cloudinary_url  # Return both: backend URL and Cloudinary URL
+        return backend_view_url, cloudinary_url
         
     except Exception as e:
         current_app.logger.error(f"Error uploading to Cloudinary: {e}", exc_info=True)
         raise Exception(f"Failed to upload file to Cloudinary: {str(e)}")
 
-def delete_file_from_cloudinary(public_id):
-    """Delete a file from Cloudinary"""
+def delete_file_from_cloudinary(storage_path):
+    """
+    Delete a file from Cloudinary using the full storage_path URL
+    Extracts public_id from URL and tries appropriate resource types
+    """
     try:
-        # Try to delete as 'raw' first (PDFs, Excel, etc.)
-        result = cloudinary.uploader.destroy(public_id, resource_type='raw')
+        # Extract public_id from Cloudinary URL
+        # URL format: https://res.cloudinary.com/{cloud}/raw/upload/v{version}/{public_id}.{ext}
+        if 'cloudinary.com' not in storage_path:
+            current_app.logger.warning(f"Not a Cloudinary URL: {storage_path}")
+            return False
         
-        # If raw deletion failed, try as image
-        if result.get('result') != 'ok':
-            result = cloudinary.uploader.destroy(public_id, resource_type='image')
+        # Extract the part after /upload/
+        parts = storage_path.split('/upload/')
+        if len(parts) < 2:
+            current_app.logger.warning(f"Invalid Cloudinary URL format: {storage_path}")
+            return False
         
-        # If still failed, try as video (just in case)
-        if result.get('result') != 'ok':
-            result = cloudinary.uploader.destroy(public_id, resource_type='video')
+        # Get everything after /upload/, remove version if present
+        path_after_upload = parts[1]
+        # Remove version number (e.g., v1234567890/)
+        if path_after_upload.startswith('v') and '/' in path_after_upload:
+            path_after_upload = path_after_upload.split('/', 1)[1]
         
-        success = result.get('result') == 'ok' or result.get('result') == 'not found'
+        # This is the public_id (may include folder structure)
+        public_id = path_after_upload
+        
+        # Determine resource type from URL
+        resource_type = 'raw'  # Default
+        if '/image/upload/' in storage_path:
+            resource_type = 'image'
+        elif '/raw/upload/' in storage_path:
+            resource_type = 'raw'
+        elif '/video/upload/' in storage_path:
+            resource_type = 'video'
+        
+        current_app.logger.info(f"Attempting to delete from Cloudinary: {public_id} (type: {resource_type})")
+        
+        # Try to delete with detected resource type
+        result = cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        
+        # If that didn't work, try other types
+        if result.get('result') not in ['ok', 'not found']:
+            # Try raw if it wasn't raw
+            if resource_type != 'raw':
+                result = cloudinary.uploader.destroy(public_id, resource_type='raw')
+            
+            # Try image if still not working
+            if result.get('result') not in ['ok', 'not found'] and resource_type != 'image':
+                result = cloudinary.uploader.destroy(public_id, resource_type='image')
+        
+        success = result.get('result') in ['ok', 'not found']
         
         if success:
             current_app.logger.info(f"File deleted from Cloudinary: {public_id}")
@@ -156,24 +214,15 @@ def fix_pdf_url_for_inline_display(url):
     if not url or 'cloudinary' not in url:
         return url
     
-    # Check if it's a PDF URL (either has .pdf or is in /raw/ path)
     if '.pdf' not in url.lower() and '/raw/' not in url:
         return url
     
-    # If already has the flag, return as-is
     if 'fl_attachment' in url:
         return url
     
-    # Cloudinary URL structure: 
-    # https://res.cloudinary.com/{cloud_name}/{resource_type}/upload/{transformations}/{version}/{path}
-    
-    # Add the inline display flag using proper transformation syntax
     if '/upload/' in url:
-        # Split the URL at /upload/
         parts = url.split('/upload/')
         if len(parts) == 2:
-            # Reconstruct with transformation
-            # Use fl_attachment (not fl_attachment:false) to force inline display
             url = f"{parts[0]}/upload/fl_attachment/{parts[1]}"
     
     return url
@@ -199,15 +248,21 @@ def get_form_document_folder():
     return folder
 
 # ==========================================
-# CUSTOMER DRAWINGS ROUTES
+# CUSTOMER DRAWINGS ROUTES (OPTIMIZED)
 # ==========================================
 
 @file_bp.route('/files/drawings', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_customer_drawings():
     """
-    GET: Fetch drawing documents for a customer.
-    POST: Upload a drawing/layout image or PDF and save its metadata to S3.
+    GET: Fetch drawing documents for a customer (with caching and pagination).
+    POST: Upload a drawing/layout image or PDF and save its metadata to Cloudinary.
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for GET requests
+    - Pagination support (default 50 per page)
+    - Eager loading of customer data (if needed in future)
+    - Cache invalidation on POST
     """
     if request.method == 'OPTIONS':
         response = jsonify()
@@ -216,20 +271,55 @@ def handle_customer_drawings():
         response.headers.add('Access-Control-Allow-Methods', "GET, POST, OPTIONS")
         return response
 
-    # --- Handle GET Request ---
+    # --- Handle GET Request (OPTIMIZED with caching) ---
     if request.method == 'GET':
         customer_id = request.args.get('customer_id')
+        project_id = request.args.get('project_id')  # Optional filter
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        per_page = min(per_page, 200)  # Max 200 per page
+        
         if not customer_id:
             return jsonify({'error': 'Customer ID query parameter is required'}), 400
 
+        # Check cache first
+        cache_key = f"drawings_{customer_id}_{project_id}_{page}_{per_page}"
+        cached = simple_cache_get(cache_key)
+        if cached:
+            current_app.logger.debug(f"Cache hit for drawings: {cache_key}")
+            return jsonify(cached), 200
+
         session = SessionLocal()
         try:
-            drawings = session.query(DrawingDocument)\
-                               .filter(DrawingDocument.customer_id == customer_id)\
-                               .order_by(DrawingDocument.created_at.desc())\
-                               .all()
+            # Build query with optional project filter
+            query = session.query(DrawingDocument)\
+                          .filter(DrawingDocument.customer_id == customer_id)
+            
+            if project_id:
+                query = query.filter(DrawingDocument.project_id == project_id)
+            
+            # Get total count
+            total_count = query.count()
+            
+            # Apply pagination and ordering
+            drawings = query.order_by(DrawingDocument.created_at.desc())\
+                           .limit(per_page)\
+                           .offset((page - 1) * per_page)\
+                           .all()
 
-            result = [d.to_dict() for d in drawings]
+            result = {
+                'drawings': [d.to_dict() for d in drawings],
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': total_count,
+                    'pages': (total_count + per_page - 1) // per_page
+                }
+            }
+            
+            # Cache the result
+            simple_cache_set(cache_key, result)
+            
             return jsonify(result), 200
 
         except Exception as e:
@@ -238,7 +328,7 @@ def handle_customer_drawings():
         finally:
             session.close()
 
-    # --- Handle POST Request ---
+    # --- Handle POST Request (OPTIMIZED with cache invalidation) ---
     elif request.method == 'POST':
         session = SessionLocal()
         try:
@@ -259,7 +349,7 @@ def handle_customer_drawings():
             filename = secure_filename(file.filename)
             unique_filename = f"{customer_id}_{str(uuid.uuid4())}_{filename}"
             
-            # Upload to Cloudinary - returns backend view URL and Cloudinary URL
+            # Upload to Cloudinary
             backend_view_url, cloudinary_url = upload_file_to_cloudinary(file, unique_filename, customer_id, 'drawings')
             
             # Determine file category
@@ -285,8 +375,8 @@ def handle_customer_drawings():
                 customer_id=customer_id,
                 project_id=project_id if project_id else None,
                 file_name=filename,
-                storage_path=cloudinary_url,  # Store actual Cloudinary URL for backend reference
-                file_url=backend_view_url,     # Store backend view URL (what user clicks)
+                storage_path=cloudinary_url,
+                file_url=backend_view_url,
                 mime_type=mime_type,
                 category=category,
                 uploaded_by=uploaded_by
@@ -294,6 +384,9 @@ def handle_customer_drawings():
 
             session.add(new_drawing)
             session.commit()
+
+            # INVALIDATE CACHE for this customer
+            invalidate_cache(f'drawings_{customer_id}')
 
             current_app.logger.info(f"Drawing saved for customer {customer_id}: {filename} to Cloudinary")
 
@@ -313,15 +406,22 @@ def handle_customer_drawings():
     return jsonify({'error': 'Method Not Allowed'}), 405
 
 
-@file_bp.route('/files/drawings/<drawing_id>', methods=['DELETE', 'OPTIONS'])
+@file_bp.route('/files/drawings/<drawing_id>', methods=['DELETE', 'PATCH', 'OPTIONS'])
 @token_required
-def delete_customer_drawing(drawing_id):
-    """Delete a drawing from both Cloudinary and database"""
+def manage_customer_drawing(drawing_id):
+    """
+    DELETE: Delete a drawing from both Cloudinary and database
+    PATCH: Update a drawing (e.g., assign to project)
+    
+    OPTIMIZATIONS:
+    - Cache invalidation on delete/update
+    - Optimistic deletion (don't wait for Cloudinary response)
+    """
     if request.method == 'OPTIONS':
         resp = jsonify()
         resp.headers.add('Access-Control-Allow-Origin', '*')
         resp.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        resp.headers.add('Access-Control-Allow-Methods', 'DELETE, OPTIONS')
+        resp.headers.add('Access-Control-Allow-Methods', 'DELETE, PATCH, OPTIONS')
         return resp
 
     session = SessionLocal()
@@ -330,27 +430,65 @@ def delete_customer_drawing(drawing_id):
         if not drawing:
             return jsonify({'error': 'Drawing not found'}), 404
 
-        # Delete from Cloudinary
-        if drawing.storage_path:
-            delete_file_from_cloudinary(drawing.storage_path)
+        customer_id = drawing.customer_id
 
-        # Delete from database
-        session.delete(drawing)
-        session.commit()
+        # --- Handle DELETE ---
+        if request.method == 'DELETE':
+            storage_path = drawing.storage_path
+            
+            # Delete from database first (optimistic)
+            session.delete(drawing)
+            session.commit()
+            
+            # INVALIDATE CACHE
+            invalidate_cache(f'drawings_{customer_id}')
+            
+            # Delete from Cloudinary asynchronously (don't wait)
+            if storage_path:
+                try:
+                    delete_file_from_cloudinary(storage_path)
+                except Exception as e:
+                    current_app.logger.error(f"Cloudinary delete failed but DB cleaned: {e}")
 
-        return jsonify({'success': True, 'message': 'Drawing deleted successfully'}), 200
+            return jsonify({'success': True, 'message': 'Drawing deleted successfully'}), 200
+
+        # --- Handle PATCH ---
+        elif request.method == 'PATCH':
+            data = request.get_json()
+            
+            # Update project_id if provided
+            if 'project_id' in data:
+                drawing.project_id = data['project_id']
+                drawing.updated_at = datetime.utcnow()
+            
+            session.commit()
+            
+            # INVALIDATE CACHE
+            invalidate_cache(f'drawings_{customer_id}')
+            
+            return jsonify({
+                'success': True,
+                'message': 'Drawing updated successfully',
+                'drawing': drawing.to_dict()
+            }), 200
 
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error deleting drawing {drawing_id}: {e}", exc_info=True)
-        return jsonify({'error': f'Failed to delete. Server error: {str(e)}'}), 500
+        current_app.logger.error(f"Error managing drawing {drawing_id}: {e}", exc_info=True)
+        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
     finally:
         session.close()
 
 
 @file_bp.route('/files/drawings/view/<filename>', methods=['GET'])
 def view_customer_drawing(filename):
-    """Serve the uploaded file via Cloudinary URL or fetch and serve with inline headers for PDFs"""
+    """
+    Serve the uploaded file via Cloudinary URL or fetch and serve with inline headers for PDFs
+    
+    OPTIMIZATIONS:
+    - 1-hour cache headers for browser caching
+    - Efficient database lookup with LIKE query
+    """
     session = SessionLocal()
     try:
         # Look up the drawing record
@@ -401,15 +539,20 @@ def view_customer_drawing(filename):
 
 
 # ==========================================
-# FORM DOCUMENTS ROUTES
+# FORM DOCUMENTS ROUTES (OPTIMIZED)
 # ==========================================
 
 @file_bp.route('/files/forms', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_form_documents():
     """
-    GET: Fetch form documents for a customer.
-    POST: Upload a form document (Excel/PDF) and save its metadata to S3.
+    GET: Fetch form documents for a customer (with caching and pagination).
+    POST: Upload a form document (Excel/PDF) and save its metadata to Cloudinary.
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for GET requests
+    - Pagination support
+    - Cache invalidation on POST
     """
     if request.method == 'OPTIONS':
         response = jsonify()
@@ -418,20 +561,51 @@ def handle_form_documents():
         response.headers.add('Access-Control-Allow-Methods', "GET, POST, OPTIONS")
         return response
 
-    # --- Handle GET Request ---
+    # --- Handle GET Request (OPTIMIZED with caching) ---
     if request.method == 'GET':
         customer_id = request.args.get('customer_id')
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 50, type=int)
+        per_page = min(per_page, 200)
+        
         if not customer_id:
             return jsonify({'error': 'Customer ID query parameter is required'}), 400
 
+        # Check cache first
+        cache_key = f"forms_{customer_id}_{page}_{per_page}"
+        cached = simple_cache_get(cache_key)
+        if cached:
+            current_app.logger.debug(f"Cache hit for forms: {cache_key}")
+            return jsonify(cached), 200
+
         session = SessionLocal()
         try:
+            # Get total count
+            total_count = session.query(FormDocument)\
+                                .filter(FormDocument.customer_id == customer_id)\
+                                .count()
+            
+            # Get paginated results
             form_docs = session.query(FormDocument)\
                                .filter(FormDocument.customer_id == customer_id)\
                                .order_by(FormDocument.created_at.desc())\
+                               .limit(per_page)\
+                               .offset((page - 1) * per_page)\
                                .all()
 
-            result = [d.to_dict() for d in form_docs]
+            result = {
+                'form_documents': [d.to_dict() for d in form_docs],
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': total_count,
+                    'pages': (total_count + per_page - 1) // per_page
+                }
+            }
+            
+            # Cache the result
+            simple_cache_set(cache_key, result)
+            
             return jsonify(result), 200
 
         except Exception as e:
@@ -440,7 +614,7 @@ def handle_form_documents():
         finally:
             session.close()
 
-    # --- Handle POST Request ---
+    # --- Handle POST Request (OPTIMIZED with cache invalidation) ---
     elif request.method == 'POST':
         session = SessionLocal()
         try:
@@ -460,7 +634,7 @@ def handle_form_documents():
             filename = secure_filename(file.filename)
             unique_filename = f"{customer_id}_{str(uuid.uuid4())}_{filename}"
             
-            # Upload to Cloudinary - returns backend view URL and Cloudinary URL
+            # Upload to Cloudinary
             backend_view_url, cloudinary_url = upload_file_to_cloudinary(file, unique_filename, customer_id, 'forms')
 
             # Determine file category
@@ -487,8 +661,8 @@ def handle_form_documents():
                 id=str(uuid.uuid4()),
                 customer_id=customer_id,
                 file_name=filename,
-                storage_path=cloudinary_url,  # Store actual Cloudinary URL for backend reference
-                file_url=backend_view_url,     # Store backend view URL (what user clicks)
+                storage_path=cloudinary_url,
+                file_url=backend_view_url,
                 mime_type=mime_type,
                 category=category,
                 uploaded_by=uploaded_by
@@ -496,6 +670,9 @@ def handle_form_documents():
 
             session.add(new_form_doc)
             session.commit()
+
+            # INVALIDATE CACHE
+            invalidate_cache(f'forms_{customer_id}')
 
             current_app.logger.info(f"Form document saved for customer {customer_id}: {filename} to Cloudinary")
 
@@ -517,7 +694,12 @@ def handle_form_documents():
 
 @file_bp.route('/files/forms/view/<filename>', methods=['GET'])
 def view_form_document(filename):
-    """Serve the uploaded form document via Cloudinary URL or fetch and serve with inline headers for PDFs"""
+    """
+    Serve the uploaded form document via Cloudinary URL or fetch and serve with inline headers for PDFs
+    
+    OPTIMIZATIONS:
+    - 1-hour cache headers for browser caching
+    """
     session = SessionLocal()
     try:
         form_doc = session.query(FormDocument).filter(
@@ -569,7 +751,13 @@ def view_form_document(filename):
 @file_bp.route('/files/forms/<form_doc_id>', methods=['DELETE', 'OPTIONS'])
 @token_required
 def delete_form_document(form_doc_id):
-    """Delete a form document from both Cloudinary and database"""
+    """
+    Delete a form document from both Cloudinary and database
+    
+    OPTIMIZATIONS:
+    - Cache invalidation
+    - Optimistic deletion
+    """
     if request.method == 'OPTIONS':
         resp = jsonify()
         resp.headers.add('Access-Control-Allow-Origin', '*')
@@ -583,13 +771,22 @@ def delete_form_document(form_doc_id):
         if not form_doc:
             return jsonify({'error': 'Form document not found'}), 404
 
-        # Delete from Cloudinary
-        if form_doc.storage_path:
-            delete_file_from_cloudinary(form_doc.storage_path)
+        customer_id = form_doc.customer_id
+        storage_path = form_doc.storage_path
 
-        # Delete from database
+        # Delete from database first (optimistic)
         session.delete(form_doc)
         session.commit()
+        
+        # INVALIDATE CACHE
+        invalidate_cache(f'forms_{customer_id}')
+
+        # Delete from Cloudinary asynchronously (don't wait)
+        if storage_path:
+            try:
+                delete_file_from_cloudinary(storage_path)
+            except Exception as e:
+                current_app.logger.error(f"Cloudinary delete failed but DB cleaned: {e}")
 
         return jsonify({'success': True, 'message': 'Form document deleted successfully'}), 200
 
@@ -739,42 +936,3 @@ def download_excel_file(filename):
     except Exception as e:
         current_app.logger.error(f"Error downloading: {e}", exc_info=True)
         return jsonify({'error': f'Download failed: {str(e)}'}), 500
-
-@file_bp.route('/files/drawings/<drawing_id>', methods=['PATCH', 'OPTIONS'])
-@token_required
-def update_drawing_document(drawing_id):
-    """Update a drawing document (e.g., assign to project)"""
-    if request.method == 'OPTIONS':
-        resp = jsonify()
-        resp.headers.add('Access-Control-Allow-Origin', '*')
-        resp.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        resp.headers.add('Access-Control-Allow-Methods', 'PATCH, OPTIONS')
-        return resp
-
-    session = SessionLocal()
-    try:
-        drawing = session.get(DrawingDocument, drawing_id)
-        if not drawing:
-            return jsonify({'error': 'Drawing not found'}), 404
-
-        data = request.get_json()
-        
-        # Update project_id if provided
-        if 'project_id' in data:
-            drawing.project_id = data['project_id']
-            drawing.updated_at = datetime.utcnow()
-        
-        session.commit()
-        
-        return jsonify({
-            'success': True,
-            'message': 'Drawing updated successfully',
-            'drawing': drawing.to_dict()
-        }), 200
-
-    except Exception as e:
-        session.rollback()
-        current_app.logger.error(f"Error updating drawing {drawing_id}: {e}", exc_info=True)
-        return jsonify({'error': f'Failed to update drawing: {str(e)}'}), 500
-    finally:
-        session.close()

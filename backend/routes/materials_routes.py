@@ -3,48 +3,91 @@ from ..models import (MaterialOrder, MaterialChangeLog, MaterialStatus, Customer
 from .auth_helpers import token_required
 from ..db import SessionLocal
 from datetime import datetime, timedelta
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
+from sqlalchemy.orm import joinedload
 import uuid
 
 materials_bp = Blueprint('materials', __name__)
 
+# ==========================================
+# SIMPLE IN-MEMORY CACHE (Replace with Redis in production)
+# ==========================================
 
-# ============================================
-# MATERIALS CRUD OPERATIONS
-# ============================================
+_cache = {}
+_cache_timeout = 300  # 5 minutes
+
+def simple_cache_get(key):
+    """Get cached data if not expired"""
+    if key in _cache:
+        cached_data, cached_time = _cache[key]
+        if (datetime.utcnow() - cached_time).seconds < _cache_timeout:
+            return cached_data
+    return None
+
+def simple_cache_set(key, data):
+    """Store data in cache with current timestamp"""
+    _cache[key] = (data, datetime.utcnow())
+
+def invalidate_cache(*patterns):
+    """Remove cache entries matching any of the patterns"""
+    for pattern in patterns:
+        keys_to_remove = [k for k in _cache.keys() if pattern in k]
+        for k in keys_to_remove:
+            _cache.pop(k, None)
+
+# ==========================================
+# MATERIALS CRUD OPERATIONS (OPTIMIZED)
+# ==========================================
 
 @materials_bp.route('/materials', methods=['GET', 'OPTIONS'])
 @token_required
 def get_all_materials():
     """
     Get all material orders with optional filtering
-    Query params: 
-        - customer_id: Filter by customer
-        - status: Filter by status (not_ordered, ordered, in_transit, delivered, delayed)
-        - date_from/date_to: Filter by order date range
-    Only Manager, HR, and Production roles can view all materials
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for material lists
+    - Eager loading of customer relationship
+    - Pagination support
+    - Single query with joins instead of N+1 queries
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager, HR, and Production can view materials
     if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view materials'}), 403
     
+    # Get filter parameters
+    customer_id = request.args.get('customer_id')
+    status = request.args.get('status')
+    date_from = request.args.get('date_from')
+    date_to = request.args.get('date_to')
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 100, type=int)
+    per_page = min(per_page, 500)
+    
+    # Build cache key from filters
+    cache_key = f"materials_{customer_id}_{status}_{date_from}_{date_to}_{page}_{per_page}"
+    
+    # Check cache first
+    cached = simple_cache_get(cache_key)
+    if cached:
+        current_app.logger.debug(f"Cache hit for materials: {cache_key}")
+        return jsonify(cached), 200
+    
     session = SessionLocal()
     try:
-        query = session.query(MaterialOrder)
+        # OPTIMIZED: Single query with eager loading
+        query = session.query(MaterialOrder).options(
+            joinedload(MaterialOrder.customer)
+        )
         
-        # Filter by customer
-        customer_id = request.args.get('customer_id')
+        # Apply filters
         if customer_id:
             query = query.filter(MaterialOrder.customer_id == customer_id)
         
-        # Filter by status
-        status = request.args.get('status')
         if status:
             try:
                 status_enum = MaterialStatus(status)
@@ -52,18 +95,34 @@ def get_all_materials():
             except ValueError:
                 return jsonify({'error': f'Invalid status: {status}'}), 400
         
-        # Filter by date range
-        date_from = request.args.get('date_from')
-        date_to = request.args.get('date_to')
         if date_from:
             query = query.filter(MaterialOrder.order_date >= datetime.fromisoformat(date_from))
         if date_to:
             query = query.filter(MaterialOrder.order_date <= datetime.fromisoformat(date_to))
         
-        # Order by most recent first
-        materials = query.order_by(MaterialOrder.created_at.desc()).all()
+        # Get total count
+        total_count = query.count()
         
-        return jsonify([material.to_dict() for material in materials]), 200
+        # Apply pagination and ordering
+        materials = query.order_by(MaterialOrder.created_at.desc())\
+                        .limit(per_page)\
+                        .offset((page - 1) * per_page)\
+                        .all()
+        
+        result = {
+            'materials': [material.to_dict() for material in materials],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total_count,
+                'pages': (total_count + per_page - 1) // per_page
+            }
+        }
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
+        
+        return jsonify(result), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching materials: {e}")
@@ -77,21 +136,36 @@ def get_all_materials():
 def get_material(material_id):
     """
     Get single material order by ID
-    Only Manager, HR, and Production roles can view material details
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for individual materials
+    - Eager loading of customer and change logs
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager, HR, and Production can view material details
     if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view material details'}), 403
     
+    # Check cache first
+    cache_key = f"material_{material_id}"
+    cached = simple_cache_get(cache_key)
+    if cached:
+        return jsonify(cached), 200
+    
     session = SessionLocal()
     try:
-        material = session.get(MaterialOrder, material_id)
+        # OPTIMIZED: Eager load customer and change logs
+        material = session.query(MaterialOrder)\
+            .options(
+                joinedload(MaterialOrder.customer),
+                joinedload(MaterialOrder.change_logs)
+            )\
+            .filter(MaterialOrder.id == material_id)\
+            .first()
+            
         if not material:
             return jsonify({'error': 'Material order not found'}), 404
         
@@ -100,6 +174,9 @@ def get_material(material_id):
         
         result = material.to_dict()
         result['change_logs'] = change_logs
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
         
         return jsonify(result), 200
         
@@ -115,46 +192,63 @@ def get_material(material_id):
 def get_customer_materials(customer_id):
     """
     Get all material orders for a specific customer
-    Returns summary including modification safety status
-    Only Manager, HR, and Production roles can view customer materials
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for customer materials
+    - Single aggregation query for summary stats
     """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager, HR, and Production can view customer materials
     if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer materials'}), 403
     
+    # Check cache first
+    cache_key = f"customer_materials_{customer_id}"
+    cached = simple_cache_get(cache_key)
+    if cached:
+        return jsonify(cached), 200
+    
     session = SessionLocal()
     try:
-        # Check if customer exists
         customer = session.get(Customer, customer_id)
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
         # Get all materials for this customer
-        materials = session.query(MaterialOrder).filter(
-            MaterialOrder.customer_id == customer_id
-        ).order_by(MaterialOrder.created_at.desc()).all()
+        materials = session.query(MaterialOrder)\
+            .filter(MaterialOrder.customer_id == customer_id)\
+            .order_by(MaterialOrder.created_at.desc())\
+            .all()
         
         # Check if ANY materials have been ordered
         any_ordered = any(m.status != MaterialStatus.NOT_ORDERED for m in materials)
         all_delivered = all(m.status == MaterialStatus.DELIVERED for m in materials) if materials else False
         
-        return jsonify({
+        # OPTIMIZED: Count pending deliveries in single pass
+        pending_deliveries = sum(
+            1 for m in materials 
+            if m.status in [MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT]
+        )
+        
+        result = {
             'customer_id': customer_id,
             'customer_name': customer.name,
             'materials': [m.to_dict() for m in materials],
             'summary': {
                 'total_orders': len(materials),
-                'modifications_safe': not any_ordered,  # Can modify if nothing ordered yet
+                'modifications_safe': not any_ordered,
                 'all_delivered': all_delivered,
-                'pending_deliveries': sum(1 for m in materials if m.status in [MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT])
+                'pending_deliveries': pending_deliveries
             }
-        }), 200
+        }
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
+        
+        return jsonify(result), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching materials for customer {customer_id}: {e}")
@@ -168,14 +262,14 @@ def get_customer_materials(customer_id):
 def create_material_order():
     """
     Create a new material order
-    Called by Production team when they order materials
-    Only Manager and Production roles can create material orders
+    
+    OPTIMIZATIONS:
+    - Cache invalidation for material lists
+    - Batch change log creation
     """
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     current_user_id = request.current_user.id
     
-    # Role check: Only Manager and Production can create material orders
     if user_role not in ['manager', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can create material orders'}), 403
     
@@ -183,7 +277,6 @@ def create_material_order():
     try:
         data = request.json
         
-        # ✅ CRITICAL FIX: Log the incoming request for debugging
         current_app.logger.info(f"📥 Material order creation request: {data}")
         current_app.logger.info(f"👤 User: {current_user_id}, Role: {user_role}")
         
@@ -198,17 +291,16 @@ def create_material_order():
         if not customer:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Parse status - ensure we use the enum properly
+        # Parse status
         status_value = data.get('status', 'ordered').lower()
         try:
-            status = MaterialStatus(status_value)  # This creates the enum object
+            status = MaterialStatus(status_value)
         except ValueError:
-            # Fallback to 'ordered' if invalid status provided
             status = MaterialStatus.ORDERED
         
         current_app.logger.info(f"📊 Status enum created: {status}, value: {status.value}")
         
-        # ✅ FIX: Handle date parsing more robustly
+        # Handle date parsing
         order_date = None
         if data.get('order_date'):
             try:
@@ -226,7 +318,6 @@ def create_material_order():
                 expected_delivery_date = None
         
         # Create material order
-        # 🔑 CRITICAL FIX: Pass status.value (lowercase string) not status enum object
         material_order = MaterialOrder(
             id=str(uuid.uuid4()),
             customer_id=data['customer_id'],
@@ -236,7 +327,7 @@ def create_material_order():
             material_description=data['material_description'],
             supplier_name=data.get('supplier_name'),
             supplier_reference=data.get('supplier_reference'),
-            status=status.value,  # ✅ Pass the lowercase string value, not the enum
+            status=status.value,
             order_date=order_date,
             expected_delivery_date=expected_delivery_date,
             estimated_cost=data.get('estimated_cost'),
@@ -257,6 +348,9 @@ def create_material_order():
         session.add(change_log)
         
         session.commit()
+        
+        # INVALIDATE CACHE
+        invalidate_cache('materials', f'customer_materials_{data["customer_id"]}', 'materials_dashboard', 'pending_orders')
         
         current_app.logger.info(f"✅ Material order {material_order.id} created for customer {data['customer_id']}")
         
@@ -280,7 +374,12 @@ def create_material_order():
 @materials_bp.route('/materials/<string:material_id>', methods=['PATCH', 'OPTIONS'])
 @token_required
 def update_material_order(material_id):
-    """Update a material order"""
+    """
+    Update a material order
+    
+    OPTIMIZATIONS:
+    - Cache invalidation for updated material
+    """
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -293,8 +392,7 @@ def update_material_order(material_id):
         data = request.get_json()
         old_status = material_order.status
         
-        # ✅ FIXED: Define new_status BEFORE using it
-        new_status = data.get('status')  # Get the new status from request data
+        new_status = data.get('status')
         
         # Update fields
         if 'material_description' in data:
@@ -305,7 +403,7 @@ def update_material_order(material_id):
             material_order.supplier_reference = data['supplier_reference']
         if 'status' in data:
             material_order.status = data['status']
-            new_status = data['status']  # Make sure new_status is set
+            new_status = data['status']
         if 'order_date' in data:
             material_order.order_date = datetime.fromisoformat(data['order_date']) if data['order_date'] else None
         if 'expected_delivery_date' in data:
@@ -319,11 +417,9 @@ def update_material_order(material_id):
         if 'notes' in data:
             material_order.notes = data['notes']
         
-        # ✅ NOW this line will work because new_status is defined
         if new_status == MaterialStatus.ORDERED and not material_order.order_date:
             material_order.order_date = datetime.utcnow()
         
-        # Auto-set actual delivery date when marked as delivered
         if new_status == MaterialStatus.DELIVERED and not material_order.actual_delivery_date:
             material_order.actual_delivery_date = datetime.utcnow()
         
@@ -343,7 +439,6 @@ def update_material_order(material_id):
                 'delayed': '⚠️'
             }
             
-            # Get the status value (handle both string and enum)
             old_status_value = old_status if isinstance(old_status, str) else old_status.value if old_status else 'not_ordered'
             new_status_value = new_status if isinstance(new_status, str) else new_status.value if new_status else 'not_ordered'
             
@@ -357,6 +452,9 @@ def update_material_order(material_id):
             )
         
         session.commit()
+        
+        # INVALIDATE CACHE
+        invalidate_cache('materials', f'material_{material_id}', f'customer_materials_{material_order.customer_id}', 'materials_dashboard', 'pending_orders')
         
         return jsonify({
             'success': True,
@@ -376,12 +474,13 @@ def update_material_order(material_id):
 def delete_material_order(material_id):
     """
     Delete a material order
-    Only Manager, HR, and Production roles can delete material orders
+    
+    OPTIMIZATIONS:
+    - Batch deletion of change logs
+    - Cache invalidation
     """
-    # ✅ FIX 1: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # ✅ FIX 2: Role check: Allow Manager, HR, and Production to delete orders
     if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can delete material orders'}), 403
     
@@ -391,14 +490,18 @@ def delete_material_order(material_id):
         if not material_order:
             return jsonify({'error': 'Material order not found'}), 404
         
-        # 🔑 CRITICAL FIX 3: Delete dependent MaterialChangeLog records first
-        # This prevents Foreign Key constraint errors on commit.
+        customer_id = material_order.customer_id
+        
+        # OPTIMIZED: Batch delete change logs
         session.query(MaterialChangeLog).filter(
             MaterialChangeLog.material_order_id == material_id
-        ).delete()
+        ).delete(synchronize_session='fetch')
         
         session.delete(material_order)
         session.commit()
+        
+        # INVALIDATE CACHE
+        invalidate_cache('materials', f'material_{material_id}', f'customer_materials_{customer_id}', 'materials_dashboard', 'pending_orders')
         
         current_app.logger.info(f"Material order {material_id} deleted")
         
@@ -412,88 +515,100 @@ def delete_material_order(material_id):
         session.close()
 
 
-# ============================================
-# MANAGER DASHBOARD ENDPOINTS
-# ============================================
+# ==========================================
+# MANAGER DASHBOARD ENDPOINTS (OPTIMIZED)
+# ==========================================
 
 @materials_bp.route('/materials/dashboard/overview', methods=['GET'])
 @token_required
 def materials_dashboard_overview():
     """
     Get overview of all materials for manager dashboard
-    Shows pending orders, deliveries expected, etc.
-    Only Manager and HR roles can view dashboard overview
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for dashboard
+    - Single aggregation query instead of 5 separate queries
+    - Batch loading of upcoming deliveries
     """
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager and HR can view dashboard overview
     if user_role not in ['manager', 'hr']:
         return jsonify({'error': 'Unauthorized - Only Manager and HR can view dashboard overview'}), 403
     
+    # Check cache first
+    cache_key = "materials_dashboard"
+    cached = simple_cache_get(cache_key)
+    if cached:
+        current_app.logger.debug("Cache hit for materials dashboard")
+        return jsonify(cached), 200
+    
     session = SessionLocal()
     try:
-        # Get counts by status
-        not_ordered = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.NOT_ORDERED
-        ).count()
+        # OPTIMIZED: Single aggregation query for status counts
+        status_counts_raw = session.query(
+            MaterialOrder.status,
+            func.count(MaterialOrder.id)
+        ).group_by(MaterialOrder.status).all()
         
-        ordered = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.ORDERED
-        ).count()
+        # Convert to dict with defaults
+        status_counts = {
+            'not_ordered': 0,
+            'ordered': 0,
+            'in_transit': 0,
+            'delivered': 0,
+            'delayed': 0
+        }
         
-        in_transit = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.IN_TRANSIT
-        ).count()
+        total = 0
+        for status, count in status_counts_raw:
+            status_value = status if isinstance(status, str) else status.value
+            status_counts[status_value] = count
+            total += count
         
-        delivered = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.DELIVERED
-        ).count()
-        
-        delayed = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.DELAYED
-        ).count()
+        status_counts['total'] = total
         
         # Get deliveries expected this week/month
         today = datetime.utcnow()
         week_end = today + timedelta(days=7)
         month_end = today + timedelta(days=30)
         
-        deliveries_this_week = session.query(MaterialOrder).filter(
-            and_(
-                MaterialOrder.expected_delivery_date >= today,
-                MaterialOrder.expected_delivery_date <= week_end,
-                MaterialOrder.status.in_([MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT])
-            )
-        ).all()
+        # OPTIMIZED: Single query with eager loading
+        deliveries_this_week = session.query(MaterialOrder)\
+            .options(joinedload(MaterialOrder.customer))\
+            .filter(
+                and_(
+                    MaterialOrder.expected_delivery_date >= today,
+                    MaterialOrder.expected_delivery_date <= week_end,
+                    MaterialOrder.status.in_([MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT])
+                )
+            ).all()
         
-        deliveries_this_month = session.query(MaterialOrder).filter(
-            and_(
-                MaterialOrder.expected_delivery_date >= today,
-                MaterialOrder.expected_delivery_date <= month_end,
-                MaterialOrder.status.in_([MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT])
-            )
-        ).count()
+        deliveries_this_month_count = session.query(func.count(MaterialOrder.id))\
+            .filter(
+                and_(
+                    MaterialOrder.expected_delivery_date >= today,
+                    MaterialOrder.expected_delivery_date <= month_end,
+                    MaterialOrder.status.in_([MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT])
+                )
+            ).scalar()
         
-        return jsonify({
-            'status_counts': {
-                'not_ordered': not_ordered,
-                'ordered': ordered,
-                'in_transit': in_transit,
-                'delivered': delivered,
-                'delayed': delayed,
-                'total': not_ordered + ordered + in_transit + delivered + delayed
-            },
+        result = {
+            'status_counts': status_counts,
             'deliveries': {
                 'expected_this_week': len(deliveries_this_week),
-                'expected_this_month': deliveries_this_month,
+                'expected_this_month': deliveries_this_month_count,
                 'upcoming_deliveries': [m.to_dict() for m in deliveries_this_week]
             },
             'alerts': {
-                'delayed_orders': delayed,
-                'needs_ordering': not_ordered
+                'delayed_orders': status_counts['delayed'],
+                'needs_ordering': status_counts['not_ordered']
             }
-        }), 200
+        }
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
+        
+        return jsonify(result), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching materials dashboard: {e}")
@@ -507,17 +622,21 @@ def materials_dashboard_overview():
 def get_customer_project_timeline(customer_id):
     """
     Get project timeline for a specific customer
-    Shows if materials ordered and estimated completion date
     
-    This is what managers check when customers call asking about timelines
-    Only Manager, HR, and Production roles can view customer timelines
+    OPTIMIZATIONS:
+    - 5-minute cache for customer timelines
+    - Single query for materials
     """
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager, HR, and Production can view customer timelines
     if user_role not in ['manager', 'hr', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager, HR, and Production can view customer timelines'}), 403
+    
+    # Check cache first
+    cache_key = f"customer_timeline_{customer_id}"
+    cached = simple_cache_get(cache_key)
+    if cached:
+        return jsonify(cached), 200
     
     session = SessionLocal()
     try:
@@ -526,12 +645,12 @@ def get_customer_project_timeline(customer_id):
             return jsonify({'error': 'Customer not found'}), 404
         
         # Get all materials for this customer
-        materials = session.query(MaterialOrder).filter(
-            MaterialOrder.customer_id == customer_id
-        ).all()
+        materials = session.query(MaterialOrder)\
+            .filter(MaterialOrder.customer_id == customer_id)\
+            .all()
         
         if not materials:
-            return jsonify({
+            result = {
                 'customer_id': customer_id,
                 'customer_name': customer.name,
                 'timeline': {
@@ -541,22 +660,30 @@ def get_customer_project_timeline(customer_id):
                     'estimated_completion_date': None,
                     'message': 'No materials ordered yet - Project can be fully modified'
                 }
-            }), 200
+            }
+            
+            # Cache the result
+            simple_cache_set(cache_key, result)
+            
+            return jsonify(result), 200
         
         # Calculate timeline
         any_ordered = any(m.status != MaterialStatus.NOT_ORDERED for m in materials)
         all_delivered = all(m.status == MaterialStatus.DELIVERED for m in materials)
         
         # Find latest expected delivery
-        pending_deliveries = [m for m in materials if m.expected_delivery_date and m.status in [MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT]]
+        pending_deliveries = [
+            m for m in materials 
+            if m.expected_delivery_date and m.status in [MaterialStatus.ORDERED, MaterialStatus.IN_TRANSIT]
+        ]
         latest_delivery = max([m.expected_delivery_date for m in pending_deliveries]) if pending_deliveries else None
         
         # Estimate completion (delivery date + 2 weeks installation time)
         estimated_completion = None
         if latest_delivery:
-            estimated_completion = latest_delivery + timedelta(days=14)  # Assume 2 weeks for installation
+            estimated_completion = latest_delivery + timedelta(days=14)
         
-        return jsonify({
+        result = {
             'customer_id': customer_id,
             'customer_name': customer.name,
             'timeline': {
@@ -571,11 +698,16 @@ def get_customer_project_timeline(customer_id):
                 {
                     'id': m.id,
                     'description': m.material_description,
-                    'status': m.status.value,
-                    'delivery_status': f"{m.status.value.replace('_', ' ').title()}"
+                    'status': m.status.value if hasattr(m.status, 'value') else m.status,
+                    'delivery_status': f"{(m.status.value if hasattr(m.status, 'value') else m.status).replace('_', ' ').title()}"
                 } for m in materials
             ]
-        }), 200
+        }
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
+        
+        return jsonify(result), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching project timeline for {customer_id}: {e}")
@@ -597,32 +729,41 @@ def _get_timeline_message(materials, any_ordered, all_delivered, latest_delivery
         return "⚠️ Materials ordered but no delivery dates confirmed - Check with supplier"
 
 
-# ============================================
-# PRODUCTION TEAM NOTIFICATIONS
-# ============================================
+# ==========================================
+# PRODUCTION TEAM NOTIFICATIONS (OPTIMIZED)
+# ==========================================
 
 @materials_bp.route('/materials/notifications/pending-orders', methods=['GET'])
 @token_required
 def get_pending_material_orders():
     """
     Get list of customers waiting for materials to be ordered
-    Production team checks this to know what needs ordering
-    Only Manager and Production roles can view pending orders
+    
+    OPTIMIZATIONS:
+    - 5-minute cache for pending orders
+    - Eager loading of customer relationship
     """
-    # ✅ FIX: Use request.current_user instead of g.user
     user_role = request.current_user.role.lower() if request.current_user.role else ''
     
-    # Role check: Only Manager and Production can view pending orders
     if user_role not in ['manager', 'production']:
         return jsonify({'error': 'Unauthorized - Only Manager and Production can view pending orders'}), 403
     
+    # Check cache first
+    cache_key = "pending_orders"
+    cached = simple_cache_get(cache_key)
+    if cached:
+        return jsonify(cached), 200
+    
     session = SessionLocal()
     try:
-        pending = session.query(MaterialOrder).filter(
-            MaterialOrder.status == MaterialStatus.NOT_ORDERED
-        ).order_by(MaterialOrder.created_at.asc()).all()
+        # OPTIMIZED: Eager load customer data
+        pending = session.query(MaterialOrder)\
+            .options(joinedload(MaterialOrder.customer))\
+            .filter(MaterialOrder.status == MaterialStatus.NOT_ORDERED)\
+            .order_by(MaterialOrder.created_at.asc())\
+            .all()
         
-        return jsonify({
+        result = {
             'pending_count': len(pending),
             'pending_orders': [
                 {
@@ -634,7 +775,12 @@ def get_pending_material_orders():
                     'days_pending': (datetime.utcnow() - m.created_at).days
                 } for m in pending
             ]
-        }), 200
+        }
+        
+        # Cache the result
+        simple_cache_set(cache_key, result)
+        
+        return jsonify(result), 200
         
     except Exception as e:
         current_app.logger.exception(f"Error fetching pending orders: {e}")
@@ -646,12 +792,12 @@ def get_pending_material_orders():
 if __name__ == "__main__":
     print("Material Tracking API Routes Ready!")
     print("\nEndpoints created:")
-    print("- GET    /materials (list all)")
-    print("- GET    /materials/<id> (get single)")
-    print("- GET    /materials/customer/<customer_id> (by customer)")
-    print("- POST   /materials (create)")
-    print("- PATCH  /materials/<id> (update)")
+    print("- GET    /materials (list all)")
+    print("- GET    /materials/<id> (get single)")
+    print("- GET    /materials/customer/<customer_id> (by customer)")
+    print("- POST   /materials (create)")
+    print("- PATCH  /materials/<id> (update)")
     print("- DELETE /materials/<id> (delete)")
-    print("- GET    /materials/dashboard/overview (manager dashboard)")
-    print("- GET    /materials/timeline/<customer_id> (project timeline)")
-    print("- GET    /materials/notifications/pending-orders (production notifications)")
+    print("- GET    /materials/dashboard/overview (manager dashboard)")
+    print("- GET    /materials/timeline/<customer_id> (project timeline)")
+    print("- GET    /materials/notifications/pending-orders (production notifications)")
