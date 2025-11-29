@@ -739,6 +739,8 @@ class Quotation(Base):
     status = Column(String(20), default='Draft')
     valid_until = Column(Date)
     notes = Column(Text)
+    created_by = Column(String(200))
+    updated_by = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -757,8 +759,16 @@ class QuotationItem(Base):
     description = Column(Text)
     color = Column(String(50))
     amount = Column(Float, nullable=False)
+    quotation = relationship('Quotation', back_populates='items')
+    quantity = Column(Integer, default=1)
+    width = Column(Integer, nullable=True)  # For dimension-based pricing
+    height = Column(Integer, nullable=True)
+    depth = Column(Integer, nullable=True)
+    needs_manual_pricing = Column(Boolean, default=False)
+    price_list_item_id = Column(Integer, ForeignKey('price_list_items.id'), nullable=True)
 
     quotation = relationship('Quotation', back_populates='items')
+    price_list_item = relationship('PriceListItem', foreign_keys=[price_list_item_id])
 
     def __repr__(self):
         return f'<QuotationItem {self.item} (Quotation {self.quotation_id})>'
@@ -1469,3 +1479,46 @@ class ActionItem(Base):
     
     # Relationships
     customer = relationship("Customer", backref="action_items")
+
+class PriceListItem(Base):
+    """Price list for kitchen and bedroom items"""
+    __tablename__ = 'price_list_items'
+    
+    id = Column(Integer, primary_key=True)
+    category = Column(String(50), nullable=False, index=True)  # 'kitchen' or 'bedroom'
+    item_code = Column(String(50), nullable=False, unique=True, index=True)  # e.g., '40R', '50R'
+    item_name = Column(String(200), nullable=False)  # e.g., '400mm wide robe'
+    description = Column(Text)  # Full description with dimensions
+    subcategory = Column(String(100))  # e.g., 'Wardrobes', 'Drawers'
+    
+    # Pricing
+    base_price = Column(Numeric(10, 2), nullable=False)  # 2025 Price
+    
+    # Dimensions (nullable for non-dimensional items)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True) 
+    depth = Column(Integer, nullable=True)
+    
+    # Flags
+    dimension_based = Column(Boolean, default=False)
+    active = Column(Boolean, default=True)
+    
+    # Metadata
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'category': self.category,
+            'item_code': self.item_code,
+            'item_name': self.item_name,
+            'description': self.description,
+            'subcategory': self.subcategory,
+            'base_price': float(self.base_price) if self.base_price else None,
+            'width': self.width,
+            'height': self.height,
+            'depth': self.depth,
+            'dimension_based': self.dimension_based,
+            'active': self.active,
+        }
