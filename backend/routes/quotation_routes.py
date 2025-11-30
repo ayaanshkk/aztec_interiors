@@ -25,17 +25,16 @@ def handle_quotations():
     try:
         if request.method == 'POST':
             data = request.json
-
+            
+            # Generate reference number
             ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{session.query(Quotation).count() + 1}"
-
+            
             quotation = Quotation(
                 customer_id=data.get('customer_id'),
                 reference_number=ref_num,
                 total=0,
                 status=data.get('status', 'Draft'),
                 notes=data.get('notes', '')
-                created_at=datetime.utcnow(),
-                updated_at=datetime.utcnow()
             )
             session.add(quotation)
             session.flush()
