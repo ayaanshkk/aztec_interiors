@@ -25,12 +25,15 @@ def handle_quotations():
     try:
         if request.method == 'POST':
             data = request.json
+
+            ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{session.query(Quotation).count() + 1}"
+
             quotation = Quotation(
-                customer_id=form_submission.customer_id,
-                reference_number=reference_number,
+                customer_id=data.get('customer_id'),
+                reference_number=ref_num,
                 total=0,
-                status='Draft',
-                notes=f'Auto-generated from {form_type} checklist',
+                status=data.get('status', 'Draft'),
+                notes=data.get('notes', '')
                 created_at=datetime.utcnow(),
                 updated_at=datetime.utcnow()
             )
@@ -101,7 +104,6 @@ def generate_quote_from_checklist(form_submission_id):
             total=0,
             status='Draft',
             notes=f"Auto-generated from {checklist_type} checklist",
-            created_by=get_current_user_email()
         )
         session.add(quotation)
         session.flush()
