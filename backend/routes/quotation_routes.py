@@ -26,11 +26,13 @@ def handle_quotations():
         if request.method == 'POST':
             data = request.json
             quotation = Quotation(
-                customer_id=data.get('customer_id'),
+                customer_id=form_submission.customer_id,
+                reference_number=reference_number,
                 total=0,
                 status='Draft',
-                created_by=get_current_user_email(data),
-                notes=data.get('notes', '')
+                notes=f'Auto-generated from {form_type} checklist',
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
             )
             session.add(quotation)
             session.flush()
