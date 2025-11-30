@@ -27,19 +27,22 @@ def handle_quotations():
             data = request.json
             quotation = Quotation(
                 customer_id=data.get('customer_id'),
+                total=0,
+                status='Draft',
                 created_by=get_current_user_email(data),
                 notes=data.get('notes', '')
             )
             session.add(quotation)
-            session.commit()
+            session.flush()
 
             items = data.get('items', [])
             for item in items:
                 q_item = QuotationItem(
                     quotation_id=quotation.id,
-                    product_name=item.get('product_name'),
+                    item=item.get('item', ''),
+                    description=item.get('description', ''),
                     quantity=item.get('quantity', 1),
-                    price=item.get('price', 0)
+                    amount=item.get('amount', 0)
                 )
                 session.add(q_item)
             session.commit()
@@ -56,15 +59,21 @@ def handle_quotations():
         session.close()
 
 
-@quotation_bp.route('/quotations/generate-from-checklist/<string:form_submission_id>', methods=['POST'])
+@quotation_bp.route('/quotations/generate-from-checklist/<string:form_submission_id>', methods=['POST', 'OPTIONS'])
 @token_required
 def generate_quote_from_checklist(form_submission_id):
     """Generate quotation from checklist - auto-extracts items"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
     session = SessionLocal()
     try:
+        current_app.logger.info(f"📋 Generating quote from checklist: {form_submission_id}")
+        
         # Get form submission
         form_submission = session.query(CustomerFormData).filter_by(id=form_submission_id).first()
         if not form_submission:
+            current_app.logger.error(f"❌ Form submission not found: {form_submission_id}")
             return jsonify({'error': 'Form submission not found'}), 404
         
         # Parse form data
@@ -74,11 +83,12 @@ def generate_quote_from_checklist(form_submission_id):
         form_type = form_data.get('form_type', '').lower()
         checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
         
-        current_app.logger.info(f"Generating {checklist_type} quote from checklist {form_submission_id}")
+        current_app.logger.info(f"📊 Detected checklist type: {checklist_type}")
         
         # Get customer
         customer = session.query(Customer).filter_by(id=form_submission.customer_id).first()
         if not customer:
+            current_app.logger.error(f"❌ Customer not found: {form_submission.customer_id}")
             return jsonify({'error': 'Customer not found'}), 404
         
         # Create quotation
@@ -88,15 +98,18 @@ def generate_quote_from_checklist(form_submission_id):
             reference_number=ref_num,
             total=0,
             status='Draft',
-            notes=f"Auto-generated from {checklist_type} checklist"
+            notes=f"Auto-generated from {checklist_type} checklist",
+            created_by=get_current_user_email()
         )
         session.add(quotation)
         session.flush()
         
+        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}")
+        
         # Extract items from checklist
         extracted_items = extract_checklist_items(form_data, checklist_type)
         
-        current_app.logger.info(f"Extracted {len(extracted_items)} items from checklist")
+        current_app.logger.info(f"📦 Extracted {len(extracted_items)} items from checklist")
         
         # Add items to quotation
         total = 0
@@ -119,6 +132,8 @@ def generate_quote_from_checklist(form_submission_id):
         quotation.total = total
         session.commit()
         
+        current_app.logger.info(f"✅ Quote generation complete: {ref_num} with {len(extracted_items)} items")
+        
         return jsonify({
             'success': True,
             'quotation_id': quotation.id,
@@ -131,18 +146,21 @@ def generate_quote_from_checklist(form_submission_id):
     
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error generating quotation: {e}")
+        current_app.logger.error(f"❌ Error generating quotation: {e}")
         import traceback
-        traceback.print_exc()
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@quotation_bp.route('/quotations/<int:quotation_id>/match-prices', methods=['POST'])
+@quotation_bp.route('/quotations/<int:quotation_id>/match-prices', methods=['POST', 'OPTIONS'])
 @token_required
 def match_item_price(quotation_id):
     """Match quote item with price list based on dimensions"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
     session = SessionLocal()
     try:
         data = request.json
@@ -327,29 +345,34 @@ def extract_checklist_items(form_data: dict, checklist_type: str) -> list:
             })
         
         # APPLIANCES
+        appliance_names = ["Oven", "Microwave", "Washing Machine", "Dryer", "HOB", "Extractor", "INTG Dishwasher"]
         for idx, appliance in enumerate(form_data.get('appliances', [])):
             if appliance.get('make') or appliance.get('model'):
-                appliance_name = appliance.get('appliance_name', f'Appliance {idx + 1}')
+                name = appliance_names[idx] if idx < len(appliance_names) else f'Appliance {idx + 1}'
                 items.append({
-                    'item_name': appliance_name,
+                    'item_name': name,
                     'description': f"{appliance.get('make', '')} {appliance.get('model', '')}".strip(),
                     'price': 0,
                     'needs_manual_pricing': True,
                 })
         
         # INTEGRATED APPLIANCES
-        if form_data.get('integ_fridge'):
+        if form_data.get('integ_fridge_make') or form_data.get('integ_fridge_model'):
+            qty = int(form_data.get('integ_fridge_qty', 1)) if form_data.get('integ_fridge_qty') else 1
             items.append({
                 'item_name': 'Integrated Fridge',
-                'description': form_data.get('integ_fridge'),
+                'description': f"{form_data.get('integ_fridge_make', '')} {form_data.get('integ_fridge_model', '')}".strip(),
+                'quantity': qty,
                 'price': 0,
                 'needs_manual_pricing': True,
             })
         
-        if form_data.get('integ_freezer'):
+        if form_data.get('integ_freezer_make') or form_data.get('integ_freezer_model'):
+            qty = int(form_data.get('integ_freezer_qty', 1)) if form_data.get('integ_freezer_qty') else 1
             items.append({
                 'item_name': 'Integrated Freezer',
-                'description': form_data.get('integ_freezer'),
+                'description': f"{form_data.get('integ_freezer_make', '')} {form_data.get('integ_freezer_model', '')}".strip(),
+                'quantity': qty,
                 'price': 0,
                 'needs_manual_pricing': True,
             })
