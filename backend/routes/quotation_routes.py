@@ -31,21 +31,30 @@ def handle_quotations():
         if request.method == 'POST':
             data = request.json
             
+            # ✅ FIXED: Get items_data BEFORE calculating total
+            items_data = data.get('items', [])
+            
+            # Calculate total from items
+            total = sum(
+                float(item.get('amount', 0)) * int(item.get('quantity', 1))
+                for item in items_data
+            )
+            
             # Generate reference number
             ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{session.query(Quotation).count() + 1}"
             
             quotation = Quotation(
                 customer_id=data.get('customer_id'),
                 reference_number=ref_num,
-                total=0,
+                total=total,  # ✅ Now uses calculated total
                 status=data.get('status', 'Draft'),
                 notes=data.get('notes', '')
             )
             session.add(quotation)
             session.flush()
 
-            items = data.get('items', [])
-            for item in items:
+            # Add items to quotation
+            for item in items_data:
                 q_item = QuotationItem(
                     quotation_id=quotation.id,
                     item=item.get('item', ''),
