@@ -142,13 +142,16 @@ def generate_quote_from_checklist(form_submission_id):
         
         current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}, Ref: {ref_num}, Project ID: {project_id}")
         
-        # Extract items from checklist
-        extracted_items = extract_checklist_items(form_data, checklist_type)
+        # ✅ FIXED: Extract items from checklist with price matching (pass session)
+        extracted_items = extract_checklist_items(form_data, checklist_type, session)
         
         current_app.logger.info(f"📦 Extracted {len(extracted_items)} items from checklist")
         
         # Add items to quotation
         total = 0
+        matched_items = 0
+        manual_items = 0
+        
         for item_data in extracted_items:
             quote_item = QuotationItem(
                 quotation_id=quotation.id,
@@ -160,25 +163,37 @@ def generate_quote_from_checklist(form_submission_id):
                 height=item_data.get('height'),
                 depth=item_data.get('depth'),
                 amount=item_data.get('price', 0),
-                needs_manual_pricing=item_data.get('needs_manual_pricing', False)
+                needs_manual_pricing=item_data.get('needs_manual_pricing', False),
+                price_list_item_id=item_data.get('price_list_item_id')
             )
             session.add(quote_item)
             total += quote_item.amount * quote_item.quantity
+            
+            # Count matched vs manual pricing items
+            if item_data.get('needs_manual_pricing'):
+                manual_items += 1
+            else:
+                matched_items += 1
         
         quotation.total = total
         session.commit()
         
-        current_app.logger.info(f"✅ Quote generation complete: {ref_num} with {len(extracted_items)} items")
+        current_app.logger.info(f"✅ Quote generation complete: {ref_num}")
+        current_app.logger.info(f"   💰 Total: £{total:.2f}")
+        current_app.logger.info(f"   ✅ Auto-priced items: {matched_items}")
+        current_app.logger.info(f"   ⚠️  Manual pricing needed: {manual_items}")
         
         return jsonify({
             'success': True,
             'quotation_id': quotation.id,
             'reference_number': quotation.reference_number,
             'items_count': len(extracted_items),
+            'matched_items': matched_items,
+            'manual_items': manual_items,
             'total': float(total),
             'checklist_type': checklist_type,
             'project_id': project_id,
-            'message': f'Quote generated with {len(extracted_items)} items'
+            'message': f'Quote generated: {matched_items} items auto-priced, {manual_items} need manual pricing'
         }), 201
     
     except Exception as e:
@@ -277,108 +292,254 @@ def match_item_price(quotation_id):
         session.close()
 
 
-def extract_checklist_items(form_data: dict, checklist_type: str) -> list:
-    """Extract billable items from checklist"""
+def extract_checklist_items(form_data: dict, checklist_type: str, session) -> list:
+    """Extract billable items from checklist with automatic price matching"""
     items = []
+    
+    current_app.logger.info(f"📦 Extracting items from {checklist_type} checklist")
+    
+    # Helper function to find price in database
+    def find_price(item_name, color=None, width=None, height=None, depth=None):
+        """
+        Search price list for matching item.
+        Returns (price, price_list_item_id, width, height, depth, needs_manual_pricing)
+        """
+        try:
+            current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{checklist_type}'")
+            
+            # Map common checklist names to price list names
+            name_mappings = {
+                'door': ['Door', 'robe', 'wardrobe'],
+                'bedside': ['Bedside', 'Bedside Cabinet'],
+                'bedside cabinets': ['Bedside', 'Bedside Cabinet'],
+                'bedside cabinet': ['Bedside', 'Bedside Cabinet'],
+                'dresser': ['Dresser', 'Dresser/Desk'],
+                'dresser/desk': ['Dresser', 'Dresser/Desk'],
+                'mirror': ['Mirror'],
+                'end panel': ['End Panel', 'Panel'],
+                'panel': ['End Panel', 'Panel'],
+                'plinth': ['Plinth', 'Plinth/Filler'],
+                'plinth/filler': ['Plinth', 'Plinth/Filler'],
+                'handle': ['Handle'],
+                'handles': ['Handle'],
+            }
+            
+            # Get search terms
+            item_lower = item_name.lower().strip()
+            search_terms = name_mappings.get(item_lower, [item_name])
+            
+            current_app.logger.info(f"📝 Search terms: {search_terms}")
+            
+            # Try to find matching items
+            matched_items = []
+            
+            for term in search_terms:
+                query = session.query(PriceListItem).filter(
+                    PriceListItem.category == checklist_type,
+                    PriceListItem.active == True,
+                    PriceListItem.item_name.ilike(f'%{term}%')
+                )
+                
+                # For dimension-based items, order by price (smallest first)
+                results = query.order_by(PriceListItem.base_price.asc()).all()
+                matched_items.extend(results)
+            
+            if matched_items:
+                # Use the first (cheapest/smallest) match as default
+                best_match = matched_items[0]
+                
+                current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{best_match.base_price} ({best_match.width}mm)")
+                
+                return (
+                    float(best_match.base_price),
+                    best_match.id,
+                    best_match.width,
+                    best_match.height,
+                    best_match.depth,
+                    False  # needs_manual_pricing = False because we found a price
+                )
+            
+            # No match found
+            current_app.logger.warning(f"⚠️  No price found for: {item_name}")
+            return (0, None, None, None, None, True)
+            
+        except Exception as e:
+            current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
+            return (0, None, None, None, None, True)
     
     # DOORS - Main door
     if form_data.get('door_style') and form_data.get('door_color'):
         door_desc = f"{form_data.get('door_style')} - {form_data.get('door_manufacturer', '')} {form_data.get('door_name', '')}".strip()
+        color = form_data.get('door_color', '')
+        
+        price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
         
         items.append({
             'item_name': 'Door',
             'description': door_desc,
-            'color': form_data.get('door_color', ''),
-            'price': 0,
+            'color': color,
+            'price': price,
             'quantity': 1,
-            'needs_manual_pricing': True,
+            'width': width,
+            'height': height,
+            'depth': depth,
+            'needs_manual_pricing': needs_manual,
+            'price_list_item_id': price_list_id
         })
+        
+        current_app.logger.info(f"  ✅ Door: £{price} (ID: {price_list_id})")
     
     # ADDITIONAL DOORS
     for idx, door in enumerate(form_data.get('additional_doors', [])):
         if door.get('door_style'):
             door_desc = f"{door.get('door_style')} - {door.get('door_manufacturer', '')} {door.get('door_name', '')}".strip()
             qty = int(door.get('quantity', 1)) if door.get('quantity') else 1
+            color = door.get('door_color', '')
+            
+            price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
             
             items.append({
                 'item_name': f'Additional Door {idx + 1}',
                 'description': door_desc,
-                'color': door.get('door_color', ''),
+                'color': color,
                 'quantity': qty,
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
+            
+            current_app.logger.info(f"  ✅ Additional Door {idx + 1}: £{price} x{qty}")
     
     # PANELS
     if form_data.get('end_panel_color'):
+        color = form_data.get('end_panel_color')
+        price, price_list_id, width, height, depth, needs_manual = find_price('end panel', color=color)
+        
         items.append({
             'item_name': 'End Panel',
             'description': 'End Panel',
-            'color': form_data.get('end_panel_color'),
-            'price': 0,
-            'needs_manual_pricing': True,
+            'color': color,
+            'price': price,
+            'width': width,
+            'height': height,
+            'depth': depth,
+            'needs_manual_pricing': needs_manual,
+            'price_list_item_id': price_list_id
         })
+        
+        current_app.logger.info(f"  ✅ End Panel: £{price}")
     
     # PLINTH/FILLER
     if form_data.get('plinth_filler_color'):
+        color = form_data.get('plinth_filler_color')
+        price, price_list_id, width, height, depth, needs_manual = find_price('plinth', color=color)
+        
         items.append({
             'item_name': 'Plinth/Filler',
             'description': 'Plinth/Filler',
-            'color': form_data.get('plinth_filler_color'),
-            'price': 0,
-            'needs_manual_pricing': True,
+            'color': color,
+            'price': price,
+            'width': width,
+            'height': height,
+            'depth': depth,
+            'needs_manual_pricing': needs_manual,
+            'price_list_item_id': price_list_id
         })
+        
+        current_app.logger.info(f"  ✅ Plinth/Filler: £{price}")
     
     # HANDLES
     if form_data.get('handles_code'):
         qty = int(form_data.get('handles_quantity', 1)) if form_data.get('handles_quantity') else 1
+        price, price_list_id, width, height, depth, needs_manual = find_price('handle')
+        
         items.append({
             'item_name': 'Handles',
             'description': f"Code: {form_data.get('handles_code')} - Size: {form_data.get('handles_size', 'N/A')}",
             'quantity': qty,
-            'price': 0,
-            'needs_manual_pricing': True,
+            'price': price,
+            'width': width,
+            'height': height,
+            'depth': depth,
+            'needs_manual_pricing': needs_manual,
+            'price_list_item_id': price_list_id
         })
+        
+        current_app.logger.info(f"  ✅ Handles: £{price} x{qty}")
     
     # BEDROOM SPECIFIC
     if checklist_type == 'bedroom':
         if form_data.get('bedside_cabinets_type'):
             qty = int(form_data.get('bedside_cabinets_qty', 1)) if form_data.get('bedside_cabinets_qty') else 1
+            price, price_list_id, width, height, depth, needs_manual = find_price('bedside')
+            
             items.append({
                 'item_name': 'Bedside Cabinets',
                 'description': form_data.get('bedside_cabinets_type'),
                 'quantity': qty,
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
+            
+            current_app.logger.info(f"  ✅ Bedside Cabinets: £{price} x{qty}")
         
         if form_data.get('dresser_desk') == 'yes':
+            price, price_list_id, width, height, depth, needs_manual = find_price('dresser')
+            
             items.append({
                 'item_name': 'Dresser/Desk',
                 'description': form_data.get('dresser_desk_details', 'Dresser/Desk'),
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
+            
+            current_app.logger.info(f"  ✅ Dresser/Desk: £{price}")
         
         if form_data.get('mirror_type'):
-            qty = int(form_data.get('mirror_qty', 1)) if form_data.get('mirror_qty') else 1
+            qty = int(form_data.get('mirror_qty', 0)) if form_data.get('mirror_qty') else 0
+            price, price_list_id, width, height, depth, needs_manual = find_price('mirror')
+            
             items.append({
                 'item_name': 'Mirror',
                 'description': form_data.get('mirror_type'),
                 'quantity': qty,
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
+            
+            current_app.logger.info(f"  ✅ Mirror: £{price} x{qty}")
     
     # KITCHEN SPECIFIC
     elif checklist_type == 'kitchen':
         if form_data.get('worktop_material_type'):
+            color = form_data.get('worktop_material_color', '')
+            price, price_list_id, width, height, depth, needs_manual = find_price('Worktop', color=color)
+            
             items.append({
                 'item_name': 'Worktop',
                 'description': f"{form_data.get('worktop_material_type')} - {form_data.get('worktop_size', '')}",
-                'color': form_data.get('worktop_material_color', ''),
-                'price': 0,
-                'needs_manual_pricing': True,
+                'color': color,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
         
         # APPLIANCES
@@ -386,49 +547,81 @@ def extract_checklist_items(form_data: dict, checklist_type: str) -> list:
         for idx, appliance in enumerate(form_data.get('appliances', [])):
             if appliance.get('make') or appliance.get('model'):
                 name = appliance_names[idx] if idx < len(appliance_names) else f'Appliance {idx + 1}'
+                price, price_list_id, width, height, depth, needs_manual = find_price(name)
+                
                 items.append({
                     'item_name': name,
                     'description': f"{appliance.get('make', '')} {appliance.get('model', '')}".strip(),
-                    'price': 0,
-                    'needs_manual_pricing': True,
+                    'price': price,
+                    'width': width,
+                    'height': height,
+                    'depth': depth,
+                    'needs_manual_pricing': needs_manual,
+                    'price_list_item_id': price_list_id
                 })
         
         # INTEGRATED APPLIANCES
         if form_data.get('integ_fridge_make') or form_data.get('integ_fridge_model'):
             qty = int(form_data.get('integ_fridge_qty', 1)) if form_data.get('integ_fridge_qty') else 1
+            price, price_list_id, width, height, depth, needs_manual = find_price('Fridge')
+            
             items.append({
                 'item_name': 'Integrated Fridge',
                 'description': f"{form_data.get('integ_fridge_make', '')} {form_data.get('integ_fridge_model', '')}".strip(),
                 'quantity': qty,
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
         
         if form_data.get('integ_freezer_make') or form_data.get('integ_freezer_model'):
             qty = int(form_data.get('integ_freezer_qty', 1)) if form_data.get('integ_freezer_qty') else 1
+            price, price_list_id, width, height, depth, needs_manual = find_price('Freezer')
+            
             items.append({
                 'item_name': 'Integrated Freezer',
                 'description': f"{form_data.get('integ_freezer_make', '')} {form_data.get('integ_freezer_model', '')}".strip(),
                 'quantity': qty,
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
         
         if form_data.get('sink_details'):
+            price, price_list_id, width, height, depth, needs_manual = find_price('Sink')
+            
             items.append({
                 'item_name': 'Sink',
                 'description': f"{form_data.get('sink_details')} - {form_data.get('sink_model', '')}",
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
         
         if form_data.get('tap_details'):
+            price, price_list_id, width, height, depth, needs_manual = find_price('Tap')
+            
             items.append({
                 'item_name': 'Tap',
                 'description': f"{form_data.get('tap_details')} - {form_data.get('tap_model', '')}",
-                'price': 0,
-                'needs_manual_pricing': True,
+                'price': price,
+                'width': width,
+                'height': height,
+                'depth': depth,
+                'needs_manual_pricing': needs_manual,
+                'price_list_item_id': price_list_id
             })
+    
+    current_app.logger.info(f"📊 Total items extracted: {len(items)}")
     
     return items
 
@@ -663,6 +856,120 @@ def generate_quotation_pdf(quotation_id):
     
     except Exception as e:
         current_app.logger.error(f"Error generating PDF: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+def find_default_price_for_item(session, item_name, category='bedroom', color=None):
+    """
+    Find the default (smallest/cheapest) price for an item in the price list.
+    Returns (price, price_list_item_id, width, height, depth, needs_manual_pricing)
+    """
+    try:
+        current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{category}'")
+        
+        # Map common checklist names to price list names
+        name_mappings = {
+            'door': ['Door', 'robe', 'wardrobe'],
+            'bedside cabinets': ['Bedside', 'Bedside Cabinet'],
+            'bedside cabinet': ['Bedside', 'Bedside Cabinet'],
+            'dresser/desk': ['Dresser', 'Dresser/Desk'],
+            'dresser': ['Dresser', 'Dresser/Desk'],
+            'mirror': ['Mirror'],
+            'end panel': ['End Panel', 'Panel'],
+            'panel': ['End Panel', 'Panel'],
+            'plinth/filler': ['Plinth', 'Plinth/Filler'],
+            'plinth': ['Plinth', 'Plinth/Filler'],
+            'handles': ['Handle'],
+            'handle': ['Handle'],
+        }
+        
+        # Get search terms
+        item_lower = item_name.lower().strip()
+        search_terms = name_mappings.get(item_lower, [item_name])
+        
+        current_app.logger.info(f"📝 Search terms: {search_terms}")
+        
+        # Try to find matching items
+        matched_items = []
+        
+        for term in search_terms:
+            query = session.query(PriceListItem).filter(
+                PriceListItem.category == category,
+                PriceListItem.active == True,
+                PriceListItem.item_name.ilike(f'%{term}%')
+            )
+            
+            # For dimension-based items, get the smallest/cheapest
+            results = query.order_by(PriceListItem.base_price.asc()).all()
+            matched_items.extend(results)
+        
+        if matched_items:
+            # Use the first (cheapest) match
+            best_match = matched_items[0]
+            
+            current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{best_match.base_price}")
+            
+            return (
+                float(best_match.base_price),
+                best_match.id,
+                best_match.width,
+                best_match.height,
+                best_match.depth,
+                False  # needs_manual_pricing = False because we found a price
+            )
+        
+        # No match found
+        current_app.logger.warning(f"⚠️  No price found for: {item_name}")
+        return (0, None, None, None, None, True)
+        
+    except Exception as e:
+        current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
+        return (0, None, None, None, None, True)
+
+@quotation_bp.route('/quotations/<int:quotation_id>/items/<int:item_id>', methods=['DELETE', 'OPTIONS'])
+@token_required
+def delete_quotation_item(quotation_id, item_id):
+    """Delete a single quotation item"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        # Get the item
+        item = session.query(QuotationItem).filter_by(
+            id=item_id,
+            quotation_id=quotation_id
+        ).first()
+        
+        if not item:
+            return jsonify({'error': 'Item not found'}), 404
+        
+        # Delete the item
+        session.delete(item)
+        
+        # Recalculate quotation total
+        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+        remaining_items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
+        
+        total = sum(i.amount * i.quantity for i in remaining_items if i.id != item_id)
+        quotation.total = total
+        quotation.updated_at = datetime.utcnow()
+        
+        session.commit()
+        
+        current_app.logger.info(f"✅ Deleted item {item_id} from quotation {quotation_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Item deleted successfully',
+            'new_total': float(total),
+            'remaining_items': len(remaining_items) - 1
+        }), 200
+    
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error deleting item: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
