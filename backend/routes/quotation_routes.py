@@ -95,10 +95,14 @@ def generate_quote_from_checklist(form_submission_id):
             current_app.logger.error(f"❌ Customer not found: {form_submission.customer_id}")
             return jsonify({'error': 'Customer not found'}), 404
         
+        # ✅ Get project_id from form submission if it exists
+        project_id = form_submission.project_id if hasattr(form_submission, 'project_id') else None
+        
         # Create quotation
         ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{str(form_submission_id)[:8]}"
         quotation = Quotation(
             customer_id=form_submission.customer_id,
+            project_id=project_id,  # ✅ Save project association
             reference_number=ref_num,
             total=0,
             status='Draft',
@@ -107,7 +111,7 @@ def generate_quote_from_checklist(form_submission_id):
         session.add(quotation)
         session.flush()
         
-        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}")
+        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}, Project ID: {project_id}")
         
         # Extract items from checklist
         extracted_items = extract_checklist_items(form_data, checklist_type)
@@ -144,7 +148,8 @@ def generate_quote_from_checklist(form_submission_id):
             'items_count': len(extracted_items),
             'total': float(total),
             'checklist_type': checklist_type,
-            'message': f'Quote generated with {len(extracted_items)} items. Please review and add dimensions for pricing.'
+            'project_id': project_id,  # ✅ Return project_id
+            'message': f'Quote generated with {len(extracted_items)} items. Opening PDF preview...'
         }), 201
     
     except Exception as e:

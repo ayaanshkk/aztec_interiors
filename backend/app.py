@@ -115,7 +115,7 @@ def create_app():
     )
 
     app.register_blueprint(auth_routes.auth_bp)
-    app.register_blueprint(approvals_routes.approvals_bp)
+    # app.register_blueprint(approvals_routes.approvals_bp)
     app.register_blueprint(form_routes.form_bp)
     app.register_blueprint(customer_routes.customer_bp)
     app.register_blueprint(db_routes.db_bp)

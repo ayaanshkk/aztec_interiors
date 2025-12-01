@@ -734,6 +734,7 @@ class Quotation(Base):
 
     id = Column(Integer, primary_key=True)
     customer_id = Column(String(36), ForeignKey('customers.id'), nullable=False)
+    project_id = Column(String(36), ForeignKey('projects.id'), nullable=True)
     reference_number = Column(String(50), unique=True)
     total = Column(Numeric(10, 2), nullable=False)
     status = Column(String(20), default='Draft')
