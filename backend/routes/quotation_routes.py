@@ -1,9 +1,14 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, send_file
 from backend.db import SessionLocal
 from backend.models import CustomerFormData, Customer, Quotation, QuotationItem, PriceListItem
 from backend.routes.auth_helpers import token_required
 import json
 from datetime import datetime
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 quotation_bp = Blueprint('quotations', __name__)
 
@@ -80,6 +85,26 @@ def generate_quote_from_checklist(form_submission_id):
             current_app.logger.error(f"❌ Form submission not found: {form_submission_id}")
             return jsonify({'error': 'Form submission not found'}), 404
         
+        # ✅ CHECK: Does a quote already exist for this checklist?
+        existing_quote = session.query(Quotation).filter(
+            Quotation.reference_number.like(f"%{str(form_submission_id)[:8]}%")
+        ).first()
+        
+        if existing_quote:
+            current_app.logger.info(f"✅ Quote already exists: {existing_quote.reference_number}")
+            
+            # Return existing quote data
+            return jsonify({
+                'success': True,
+                'quotation_id': existing_quote.id,
+                'reference_number': existing_quote.reference_number,
+                'items_count': len(existing_quote.items) if existing_quote.items else 0,
+                'total': float(existing_quote.total),
+                'checklist_type': 'bedroom' if 'bed' in str(existing_quote.notes).lower() else 'kitchen',
+                'project_id': existing_quote.project_id,
+                'message': 'Quote already exists for this checklist'
+            }), 200
+        
         # Parse form data
         form_data = json.loads(form_submission.form_data) if isinstance(form_submission.form_data, str) else form_submission.form_data
         
@@ -98,20 +123,24 @@ def generate_quote_from_checklist(form_submission_id):
         # ✅ Get project_id from form submission if it exists
         project_id = form_submission.project_id if hasattr(form_submission, 'project_id') else None
         
+        # ✅ FIXED: Generate unique reference number with timestamp
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        ref_num = f"Q-{timestamp}-{str(form_submission_id)[:8]}"
+        
         # Create quotation
-        ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{str(form_submission_id)[:8]}"
         quotation = Quotation(
             customer_id=form_submission.customer_id,
-            project_id=project_id,  # ✅ Save project association
+            project_id=project_id,
             reference_number=ref_num,
             total=0,
             status='Draft',
             notes=f"Auto-generated from {checklist_type} checklist",
+            created_by=get_current_user_email()
         )
         session.add(quotation)
         session.flush()
         
-        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}, Project ID: {project_id}")
+        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}, Ref: {ref_num}, Project ID: {project_id}")
         
         # Extract items from checklist
         extracted_items = extract_checklist_items(form_data, checklist_type)
@@ -148,8 +177,8 @@ def generate_quote_from_checklist(form_submission_id):
             'items_count': len(extracted_items),
             'total': float(total),
             'checklist_type': checklist_type,
-            'project_id': project_id,  # ✅ Return project_id
-            'message': f'Quote generated with {len(extracted_items)} items. Opening PDF preview...'
+            'project_id': project_id,
+            'message': f'Quote generated with {len(extracted_items)} items'
         }), 201
     
     except Exception as e:
@@ -402,3 +431,238 @@ def extract_checklist_items(form_data: dict, checklist_type: str) -> list:
             })
     
     return items
+
+@quotation_bp.route('/quotations/<int:quotation_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+@token_required
+def handle_single_quotation(quotation_id):
+    """GET, UPDATE, or DELETE a single quotation"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+        
+        if not quotation:
+            return jsonify({'error': 'Quotation not found'}), 404
+        
+        if request.method == 'GET':
+            # ✅ Get customer details
+            customer = session.query(Customer).filter_by(id=quotation.customer_id).first()
+            
+            # Build response with full details
+            response = {
+                'id': quotation.id,
+                'reference_number': quotation.reference_number,
+                'customer_id': quotation.customer_id,
+                'customer_name': customer.name if customer else 'Unknown',
+                'customer_address': customer.address if customer else None,
+                'customer_phone': customer.phone if customer else None,
+                'project_id': quotation.project_id,
+                'total': float(quotation.total),
+                'status': quotation.status,
+                'notes': quotation.notes,
+                'valid_until': quotation.valid_until.isoformat() if quotation.valid_until else None,
+                'created_at': quotation.created_at.isoformat() if quotation.created_at else None,
+                'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None,
+                'items': []
+            }
+            
+            # Add items
+            for item in quotation.items:
+                response['items'].append({
+                    'id': item.id,
+                    'item': item.item,
+                    'description': item.description,
+                    'color': item.color,
+                    'quantity': item.quantity,
+                    'amount': float(item.amount),
+                    'width': item.width,
+                    'height': item.height,
+                    'depth': item.depth,
+                    'needs_manual_pricing': item.needs_manual_pricing
+                })
+            
+            return jsonify(response), 200
+        
+        elif request.method == 'PUT':
+            # Update quotation
+            data = request.json
+            
+            if 'status' in data:
+                quotation.status = data['status']
+            if 'notes' in data:
+                quotation.notes = data['notes']
+            if 'total' in data:
+                quotation.total = data['total']
+            if 'valid_until' in data:
+                quotation.valid_until = datetime.fromisoformat(data['valid_until']) if data['valid_until'] else None
+            
+            quotation.updated_by = get_current_user_email()
+            quotation.updated_at = datetime.utcnow()
+            
+            session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Quotation updated successfully'
+            }), 200
+        
+        elif request.method == 'DELETE':
+            # Delete quotation and its items (cascade handles items)
+            session.delete(quotation)
+            session.commit()
+            
+            current_app.logger.info(f"✅ Deleted quotation: {quotation.reference_number}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Quotation deleted successfully'
+            }), 200
+    
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error handling quotation {quotation_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+@quotation_bp.route('/quotations', methods=['GET'])
+@token_required
+def get_quotations():
+    """GET all quotations with optional filters"""
+    session = SessionLocal()
+    try:
+        query = session.query(Quotation)
+        
+        # Filter by customer_id
+        customer_id = request.args.get('customer_id')
+        if customer_id:
+            query = query.filter_by(customer_id=customer_id)
+        
+        # Filter by project_id
+        project_id = request.args.get('project_id')
+        if project_id:
+            query = query.filter_by(project_id=project_id)
+        
+        # Order by created date (newest first)
+        quotations = query.order_by(Quotation.created_at.desc()).all()
+        
+        # Build response
+        result = []
+        for quote in quotations:
+            customer = session.query(Customer).filter_by(id=quote.customer_id).first()
+            
+            result.append({
+                'id': quote.id,
+                'reference_number': quote.reference_number,
+                'customer_id': quote.customer_id,
+                'customer_name': customer.name if customer else 'Unknown',
+                'project_id': quote.project_id,
+                'total': float(quote.total),
+                'status': quote.status,
+                'notes': quote.notes,
+                'items_count': len(quote.items) if quote.items else 0,
+                'created_at': quote.created_at.isoformat() if quote.created_at else None,
+                'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
+            })
+        
+        return jsonify(result), 200
+    
+    except Exception as e:
+        current_app.logger.error(f"Error fetching quotations: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+@quotation_bp.route('/quotations/<int:quotation_id>/pdf', methods=['GET', 'OPTIONS'])
+@token_required
+def generate_quotation_pdf(quotation_id):
+    """Generate PDF for quotation"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+    
+    session = SessionLocal()
+    try:
+        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+        
+        if not quotation:
+            return jsonify({'error': 'Quotation not found'}), 404
+        
+        # Get customer
+        customer = session.query(Customer).filter_by(id=quotation.customer_id).first()
+        
+        # Create PDF in memory
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        elements = []
+        styles = getSampleStyleSheet()
+        
+        # Title
+        title = Paragraph(f"<b>QUOTATION {quotation.reference_number}</b>", styles['Title'])
+        elements.append(title)
+        elements.append(Spacer(1, 20))
+        
+        # Customer Info
+        customer_info = f"""
+        <b>Customer:</b> {customer.name if customer else 'N/A'}<br/>
+        <b>Address:</b> {customer.address if customer and customer.address else 'N/A'}<br/>
+        <b>Phone:</b> {customer.phone if customer and customer.phone else 'N/A'}<br/>
+        <b>Date:</b> {quotation.created_at.strftime('%d %B %Y') if quotation.created_at else 'N/A'}
+        """
+        elements.append(Paragraph(customer_info, styles['Normal']))
+        elements.append(Spacer(1, 20))
+        
+        # Items Table
+        table_data = [['Item', 'Description', 'Color', 'Qty', 'Amount']]
+        
+        for item in quotation.items:
+            table_data.append([
+                item.item or '',
+                item.description or '',
+                item.color or '',
+                str(item.quantity),
+                f"£{float(item.amount):.2f}"
+            ])
+        
+        # Total row
+        table_data.append(['', '', '', 'TOTAL:', f"£{float(quotation.total):.2f}"])
+        
+        # Create table
+        table = Table(table_data, colWidths=[100, 200, 80, 40, 80])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        
+        elements.append(table)
+        elements.append(Spacer(1, 20))
+        
+        # Notes
+        if quotation.notes:
+            notes = Paragraph(f"<b>Notes:</b><br/>{quotation.notes}", styles['Normal'])
+            elements.append(notes)
+        
+        # Build PDF
+        doc.build(elements)
+        buffer.seek(0)
+        
+        return send_file(
+            buffer,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f'Quotation_{quotation.reference_number}.pdf'
+        )
+    
+    except Exception as e:
+        current_app.logger.error(f"Error generating PDF: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
