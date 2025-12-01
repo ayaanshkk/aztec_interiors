@@ -750,6 +750,29 @@ class Quotation(Base):
     product_items = relationship('ProductQuoteItem', back_populates='quotation', lazy=True, cascade='all, delete-orphan')
     job = relationship('Job', back_populates='quotation', uselist=False)
 
+    # ✅ ADD THIS METHOD
+    def to_dict(self, include_items=False):
+        data = {
+            'id': self.id,
+            'customer_id': self.customer_id,
+            'project_id': self.project_id,
+            'reference_number': self.reference_number,
+            'total': float(self.total) if self.total else 0.0,
+            'status': self.status,
+            'valid_until': self.valid_until.isoformat() if self.valid_until else None,
+            'notes': self.notes,
+            'created_by': self.created_by,
+            'updated_by': self.updated_by,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        
+        if include_items:
+            data['items'] = [item.to_dict() for item in self.items] if self.items else []
+            data['product_items'] = [item.to_dict() for item in self.product_items] if self.product_items else []
+        
+        return data
+
 
 class QuotationItem(Base):
     __tablename__ = 'quotation_items'
@@ -760,9 +783,8 @@ class QuotationItem(Base):
     description = Column(Text)
     color = Column(String(50))
     amount = Column(Float, nullable=False)
-    quotation = relationship('Quotation', back_populates='items')
     quantity = Column(Integer, default=1)
-    width = Column(Integer, nullable=True)  # For dimension-based pricing
+    width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     depth = Column(Integer, nullable=True)
     needs_manual_pricing = Column(Boolean, default=False)
@@ -774,6 +796,23 @@ class QuotationItem(Base):
     def __repr__(self):
         return f'<QuotationItem {self.item} (Quotation {self.quotation_id})>'
 
+    # ✅ ADD THIS METHOD
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'quotation_id': self.quotation_id,
+            'item': self.item,
+            'description': self.description,
+            'color': self.color,
+            'amount': float(self.amount) if self.amount else 0.0,
+            'quantity': self.quantity,
+            'width': self.width,
+            'height': self.height,
+            'depth': self.depth,
+            'needs_manual_pricing': self.needs_manual_pricing,
+            'price_list_item_id': self.price_list_item_id,
+        }
+
 
 class ProductQuoteItem(Base):
     __tablename__ = 'product_quote_items'
@@ -781,15 +820,12 @@ class ProductQuoteItem(Base):
     id = Column(Integer, primary_key=True)
     quotation_id = Column(Integer, ForeignKey('quotations.id'), nullable=False)
     product_id = Column(Integer, ForeignKey('products.id'), nullable=False)
-
     quantity = Column(Integer, default=1)
     quoted_price = Column(Numeric(10, 2), nullable=False)
     tier_used = Column(String(10))
     selected_color = Column(String(50))
     custom_notes = Column(Text)
-
     line_total = Column(Numeric(10, 2))
-
     created_at = Column(DateTime, default=datetime.utcnow)
 
     quotation = relationship('Quotation', back_populates='product_items')
@@ -801,7 +837,21 @@ class ProductQuoteItem(Base):
 
     def calculate_line_total(self):
         self.line_total = (self.quoted_price or 0) * (self.quantity or 0)
-        return self.line_total
+
+    # ✅ ADD THIS METHOD
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'quotation_id': self.quotation_id,
+            'product_id': self.product_id,
+            'quantity': self.quantity,
+            'quoted_price': float(self.quoted_price) if self.quoted_price else 0.0,
+            'tier_used': self.tier_used,
+            'selected_color': self.selected_color,
+            'custom_notes': self.custom_notes,
+            'line_total': float(self.line_total) if self.line_total else 0.0,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 # ----------------------------------
