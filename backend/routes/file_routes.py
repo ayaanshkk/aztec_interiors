@@ -206,8 +206,8 @@ def get_form_document_folder():
 @token_required
 def handle_customer_drawings():
     """
-    GET: Fetch drawing documents for a customer.
-    POST: Upload a drawing/layout image or PDF and save its metadata to S3.
+    GET: Fetch drawing documents for a customer and/or project.
+    POST: Upload a drawing/layout image or PDF and save its metadata to Cloudinary.
     """
     if request.method == 'OPTIONS':
         response = jsonify()
@@ -219,21 +219,30 @@ def handle_customer_drawings():
     # --- Handle GET Request ---
     if request.method == 'GET':
         customer_id = request.args.get('customer_id')
-        if not customer_id:
-            return jsonify({'error': 'Customer ID query parameter is required'}), 400
+        project_id = request.args.get('project_id')
+        
+        # ✅ FIXED: Allow filtering by either customer_id OR project_id
+        if not customer_id and not project_id:
+            return jsonify({'error': 'Either customer_id or project_id query parameter is required'}), 400
 
         session = SessionLocal()
         try:
-            drawings = session.query(DrawingDocument)\
-                               .filter(DrawingDocument.customer_id == customer_id)\
-                               .order_by(DrawingDocument.created_at.desc())\
-                               .all()
+            # Build query based on provided filters
+            query = session.query(DrawingDocument)
+            
+            if customer_id:
+                query = query.filter(DrawingDocument.customer_id == customer_id)
+            
+            if project_id:
+                query = query.filter(DrawingDocument.project_id == project_id)
+            
+            drawings = query.order_by(DrawingDocument.created_at.desc()).all()
 
             result = [d.to_dict() for d in drawings]
             return jsonify(result), 200
 
         except Exception as e:
-            current_app.logger.error(f"Error fetching drawings for customer {customer_id}: {e}", exc_info=True)
+            current_app.logger.error(f"Error fetching drawings: {e}", exc_info=True)
             return jsonify({'error': f'Failed to fetch drawings: {str(e)}'}), 500
         finally:
             session.close()
@@ -408,8 +417,8 @@ def view_customer_drawing(filename):
 @token_required
 def handle_form_documents():
     """
-    GET: Fetch form documents for a customer.
-    POST: Upload a form document (Excel/PDF) and save its metadata to S3.
+    GET: Fetch form documents for a customer and/or project.
+    POST: Upload a form document (Excel/PDF) and save its metadata to Cloudinary.
     """
     if request.method == 'OPTIONS':
         response = jsonify()
@@ -421,21 +430,30 @@ def handle_form_documents():
     # --- Handle GET Request ---
     if request.method == 'GET':
         customer_id = request.args.get('customer_id')
-        if not customer_id:
-            return jsonify({'error': 'Customer ID query parameter is required'}), 400
+        project_id = request.args.get('project_id')
+        
+        # ✅ FIXED: Allow filtering by either customer_id OR project_id
+        if not customer_id and not project_id:
+            return jsonify({'error': 'Either customer_id or project_id query parameter is required'}), 400
 
         session = SessionLocal()
         try:
-            form_docs = session.query(FormDocument)\
-                               .filter(FormDocument.customer_id == customer_id)\
-                               .order_by(FormDocument.created_at.desc())\
-                               .all()
+            # Build query based on provided filters
+            query = session.query(FormDocument)
+            
+            if customer_id:
+                query = query.filter(FormDocument.customer_id == customer_id)
+            
+            if project_id:
+                query = query.filter(FormDocument.project_id == project_id)
+            
+            form_docs = query.order_by(FormDocument.created_at.desc()).all()
 
             result = [d.to_dict() for d in form_docs]
             return jsonify(result), 200
 
         except Exception as e:
-            current_app.logger.error(f"Error fetching form documents for customer {customer_id}: {e}", exc_info=True)
+            current_app.logger.error(f"Error fetching form documents: {e}", exc_info=True)
             return jsonify({'error': f'Failed to fetch form documents: {str(e)}'}), 500
         finally:
             session.close()
@@ -445,6 +463,7 @@ def handle_form_documents():
         session = SessionLocal()
         try:
             customer_id = request.form.get('customer_id')
+            project_id = request.form.get('project_id')  # ✅ ADD THIS
 
             if not customer_id:
                 return jsonify({'error': 'Customer ID is missing from form data'}), 400
@@ -486,6 +505,7 @@ def handle_form_documents():
             new_form_doc = FormDocument(
                 id=str(uuid.uuid4()),
                 customer_id=customer_id,
+                project_id=project_id if project_id else None,  # ✅ ADD THIS
                 file_name=filename,
                 storage_path=cloudinary_url,  # Store actual Cloudinary URL for backend reference
                 file_url=backend_view_url,     # Store backend view URL (what user clicks)
@@ -776,5 +796,58 @@ def update_drawing_document(drawing_id):
         session.rollback()
         current_app.logger.error(f"Error updating drawing {drawing_id}: {e}", exc_info=True)
         return jsonify({'error': f'Failed to update drawing: {str(e)}'}), 500
+    finally:
+        session.close()
+
+@file_bp.route('/files/forms/<form_doc_id>', methods=['PATCH', 'DELETE', 'OPTIONS'])
+@token_required
+def update_or_delete_form_document(form_doc_id):
+    """Update or delete a form document"""
+    if request.method == 'OPTIONS':
+        resp = jsonify()
+        resp.headers.add('Access-Control-Allow-Origin', '*')
+        resp.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        resp.headers.add('Access-Control-Allow-Methods', 'PATCH, DELETE, OPTIONS')
+        return resp
+
+    session = SessionLocal()
+    try:
+        form_doc = session.get(FormDocument, form_doc_id)
+        if not form_doc:
+            return jsonify({'error': 'Form document not found'}), 404
+
+        # --- Handle PATCH ---
+        if request.method == 'PATCH':
+            data = request.get_json()
+            
+            # Update project_id if provided
+            if 'project_id' in data:
+                form_doc.project_id = data['project_id']
+                form_doc.updated_at = datetime.utcnow()
+            
+            session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Form document updated successfully',
+                'form_document': form_doc.to_dict()
+            }), 200
+
+        # --- Handle DELETE ---
+        elif request.method == 'DELETE':
+            # Delete from Cloudinary
+            if form_doc.storage_path:
+                delete_file_from_cloudinary(form_doc.storage_path)
+
+            # Delete from database
+            session.delete(form_doc)
+            session.commit()
+
+            return jsonify({'success': True, 'message': 'Form document deleted successfully'}), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error with form document {form_doc_id}: {e}", exc_info=True)
+        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
     finally:
         session.close()
