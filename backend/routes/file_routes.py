@@ -33,17 +33,46 @@ latest_structured_data = {}
 # Cloudinary Configuration
 # ==========================================
 
-def configure_cloudinary():
-    """Configure Cloudinary with environment variables"""
+def get_cloudinary_config():
+    """
+    Get Cloudinary configuration from environment variables.
+    Returns a dict with the config or None if not configured.
+    """
+    cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME') or os.getenv('CLOUDINARY_CLOUD_NAME')
+    api_key = os.environ.get('CLOUDINARY_API_KEY') or os.getenv('CLOUDINARY_API_KEY')
+    api_secret = os.environ.get('CLOUDINARY_API_SECRET') or os.getenv('CLOUDINARY_API_SECRET')
+    
+    if not all([cloud_name, api_key, api_secret]):
+        return None
+    
+    return {
+        'cloud_name': cloud_name,
+        'api_key': api_key,
+        'api_secret': api_secret
+    }
+
+def ensure_cloudinary_configured():
+    """Ensure Cloudinary is configured before upload operations"""
+    config = get_cloudinary_config()
+    
+    if not config:
+        error_msg = "Cloudinary configuration is missing. Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET environment variables."
+        if hasattr(current_app, 'logger'):
+            current_app.logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # Configure Cloudinary with the retrieved config
     cloudinary.config(
-        cloud_name=os.environ.get('CLOUDINARY_CLOUD_NAME'),
-        api_key=os.environ.get('CLOUDINARY_API_KEY'),
-        api_secret=os.environ.get('CLOUDINARY_API_SECRET'),
+        cloud_name=config['cloud_name'],
+        api_key=config['api_key'],
+        api_secret=config['api_secret'],
         secure=True
     )
-
-# Initialize Cloudinary configuration
-configure_cloudinary()
+    
+    if hasattr(current_app, 'logger'):
+        current_app.logger.info(f"Cloudinary configured with cloud_name: {config['cloud_name']}")
+    
+    return True
 
 def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings'):
     """
@@ -59,6 +88,9 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         tuple: (view_url, public_id)
     """
     try:
+        # ✅ Ensure Cloudinary is configured before upload
+        ensure_cloudinary_configured()
+        
         # Create folder structure in Cloudinary
         folder = f"aztec-interiors/{file_type}/{customer_id}"
         
@@ -66,7 +98,6 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         file.seek(0)
         
         # Determine resource type based on file extension and MIME type
-        # Check both the filename and the original file.filename
         file_extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
         original_extension = file.filename.rsplit('.', 1)[-1].lower() if hasattr(file, 'filename') and '.' in file.filename else ''
         mime_type = file.mimetype if hasattr(file, 'mimetype') else ''
@@ -117,33 +148,70 @@ def upload_file_to_cloudinary(file, filename, customer_id, file_type='drawings')
         # Return backend URL (not Cloudinary URL) so it gets stored in file_url
         return backend_view_url, cloudinary_url  # Return both: backend URL and Cloudinary URL
         
+    except ValueError as ve:
+        # Configuration error - re-raise with clear message
+        current_app.logger.error(f"Cloudinary configuration error: {ve}")
+        raise
     except Exception as e:
         current_app.logger.error(f"Error uploading to Cloudinary: {e}", exc_info=True)
         raise Exception(f"Failed to upload file to Cloudinary: {str(e)}")
 
-def delete_file_from_cloudinary(public_id):
-    """Delete a file from Cloudinary"""
+def delete_file_from_cloudinary(storage_path):
+    """
+    Delete a file from Cloudinary
+    Args:
+        storage_path: Can be either a public_id or a full Cloudinary URL
+    """
     try:
+        # ✅ Ensure Cloudinary is configured before delete
+        ensure_cloudinary_configured()
+        
+        # Extract public_id from URL if it's a full URL
+        public_id = storage_path
+        
+        if storage_path and 'cloudinary.com' in storage_path:
+            # Extract public_id from URL
+            # URL format: https://res.cloudinary.com/{cloud_name}/{resource_type}/upload/{transformations}/{version}/{public_id}.{format}
+            parts = storage_path.split('/upload/')
+            if len(parts) > 1:
+                # Get everything after /upload/ and remove file extension
+                path_after_upload = parts[1]
+                # Remove version number if present (v1234567890/)
+                if path_after_upload.startswith('v') and '/' in path_after_upload:
+                    path_after_upload = '/'.join(path_after_upload.split('/')[1:])
+                # Remove any transformation flags (fl_attachment/)
+                if 'fl_' in path_after_upload:
+                    path_parts = path_after_upload.split('/')
+                    path_after_upload = '/'.join([p for p in path_parts if not p.startswith('fl_')])
+                # The public_id is everything before the file extension
+                public_id = path_after_upload.rsplit('.', 1)[0] if '.' in path_after_upload else path_after_upload
+        
+        current_app.logger.info(f"Attempting to delete from Cloudinary with public_id: {public_id}")
+        
         # Try to delete as 'raw' first (PDFs, Excel, etc.)
         result = cloudinary.uploader.destroy(public_id, resource_type='raw')
         
         # If raw deletion failed, try as image
-        if result.get('result') != 'ok':
+        if result.get('result') not in ['ok', 'not found']:
             result = cloudinary.uploader.destroy(public_id, resource_type='image')
         
         # If still failed, try as video (just in case)
-        if result.get('result') != 'ok':
+        if result.get('result') not in ['ok', 'not found']:
             result = cloudinary.uploader.destroy(public_id, resource_type='video')
         
-        success = result.get('result') == 'ok' or result.get('result') == 'not found'
+        success = result.get('result') in ['ok', 'not found']
         
         if success:
-            current_app.logger.info(f"File deleted from Cloudinary: {public_id}")
+            current_app.logger.info(f"File deleted from Cloudinary: {public_id}, result: {result.get('result')}")
         else:
             current_app.logger.warning(f"Could not delete from Cloudinary: {public_id}, result: {result}")
         
         return success
         
+    except ValueError as ve:
+        # Configuration error
+        current_app.logger.error(f"Cloudinary configuration error during delete: {ve}")
+        return False
     except Exception as e:
         current_app.logger.error(f"Error deleting from Cloudinary: {e}", exc_info=True)
         return False
