@@ -4,64 +4,38 @@
 import os
 import sys
 
-# Add the current directory to the Python path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add parent directory to Python path so 'backend' can be found as a package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from app import app, db
-    print("✅ Successfully imported app and db")
+    from backend.app import app
+    print("[OK] Successfully imported app")
 except ImportError as e:
-    print(f"❌ Import error: {e}")
+    print(f"[ERROR] Import error: {e}")
     sys.exit(1)
 
 def create_tables():
     """Create database tables"""
     try:
         with app.app_context():
+            from backend.db import Base, engine
+            from backend import models
             Base.metadata.create_all(bind=engine)
-
-            print("✅ Database tables created successfully!")
-        return True
+            print("[OK] Database tables created")
     except Exception as e:
-        print(f"❌ Error creating database tables: {e}")
-        return False
+        print(f"[ERROR] Failed to create tables: {e}")
 
-def test_routes():
-    """Test if routes are loaded"""
-    try:
-        rules = list(app.url_map.iter_rules())
-        print(f"✅ Loaded {len(rules)} routes:")
-        for rule in rules:
-            if not rule.endpoint.startswith('static'):
-                print(f"  - {rule.endpoint}: {rule.rule} [{', '.join(rule.methods)}]")
-        return True
-    except Exception as e:
-        print(f"❌ Error checking routes: {e}")
-        return False
-
-if __name__ == '__main__':
-    print("🚀 Starting Aztec Interiors Backend...")
-    print("=" * 50)
+if __name__ == "__main__":
+    import argparse
     
-    # Create database tables
-    if not create_tables():
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Run the Flask backend server")
+    parser.add_argument("--init-db", action="store_true", help="Initialize database tables")
+    args = parser.parse_args()
     
-    # Test routes
-    if not test_routes():
-        sys.exit(1)
+    if args.init_db:
+        create_tables()
     
-    print("=" * 50)
-    print("🎉 Backend setup complete!")
-    print("📍 Server will start at: http://127.0.0.1:5000")
-    print("💡 Available form generation endpoint: /generate-form-link")
-    print("=" * 50)
-    
-    # Start the server
-    try:
-        app.run(debug=True, host='127.0.0.1', port=5000)
-    except KeyboardInterrupt:
-        print("\n👋 Server stopped by user")
-    except Exception as e:
-        print(f"❌ Server error: {e}")
-        sys.exit(1)
+    port = int(os.getenv("PORT", 5001))
+    debug = os.getenv("FLASK_DEBUG", "true").lower() == "true"
+    print(f"[INFO] Starting Flask server on port {port}, debug={debug}")
+    app.run(host="0.0.0.0", port=port, debug=debug)

@@ -13,9 +13,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # Fallback to local SQLite database if DATABASE_URL not set
 if not DATABASE_URL:
     DATABASE_URL = "sqlite:///./local.db"
-    print("⚠️ Using local SQLite database (DATABASE_URL not found in environment).")
+    print("[WARNING] Using local SQLite database (DATABASE_URL not found in environment).")
 else:
-    print("✅ Using hosted PostgreSQL database.")
+    print("[OK] Using hosted PostgreSQL database.")
 
 # Create SQLAlchemy engine
 engine = create_engine(

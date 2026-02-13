@@ -19,6 +19,100 @@ def get_current_user_email(data=None):
     return data.get('created_by', 'System') if isinstance(data, dict) else 'System'
 
 
+def get_category_code(notes=None, category=None):
+    """
+    Extract category code from notes or explicit category parameter.
+    
+    Returns:
+        K = Kitchen
+        B = Bedroom  
+        W = Wardrobe
+        R = Remedial
+        O = Other
+    """
+    # First priority: explicit category parameter
+    if category:
+        cat_lower = category.lower()
+        if 'kitchen' in cat_lower:
+            return 'K'
+        elif 'bedroom' in cat_lower:
+            return 'B'
+        elif 'wardrobe' in cat_lower:
+            return 'W'
+        elif 'remedial' in cat_lower:
+            return 'R'
+    
+    # Second priority: extract from notes
+    if notes:
+        notes_lower = notes.lower()
+        if 'kitchen' in notes_lower:
+            return 'K'
+        elif 'bedroom' in notes_lower:
+            return 'B'
+        elif 'wardrobe' in notes_lower:
+            return 'W'
+        elif 'remedial' in notes_lower:
+            return 'R'
+    
+    return 'O'  # Default to Other
+
+
+def generate_quote_reference(session, category_code=None, notes=None):
+    """
+    Generate a systematic quote reference number in format: AZT-YYYY-{CAT}-{SEQ}
+    
+    Examples:
+        AZT-2026-K-001  (Kitchen quote #1 in 2026)
+        AZT-2026-B-015  (Bedroom quote #15 in 2026)
+        AZT-2026-W-003  (Wardrobe quote #3 in 2026)
+    
+    Args:
+        session: Database session
+        category_code: Optional category code (K, B, W, R, O). If not provided, extracted from notes.
+        notes: Notes field to extract category from if category_code not provided
+    
+    Returns:
+        str: Generated reference number
+    """
+    current_year = datetime.utcnow().year
+    
+    # Determine category code
+    if not category_code:
+        category_code = get_category_code(notes)
+    
+    # Query for existing quotes with this year and category
+    # Pattern: AZT-{YEAR}-{CAT}-%
+    prefix_pattern = f"AZT-{current_year}-{category_code}-"
+    
+    existing_quotes = session.query(Quotation).filter(
+        Quotation.reference_number.like(prefix_pattern + '%')
+    ).all()
+    
+    # Find the highest sequence number
+    max_seq = 0
+    for quote in existing_quotes:
+        try:
+            # Extract sequence number from reference (last 3 digits)
+            ref = quote.reference_number
+            if ref and len(ref) >= 3:
+                seq_str = ref[-3:]
+                if seq_str.isdigit():
+                    seq = int(seq_str)
+                    if seq > max_seq:
+                        max_seq = seq
+        except (ValueError, IndexError):
+            continue
+    
+    # Generate next sequence number (padded to 3 digits)
+    next_seq = max_seq + 1
+    seq_padded = f"{next_seq:03d}"
+    
+    # Build reference number: AZT-YYYY-CAT-SEQ
+    reference_number = f"AZT-{current_year}-{category_code}-{seq_padded}"
+    
+    return reference_number
+
+
 @quotation_bp.route('/quotations', methods=['GET', 'POST', 'OPTIONS'])
 @token_required
 def handle_quotations():
@@ -40,8 +134,10 @@ def handle_quotations():
                 for item in items_data
             )
             
-            # Generate reference number
-            ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{session.query(Quotation).count() + 1}"
+            # Generate systematic reference number using new format
+            notes = data.get('notes', '')
+            category = data.get('category')  # Optional explicit category
+            ref_num = generate_quote_reference(session, category_code=category, notes=notes)
             
             quotation = Quotation(
                 customer_id=data.get('customer_id'),
@@ -67,7 +163,19 @@ def handle_quotations():
             return jsonify({'id': quotation.id, 'message': 'Quotation created successfully'}), 201
 
         # GET all quotations
-        quotations = session.query(Quotation).order_by(Quotation.created_at.desc()).all()
+        # 🔍 DEBUG: Log customer_id parameter if present
+        customer_id_param = request.args.get('customer_id')
+        current_app.logger.info(f"🔍 GET /quotations called - customer_id param: {customer_id_param}")
+        
+        query = session.query(Quotation)
+        
+        # ✅ FIX: Filter by customer_id if provided
+        if customer_id_param:
+            current_app.logger.info(f"🔍 Filtering quotations by customer_id: {customer_id_param}")
+            query = query.filter(Quotation.customer_id == customer_id_param)
+        
+        quotations = query.order_by(Quotation.created_at.desc()).all()
+        current_app.logger.info(f"🔍 Returning {len(quotations)} quotations")
         return jsonify([q.to_dict(include_items=True) for q in quotations])
     except Exception as e:
         session.rollback()
@@ -94,13 +202,14 @@ def generate_quote_from_checklist(form_submission_id):
             current_app.logger.error(f"❌ Form submission not found: {form_submission_id}")
             return jsonify({'error': 'Form submission not found'}), 404
         
-        # ✅ CHECK: Does a quote already exist for this checklist?
+        # ✅ CHECK: Does a quote already exist for this checklist AND customer?
         existing_quote = session.query(Quotation).filter(
-            Quotation.reference_number.like(f"%{str(form_submission_id)[:8]}%")
+            Quotation.reference_number.like(f"%{str(form_submission_id)[:8]}%"),
+            Quotation.customer_id == form_submission.customer_id  # 🔍 FIX: Also check customer_id
         ).first()
         
         if existing_quote:
-            current_app.logger.info(f"✅ Quote already exists: {existing_quote.reference_number}")
+            current_app.logger.info(f"✅ Quote already exists for this checklist and customer: {existing_quote.reference_number}")
             
             # Return existing quote data
             return jsonify({
@@ -113,6 +222,14 @@ def generate_quote_from_checklist(form_submission_id):
                 'project_id': existing_quote.project_id,
                 'message': 'Quote already exists for this checklist'
             }), 200
+        
+        # 🔍 DEBUG: Log if quote exists but for different customer
+        orphan_quote = session.query(Quotation).filter(
+            Quotation.reference_number.like(f"%{str(form_submission_id)[:8]}%")
+        ).first()
+        if orphan_quote:
+            current_app.logger.warning(f"⚠️ Quote {orphan_quote.reference_number} exists but belongs to customer {orphan_quote.customer_id}, not {form_submission.customer_id}")
+            current_app.logger.warning(f"⚠️ Creating NEW quote for correct customer...")
         
         # Parse form data
         form_data = json.loads(form_submission.form_data) if isinstance(form_submission.form_data, str) else form_submission.form_data
@@ -129,12 +246,16 @@ def generate_quote_from_checklist(form_submission_id):
             current_app.logger.error(f"❌ Customer not found: {form_submission.customer_id}")
             return jsonify({'error': 'Customer not found'}), 404
         
+        # 🔍 DEBUG: Log customer association
+        current_app.logger.info(f"🔍 Form submission {form_submission_id} is linked to customer: {customer.id} ({customer.name})")
+        current_app.logger.info(f"🔍 Kishori Kulkarni customer ID should be used - checking if form matches...")
+        
         # ✅ Get project_id from form submission if it exists
         project_id = form_submission.project_id if hasattr(form_submission, 'project_id') else None
         
-        # ✅ FIXED: Generate unique reference number with timestamp
-        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        ref_num = f"Q-{timestamp}-{str(form_submission_id)[:8]}"
+        # ✅ Generate systematic reference number using new format
+        # Use checklist_type to determine category code (kitchen -> K, bedroom -> B)
+        ref_num = generate_quote_reference(session, category_code=checklist_type, notes=f"Auto-generated from {checklist_type} checklist")
         
         # Create quotation
         quotation = Quotation(
@@ -229,60 +350,84 @@ def match_item_price(quotation_id):
         width = data.get('width')
         height = data.get('height')
         depth = data.get('depth')
-        
+        door_style = data.get('door_style')  # Get door_style from request
+
         # Get quotation item
         quote_item = session.query(QuotationItem).filter_by(
             id=item_id,
             quotation_id=quotation_id
         ).first()
-        
+
         if not quote_item:
             return jsonify({'error': 'Quote item not found'}), 404
-        
+
         # Get quotation to determine category
         quotation = session.query(Quotation).filter_by(id=quotation_id).first()
         if not quotation:
             return jsonify({'error': 'Quotation not found'}), 404
-        
+
         # Determine category from notes or assume bedroom
         category = 'bedroom'  # Default
         if quotation.notes and 'kitchen' in quotation.notes.lower():
             category = 'kitchen'
-        
+
+        # Map door styles to TOTAL price fields (cabinet + door)
+        door_style_price_field = {
+            'slab': 'total_basic',
+            'vinyl': 'total_vinyl',
+            'glazed': 'total_black_glass',  # glazed doors use total black glass price
+            'shaker': 'total_acrylic',  # shaker doors use total acrylic price
+            'standard': 'base_price',  # standard uses base price
+            'N/A': 'base_price',  # default to base price
+        }
+
+        # Get the price field for the door style (default to base_price)
+        price_field = door_style_price_field.get(door_style, 'base_price') if door_style else 'base_price'
+
+        current_app.logger.info(f"💰 match_item_price: Using price field '{price_field}' for door_style '{door_style}'")
+
         # Find matching price list item
         query = session.query(PriceListItem).filter_by(category=category)
-        
+
         if width:
             query = query.filter_by(width=width)
         if height:
             query = query.filter_by(height=height)
         if depth:
             query = query.filter_by(depth=depth)
-        
+
         matched_item = query.first()
-        
+
         if matched_item:
+            # Get the price based on door style
+            price_value = getattr(matched_item, price_field, matched_item.base_price)
+
+            # If the door style price is not set, fall back to base_price
+            if price_value is None:
+                price_value = matched_item.base_price
+                current_app.logger.warning(f"⚠️  {price_field} is None for {matched_item.item_name}, using base_price")
+
             # Update quote item
-            quote_item.amount = float(matched_item.base_price)
+            quote_item.amount = float(price_value)
             quote_item.price_list_item_id = matched_item.id
             quote_item.needs_manual_pricing = False
             quote_item.width = width
             quote_item.height = height
             quote_item.depth = depth
-            
+
             # Recalculate total
             items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
             total = sum(item.amount * item.quantity for item in items)
             quotation.total = total
-            
+
             session.commit()
-            
+
             return jsonify({
                 'success': True,
                 'matched_item': {
                     'code': matched_item.item_code,
                     'name': matched_item.item_name,
-                    'price': float(matched_item.base_price)
+                    'price': float(price_value)
                 },
                 'new_amount': float(quote_item.amount),
                 'new_total': float(total)
@@ -300,67 +445,270 @@ def match_item_price(quotation_id):
     finally:
         session.close()
 
+@quotation_bp.route('/quotations/<int:quotation_id>/available-prices', methods=['GET', 'OPTIONS'])
+@token_required
+def get_available_prices(quotation_id):
+    """Get available prices for an item based on name and dimensions"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
 
+    session = SessionLocal()
+    try:
+        item_name = request.args.get('item_name', '')
+        style = request.args.get('style', 'standard')
+        width = request.args.get('width', type=int)
+        height = request.args.get('height', type=int)
+        depth = request.args.get('depth', type=int)
+
+        # 🔍 DEBUG LOG: Log all incoming parameters
+        current_app.logger.info(f"🔍 get_available_prices called with:")
+        current_app.logger.info(f"   - quotation_id: {quotation_id}")
+        current_app.logger.info(f"   - item_name: '{item_name}'")
+        current_app.logger.info(f"   - style (door_style): '{style}'")
+        current_app.logger.info(f"   - width: {width}")
+        current_app.logger.info(f"   - height: {height}")
+        current_app.logger.info(f"   - depth: {depth}")
+
+        # Build base query
+        query = session.query(PriceListItem).filter(
+            PriceListItem.active == True
+        )
+        
+        # Search by item name if provided (case-insensitive, partial match)
+        if item_name:
+            # Map common names
+            name_mappings = {
+                'bedside': '%drawer%',  # Bedside cabinets have drawers
+                'bedside cabinets': '%drawer%',
+                'bedside cabinet': '%drawer%',
+                'end panel': '%end panel%',
+                'panel': '%panel%',
+                'plinth': '%plinth%',
+                'plinth/filler': '%plinth%',
+                'door': '%robe%',  # Doors usually part of wardrobe/robe items
+            }
+            
+            item_lower = item_name.lower().strip()
+            search_pattern = name_mappings.get(item_lower, f'%{item_name}%')
+            
+            query = query.filter(PriceListItem.item_name.ilike(search_pattern))
+        
+        # Filter by dimensions if provided
+        if width:
+            query = query.filter(PriceListItem.width == width)
+        if height:
+            query = query.filter(PriceListItem.height == height)
+        if depth:
+            query = query.filter(PriceListItem.depth == depth)
+        
+        # Get matching items, ordered by price (cheapest first)
+        items = query.order_by(PriceListItem.base_price.asc()).limit(10).all()
+        
+        if not items:
+            current_app.logger.warning(f"⚠️  No matching items found for {item_name}")
+            # Return empty array, not error - frontend expects this
+            return jsonify({
+                'options': []  # ← Changed from 'available_prices' to 'options'
+            }), 200
+        
+        # Map door styles to TOTAL price fields (cabinet + door)
+        door_style_price_field = {
+            'slab': 'total_basic',
+            'vinyl': 'total_vinyl',
+            'glazed': 'total_black_glass',  # glazed doors use total black glass price
+            'shaker': 'total_acrylic',  # shaker doors use total acrylic price
+            'standard': 'base_price',  # standard uses base price
+            'N/A': 'base_price',  # default to base price
+        }
+
+        # Get the price field for the door style (default to base_price)
+        price_field = door_style_price_field.get(style, 'base_price') if style else 'base_price'
+
+        current_app.logger.info(f"💰 get_available_prices: Using price field '{price_field}' for door_style '{style}'")
+
+        # Format response - MUST use 'options' key to match frontend
+        options = []
+        for item in items:
+            # Get the price based on door style
+            price_value = getattr(item, price_field, item.base_price)
+
+            # If the door style price is not set, fall back to base_price
+            if price_value is None:
+                price_value = item.base_price
+                current_app.logger.warning(f"⚠️  {price_field} is None for {item.item_name}, using base_price")
+            else:
+                current_app.logger.info(f"✅ Found match: {item.item_name} - £{price_value} ({item.width}mm) using {price_field}")
+
+            options.append({
+                'width': item.width,
+                'height': item.height,
+                'depth': item.depth,
+                'price': float(price_value),
+                'price_list_item_id': item.id,
+                'item_name': item.item_name,
+                'item_code': item.item_code
+            })
+
+        current_app.logger.info(f"✅ Found {len(options)} matching items")
+
+        return jsonify({
+            'options': options  # ← Changed from 'available_prices' to 'options'
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"❌ Error getting available prices: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+                
 def extract_checklist_items(form_data: dict, checklist_type: str, session) -> list:
     """Extract billable items from checklist with automatic price matching"""
-    items = []
+    items = []  
     
     current_app.logger.info(f"📦 Extracting items from {checklist_type} checklist")
     
     # Helper function to find price in database
-    def find_price(item_name, color=None, width=None, height=None, depth=None):
+    def find_price(item_name, color=None, width=None, height=None, depth=None, door_style=None):
         """
         Search price list for matching item.
         Returns (price, price_list_item_id, width, height, depth, needs_manual_pricing)
         """
         try:
-            current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{checklist_type}'")
+            current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{checklist_type}' (door_style: '{door_style}')")
+
+            # Map door styles to TOTAL price fields (cabinet + door)
+            door_style_price_field = {
+                'slab': 'total_basic',
+                'vinyl': 'total_vinyl',
+                'glazed': 'total_black_glass',  # glazed doors use total black glass price
+                'shaker': 'total_acrylic',  # shaker doors use total acrylic price
+                'standard': 'base_price',  # standard uses base price
+                'N/A': 'base_price',  # default to base price
+            }
+
+            # Get the price field for the door style (default to base_price)
+            price_field = door_style_price_field.get(door_style, 'base_price') if door_style else 'base_price'
+
+            current_app.logger.info(f"💰 Using price field: '{price_field}' for door_style: '{door_style}'")
             
-            # Map common checklist names to price list names
+            # Map common checklist names to price list search terms and subcategories
+            # Based on actual price list items: wardrobes, drawers, linen press, wall units, etc.
             name_mappings = {
-                'door': ['Door', 'robe', 'wardrobe'],
-                'bedside': ['Bedside', 'Bedside Cabinet'],
-                'bedside cabinets': ['Bedside', 'Bedside Cabinet'],
-                'bedside cabinet': ['Bedside', 'Bedside Cabinet'],
-                'dresser': ['Dresser', 'Dresser/Desk'],
-                'dresser/desk': ['Dresser', 'Dresser/Desk'],
-                'mirror': ['Mirror'],
-                'end panel': ['End Panel', 'Panel'],
-                'panel': ['End Panel', 'Panel'],
-                'plinth': ['Plinth', 'Plinth/Filler'],
-                'plinth/filler': ['Plinth', 'Plinth/Filler'],
-                'handle': ['Handle'],
-                'handles': ['Handle'],
+                # Bedroom items - map to actual price list item names/subcategories
+                'door': ['robe', 'wardrobe', 'wide robe'],  # Doors are part of wardrobes
+                'bedside': ['drawer', 'BDRW', 'chest'],  # Bedside cabinets are drawer units
+                'bedside cabinets': ['drawer', 'BDRW', 'chest'],
+                'bedside cabinet': ['drawer', 'BDRW', 'chest'],
+                'dresser': ['drawer', 'BDRW', 'chest'],  # Dressers are drawer units
+                'dresser/desk': ['drawer', 'BDRW', 'chest'],
+                'mirror': ['mirror', 'Mirror'],
+                'end panel': ['panel', 'Panel'],
+                'panel': ['panel', 'Panel'],
+                'plinth': ['plinth', 'Plinth'],
+                'plinth/filler': ['plinth', 'Plinth'],
+                'handle': ['handle', 'Handle'],
+                'handles': ['handle', 'Handle'],
+                'wardrobe': ['robe', 'wide robe'],
+                'robe': ['robe', 'wide robe'],
+                'drawer': ['drawer', 'BDRW'],
+                'drawers': ['drawer', 'BDRW'],
+                'linen press': ['linen press', 'LP'],
+                'bridging': ['bridging', 'BRS'],
+                'sliding door': ['sliding', 'SDSC', 'SDFM'],
+                
+                # Kitchen items
+                'worktop': ['worktop', 'Worktop'],
+                'sink': ['sink', 'Sink'],
+                'tap': ['tap', 'Tap'],
+                'oven': ['oven', 'Oven'],
+                'microwave': ['microwave', 'Microwave'],
+                'hob': ['hob', 'HOB'],
+                'extractor': ['extractor', 'Extractor'],
+                'dishwasher': ['dishwasher', 'Dishwasher'],
+                'fridge': ['fridge', 'Fridge'],
+                'freezer': ['freezer', 'Freezer'],
+                'washing machine': ['washing', 'Washing'],
+                'dryer': ['dryer', 'Dryer'],
+            }
+            
+            # Subcategory mappings for better matching
+            subcategory_mappings = {
+                'door': 'Wardrobes',
+                'wardrobe': 'Wardrobes',
+                'robe': 'Wardrobes',
+                'bedside': 'Chest of drawers',
+                'bedside cabinets': 'Chest of drawers',
+                'dresser': 'Chest of drawers',
+                'dresser/desk': 'Chest of drawers',
+                'drawer': 'Chest of drawers',
+                'drawers': 'Chest of drawers',
+                'linen press': 'Linen Press',
+                'bridging': 'Wall Units',
+                'sliding door': 'Wardrobes',
             }
             
             # Get search terms
             item_lower = item_name.lower().strip()
             search_terms = name_mappings.get(item_lower, [item_name])
+            target_subcategory = subcategory_mappings.get(item_lower)
             
-            current_app.logger.info(f"📝 Search terms: {search_terms}")
+            current_app.logger.info(f"📝 Search terms: {search_terms}, Subcategory: {target_subcategory}")
             
             # Try to find matching items
             matched_items = []
             
-            for term in search_terms:
+            # First, try to match by subcategory if available
+            if target_subcategory:
                 query = session.query(PriceListItem).filter(
                     PriceListItem.category == checklist_type,
                     PriceListItem.active == True,
-                    PriceListItem.item_name.ilike(f'%{term}%')
+                    PriceListItem.subcategory == target_subcategory
                 )
-                
-                # For dimension-based items, order by price (smallest first)
                 results = query.order_by(PriceListItem.base_price.asc()).all()
-                matched_items.extend(results)
+                if results:
+                    matched_items.extend(results)
+                    current_app.logger.info(f"📦 Found {len(results)} items in subcategory '{target_subcategory}'")
+            
+            # If no subcategory match, search by name terms
+            if not matched_items:
+                for term in search_terms:
+                    query = session.query(PriceListItem).filter(
+                        PriceListItem.category == checklist_type,
+                        PriceListItem.active == True,
+                        PriceListItem.item_name.ilike(f'%{term}%')
+                    )
+                    
+                    # For dimension-based items, order by price (smallest first)
+                    results = query.order_by(PriceListItem.base_price.asc()).all()
+                    matched_items.extend(results)
+            
+            # Remove duplicates while preserving order
+            seen_ids = set()
+            unique_items = []
+            for item in matched_items:
+                if item.id not in seen_ids:
+                    seen_ids.add(item.id)
+                    unique_items.append(item)
+            matched_items = unique_items
             
             if matched_items:
                 # Use the first (cheapest/smallest) match as default
                 best_match = matched_items[0]
-                
-                current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{best_match.base_price} ({best_match.width}mm)")
-                
+
+                # Get the price based on door style
+                price_value = getattr(best_match, price_field, best_match.base_price)
+
+                # If the door style price is not set, fall back to base_price
+                if price_value is None:
+                    price_value = best_match.base_price
+                    current_app.logger.warning(f"⚠️  {price_field} is None for {best_match.item_name}, using base_price")
+                else:
+                    current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{price_value} ({best_match.width}mm) using {price_field}")
+
                 return (
-                    float(best_match.base_price),
+                    float(price_value),
                     best_match.id,
                     best_match.width,
                     best_match.height,
@@ -368,20 +716,60 @@ def extract_checklist_items(form_data: dict, checklist_type: str, session) -> li
                     False  # needs_manual_pricing = False because we found a price
                 )
             
-            # No match found
+            # No match found - try a broader search as fallback
+            current_app.logger.warning(f"⚠️  No exact match for: {item_name}, trying broader search...")
+            
+            # Fallback: search for any item containing any word from the item name
+            words = item_lower.split()
+            for word in words:
+                if len(word) > 2:  # Skip short words
+                    query = session.query(PriceListItem).filter(
+                        PriceListItem.category == checklist_type,
+                        PriceListItem.active == True,
+                        PriceListItem.item_name.ilike(f'%{word}%')
+                    )
+                    results = query.order_by(PriceListItem.base_price.asc()).first()
+                    if results:
+                        current_app.logger.info(f"✅ Fallback match found: {results.item_name} - £{results.base_price}")
+                        return (
+                            float(results.base_price),
+                            results.id,
+                            results.width,
+                            results.height,
+                            results.depth,
+                            True  # needs_manual_pricing = True for fallback matches
+                        )
+            
+            # No match found at all
             current_app.logger.warning(f"⚠️  No price found for: {item_name}")
             return (0, None, None, None, None, True)
             
         except Exception as e:
             current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
+            import traceback
+            current_app.logger.error(traceback.format_exc())
             return (0, None, None, None, None, True)
     
     # DOORS - Main door
     if form_data.get('door_style') and form_data.get('door_color'):
-        door_desc = f"{form_data.get('door_style')} - {form_data.get('door_manufacturer', '')} {form_data.get('door_name', '')}".strip()
+        door_style = form_data.get('door_style')
+        door_manufacturer = form_data.get('door_manufacturer', '')
+        door_name = form_data.get('door_name', '')
+
+        # DEBUG: Log the door values to diagnose the issue
+        current_app.logger.info(f"🚪 DOOR VALUES - door_style: '{door_style}', door_manufacturer: '{door_manufacturer}', door_name: '{door_name}'")
+
+        # Only include manufacturer and name if door_style is 'vinyl'
+        if door_style == 'vinyl':
+            door_desc = f"{door_style} - {door_manufacturer} {door_name}".strip()
+        else:
+            door_desc = door_style
+
+        current_app.logger.info(f"🚪 DOOR DESCRIPTION: '{door_desc}'")
+
         color = form_data.get('door_color', '')
-        
-        price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
+
+        price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color, door_style=door_style)
         
         items.append({
             'item_name': 'Door',
@@ -401,11 +789,25 @@ def extract_checklist_items(form_data: dict, checklist_type: str, session) -> li
     # ADDITIONAL DOORS
     for idx, door in enumerate(form_data.get('additional_doors', [])):
         if door.get('door_style'):
-            door_desc = f"{door.get('door_style')} - {door.get('door_manufacturer', '')} {door.get('door_name', '')}".strip()
+            door_style = door.get('door_style')
+            door_manufacturer = door.get('door_manufacturer', '')
+            door_name = door.get('door_name', '')
+
+            # DEBUG: Log the additional door values
+            current_app.logger.info(f"🚪 ADDITIONAL DOOR {idx + 1} - door_style: '{door_style}', door_manufacturer: '{door_manufacturer}', door_name: '{door_name}'")
+
+            # Only include manufacturer and name if door_style is 'vinyl'
+            if door_style == 'vinyl':
+                door_desc = f"{door_style} - {door_manufacturer} {door_name}".strip()
+            else:
+                door_desc = door_style
+
+            current_app.logger.info(f"🚪 ADDITIONAL DOOR {idx + 1} DESCRIPTION: '{door_desc}'")
+
             qty = int(door.get('quantity', 1)) if door.get('quantity') else 1
             color = door.get('door_color', '')
-            
-            price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
+
+            price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color, door_style=door_style)
             
             items.append({
                 'item_name': f'Additional Door {idx + 1}',
@@ -777,6 +1179,109 @@ def get_quotations():
     finally:
         session.close()
 
+
+@quotation_bp.route('/quotations/<int:quotation_id>/update-descriptions-from-checklist', methods=['POST', 'OPTIONS'])
+@token_required
+def update_quote_descriptions_from_checklist(quotation_id):
+    """Update quote item descriptions based on current checklist data"""
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
+    session = SessionLocal()
+    try:
+        current_app.logger.info(f"🔄 Updating quote descriptions from checklist for quote {quotation_id}")
+
+        # Get quotation
+        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+        if not quotation:
+            return jsonify({'error': 'Quotation not found'}), 404
+
+        # Find the form submission for this customer
+        form_submission = session.query(CustomerFormData).filter_by(customer_id=quotation.customer_id).first()
+        if not form_submission:
+            current_app.logger.warning(f"⚠️ No form submission found for customer {quotation.customer_id}")
+            return jsonify({'error': 'No checklist found for this customer'}), 404
+
+        # Parse form data
+        form_data = json.loads(form_submission.form_data) if isinstance(form_submission.form_data, str) else form_submission.form_data
+
+        # Detect checklist type
+        form_type = form_data.get('form_type', '').lower()
+        checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
+
+        current_app.logger.info(f"📊 Detected checklist type: {checklist_type}")
+
+        # Update door descriptions
+        updated_count = 0
+
+        # Main door
+        door_style = form_data.get('door_style')
+        if door_style:
+            door_manufacturer = form_data.get('door_manufacturer', '')
+            door_name = form_data.get('door_name', '')
+
+            # Only include manufacturer and name if door_style is 'vinyl'
+            if door_style == 'vinyl':
+                door_desc = f"{door_style} - {door_manufacturer} {door_name}".strip()
+            else:
+                door_desc = door_style
+
+            current_app.logger.info(f"🚪 Updating door description to: '{door_desc}'")
+
+            # Find and update the door item
+            for item in quotation.items:
+                if item.item == 'Door':
+                    old_desc = item.description
+                    item.description = door_desc
+                    updated_count += 1
+                    current_app.logger.info(f"✅ Updated door description from '{old_desc}' to '{door_desc}'")
+                    break
+
+        # Additional doors
+        for idx, door in enumerate(form_data.get('additional_doors', [])):
+            door_style = door.get('door_style')
+            if door_style:
+                door_manufacturer = door.get('door_manufacturer', '')
+                door_name = door.get('door_name', '')
+
+                # Only include manufacturer and name if door_style is 'vinyl'
+                if door_style == 'vinyl':
+                    door_desc = f"{door_style} - {door_manufacturer} {door_name}".strip()
+                else:
+                    door_desc = door_style
+
+                current_app.logger.info(f"🚪 Updating additional door {idx + 1} description to: '{door_desc}'")
+
+                # Find and update the additional door item
+                for item in quotation.items:
+                    if item.item == f'Additional Door {idx + 1}':
+                        old_desc = item.description
+                        item.description = door_desc
+                        updated_count += 1
+                        current_app.logger.info(f"✅ Updated additional door {idx + 1} description from '{old_desc}' to '{door_desc}'")
+                        break
+
+        quotation.updated_by = get_current_user_email()
+        quotation.updated_at = datetime.utcnow()
+        session.commit()
+
+        current_app.logger.info(f"✅ Updated {updated_count} item descriptions for quote {quotation_id}")
+
+        return jsonify({
+            'success': True,
+            'message': f'Updated {updated_count} item descriptions',
+            'updated_count': updated_count
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating quote descriptions: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
 @quotation_bp.route('/quotations/<int:quotation_id>/pdf', methods=['GET', 'OPTIONS'])
 @token_required
 def generate_quotation_pdf(quotation_id):
@@ -936,10 +1441,10 @@ def find_default_price_for_item(session, item_name, category='bedroom', color=No
         current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
         return (0, None, None, None, None, True)
 
-@quotation_bp.route('/quotations/<int:quotation_id>/items/<int:item_id>', methods=['DELETE', 'OPTIONS'])
+@quotation_bp.route('/quotations/<int:quotation_id>/items/<int:item_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
 @token_required
-def delete_quotation_item(quotation_id, item_id):
-    """Delete a single quotation item"""
+def handle_quotation_item(quotation_id, item_id):
+    """Handle individual quotation item - GET, PUT, or DELETE"""
     if request.method == 'OPTIONS':
         return jsonify({}), 200
     
@@ -954,27 +1459,85 @@ def delete_quotation_item(quotation_id, item_id):
         if not item:
             return jsonify({'error': 'Item not found'}), 404
         
-        # Delete the item
-        session.delete(item)
+        # GET: Return item details
+        if request.method == 'GET':
+            return jsonify({
+                'id': item.id,
+                'item': item.item,
+                'description': item.description,
+                'quantity': item.quantity,
+                'amount': item.amount,
+                'width': item.width,
+                'height': item.height,
+                'depth': item.depth,
+                'price_list_item_id': item.price_list_item_id
+            })
         
-        # Recalculate quotation total
-        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
-        remaining_items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
+        # PUT: Update item
+        if request.method == 'PUT':
+            data = request.json
+            
+            # Update fields
+            if 'quantity' in data:
+                item.quantity = int(data['quantity'])
+            if 'amount' in data:
+                item.amount = float(data['amount'])
+            if 'width' in data:
+                item.width = int(data['width']) if data['width'] else None
+            if 'height' in data:
+                item.height = int(data['height']) if data['height'] else None
+            if 'depth' in data:
+                item.depth = int(data['depth']) if data['depth'] else None
+            if 'price_list_item_id' in data:
+                item.price_list_item_id = data['price_list_item_id']
+            
+            # Recalculate quotation total
+            quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+            all_items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
+            
+            total = sum(i.amount * i.quantity for i in all_items)
+            quotation.total = total
+            quotation.updated_at = datetime.utcnow()
+            
+            session.commit()
+            
+            current_app.logger.info(f"✅ Updated item {item_id} in quotation {quotation_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Item updated successfully',
+                'item': {
+                    'id': item.id,
+                    'item': item.item,
+                    'quantity': item.quantity,
+                    'amount': item.amount
+                },
+                'new_total': float(total)
+            })
         
-        total = sum(i.amount * i.quantity for i in remaining_items if i.id != item_id)
-        quotation.total = total
-        quotation.updated_at = datetime.utcnow()
-        
-        session.commit()
-        
-        current_app.logger.info(f"✅ Deleted item {item_id} from quotation {quotation_id}")
-        
-        return jsonify({
-            'success': True,
-            'message': 'Item deleted successfully',
-            'new_total': float(total),
-            'remaining_items': len(remaining_items) - 1
-        }), 200
+        # DELETE: Delete item (existing code)
+        if request.method == 'DELETE':
+            # Delete the item
+            session.delete(item)
+            
+            # Recalculate quotation total
+            quotation = session.query(Quotation).filter_by(id=quotation_id).first()
+            remaining_items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
+            
+            total = sum(i.amount * i.quantity for i in remaining_items if i.id != item_id)
+            quotation.total = total
+            quotation.updated_at = datetime.utcnow()
+            
+            session.commit()
+            
+            current_app.logger.info(f"✅ Deleted item {item_id} from quotation {quotation_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Item deleted successfully',
+                'new_total': float(total),
+                'remaining_items': len(remaining_items) - 1
+            }), 200
     
     except Exception as e:
         session.rollback()

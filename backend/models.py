@@ -9,8 +9,7 @@ from sqlalchemy.orm import relationship
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 
-from .db import Base, SessionLocal  # ✅ use declarative Base from db.py
-# from db import Base, SessionLocal
+from .db import Base, SessionLocal  # use declarative Base from db.py
 
 
 # ----------------------------------
@@ -245,15 +244,22 @@ class Customer(Base):
         if primary_job:
             self.stage = primary_job.stage
             session = SessionLocal()
-            session.add(self)
+            try:
+                session.add(self)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
 
     def get_primary_job(self):
         """Get the customer's primary (most recent or active) job"""
-        from .models import Job
-        return session.query(Job).filter(
-            Job.customer_id == self.id,
-            Job.stage != 'Cancelled'
-        ).order_by(Job.created_at.desc()).first()
+        # Use the existing jobs relationship instead of creating a new session
+        active_jobs = [job for job in self.jobs if job.stage != 'Cancelled']
+        if active_jobs:
+            return sorted(active_jobs, key=lambda j: j.created_at, reverse=True)[0]
+        return None
 
     def save(self):
         if not self.postcode and self.address:
@@ -1543,7 +1549,19 @@ class PriceListItem(Base):
     subcategory = Column(String(100))  # e.g., 'Wardrobes', 'Drawers'
     
     # Pricing
-    base_price = Column(Numeric(10, 2), nullable=False)  # 2025 Price
+    base_price = Column(Numeric(10, 2), nullable=False)  # 2025 Price (default/base price)
+
+    # Door style specific prices (base - just the door component)
+    basic_slab_price = Column(Numeric(10, 2), nullable=True)  # Price for slab doors
+    vinyl_doors_price = Column(Numeric(10, 2), nullable=True)  # Price for vinyl doors
+    acrylic_gloss_matt_price = Column(Numeric(10, 2), nullable=True)  # Price for acrylic/gloss/matt doors
+    black_glass_price = Column(Numeric(10, 2), nullable=True)  # Price for black glass doors
+    
+    # Door style specific TOTAL prices (cabinet + door)
+    total_basic = Column(Numeric(10, 2), nullable=True)  # Total price for slab doors (cabinet + door)
+    total_acrylic = Column(Numeric(10, 2), nullable=True)  # Total price for acrylic/gloss/matt doors
+    total_vinyl = Column(Numeric(10, 2), nullable=True)  # Total price for vinyl doors
+    total_black_glass = Column(Numeric(10, 2), nullable=True)  # Total price for black glass doors
     
     # Dimensions (nullable for non-dimensional items)
     width = Column(Integer, nullable=True)
@@ -1567,6 +1585,15 @@ class PriceListItem(Base):
             'description': self.description,
             'subcategory': self.subcategory,
             'base_price': float(self.base_price) if self.base_price else None,
+            'basic_slab_price': float(self.basic_slab_price) if self.basic_slab_price else None,
+            'vinyl_doors_price': float(self.vinyl_doors_price) if self.vinyl_doors_price else None,
+            'acrylic_gloss_matt_price': float(self.acrylic_gloss_matt_price) if self.acrylic_gloss_matt_price else None,
+            'black_glass_price': float(self.black_glass_price) if self.black_glass_price else None,
+            # Total prices (cabinet + door)
+            'total_basic': float(self.total_basic) if self.total_basic else None,
+            'total_acrylic': float(self.total_acrylic) if self.total_acrylic else None,
+            'total_vinyl': float(self.total_vinyl) if self.total_vinyl else None,
+            'total_black_glass': float(self.total_black_glass) if self.total_black_glass else None,
             'width': self.width,
             'height': self.height,
             'depth': self.depth,

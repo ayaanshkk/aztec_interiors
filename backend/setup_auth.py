@@ -10,8 +10,9 @@ def setup_authentication():
         print("Setting up Authentication System...")
         
         # Create tables
-        Base.metadata.create_all(bind=engine)
-
+        db.create_all()
+        
+        session = db.session
         
         # Create demo admin user
         admin_email = "admin@aztecinteriors.com"
@@ -26,13 +27,11 @@ def setup_authentication():
                 is_verified=True
             )
             admin_user.set_password("Admin123!")
-            session = SessionLocal()
-# ...do stuff...
-session.add(...)
-session.commit()
-session.close()
-.add(admin_user)
+            session.add(admin_user)
+            session.commit()
             print(f"✅ Created admin user: {admin_email}")
+        else:
+            print(f"✅ Admin user already exists: {admin_email}")
         
         # Create demo regular user
         demo_email = "demo@aztecinteriors.com"
@@ -48,13 +47,11 @@ session.close()
                 is_verified=True
             )
             demo_user.set_password("Demo123!")
-            session = SessionLocal()
-# ...do stuff...
-session.add(...)
-session.commit()
-session.close()
-.add(demo_user)
+            session.add(demo_user)
+            session.commit()
             print(f"✅ Created demo user: {demo_email}")
+        else:
+            print(f"✅ Demo user already exists: {demo_email}")
         
         # Create sample users for different roles
         sample_users = [
@@ -97,20 +94,11 @@ session.close()
                     is_verified=True
                 )
                 user.set_password("Password123!")
-                session = SessionLocal()
-# ...do stuff...
-session.add(...)
-session.commit()
-session.close()
-.add(user)
+                session.add(user)
+                session.commit()
                 print(f"✅ Created user: {user_data['email']}")
         
-        session = SessionLocal()
-# ...do stuff...
-session.add(...)
-session.commit()
-session.close()
-.commit()
+        session.close()
         
         print("\n" + "="*50)
         print("🔐 AUTHENTICATION SETUP COMPLETED")
@@ -128,11 +116,7 @@ session.close()
         print("   Role: user")
         
         print(f"\nTotal users created: {User.query.count()}")
-        print("\nNext Steps:")
-        print("1. Update your app.py to register the auth blueprint")
-        print("2. Add JWT_SECRET_KEY to your environment variables")
-        print("3. Wrap your dashboard routes with ProtectedRoute component")
-        print("4. Update your navigation to include login/logout")
+        print("\nAll users can login with these credentials!")
 
 if __name__ == '__main__':
     setup_authentication()

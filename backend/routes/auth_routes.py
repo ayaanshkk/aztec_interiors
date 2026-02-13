@@ -13,6 +13,8 @@ auth_bp = Blueprint('auth', __name__)
 
 # --- Configuration and Helpers ---
 
+DEV_MODE = os.getenv('DEV_MODE', 'False').lower() == 'true'
+
 def get_client_ip():
     """Get client IP address"""
     if request.environ.get('HTTP_X_FORWARDED_FOR') is None:
@@ -183,7 +185,7 @@ def register():
             # Generate JWT token for immediate login
             payload = {
                 'user_id': user.id,
-                'exp': datetime.utcnow() + timedelta(days=7),
+                'exp': datetime.utcnow() + timedelta(days=365),  # Dev mode: 1 year
                 'iat': datetime.utcnow()
             }
             token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
@@ -194,7 +196,7 @@ def register():
                 session_token=token,
                 ip_address=get_client_ip(),
                 user_agent=request.headers.get('User-Agent', '')[:255],
-                expires_at=datetime.utcnow() + timedelta(days=7)
+                expires_at=datetime.utcnow() + timedelta(days=365)  # Dev mode: 1 year
             )
             session.add(session_record)
             session.commit()
@@ -303,7 +305,7 @@ def login():
         # Generate JWT token
         payload = {
             'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(days=7),
+            'exp': datetime.utcnow() + timedelta(days=365),  # Dev mode: 1 year
             'iat': datetime.utcnow()
         }
         token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
@@ -314,7 +316,7 @@ def login():
             session_token=token,
             ip_address=ip,
             user_agent=request.headers.get('User-Agent', '')[:255],
-            expires_at=datetime.utcnow() + timedelta(days=7)
+            expires_at=datetime.utcnow() + timedelta(days=365)  # Dev mode: 1 year
         )
         
         session.add(user) # Update last_login time
@@ -423,7 +425,7 @@ def refresh_token():
         # 1. Generate new token
         payload = {
             'user_id': user.id,
-            'exp': datetime.utcnow() + timedelta(days=7),
+            'exp': datetime.utcnow() + timedelta(days=365),  # Dev mode: 1 year
             'iat': datetime.utcnow()
         }
         new_token = jwt.encode(payload, current_app.config['SECRET_KEY'], algorithm='HS256')
@@ -435,7 +437,7 @@ def refresh_token():
         # 3. Update session record
         if session_record:
             session_record.session_token = new_token
-            session_record.expires_at = datetime.utcnow() + timedelta(days=7)
+            session_record.expires_at = datetime.utcnow() + timedelta(days=365)  # Dev mode: 1 year
             session.commit() # 👈 Commit update
         
         return jsonify({
