@@ -1,13 +1,11 @@
+# backend/app.py (FULL create_app function replacement)
 from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
 from .db import Base, engine, SessionLocal, test_connection, init_db
-# from backend.db import Base, engine, SessionLocal, test_connection
-
 
 load_dotenv()
-
 
 def create_app():
     app = Flask(__name__)
@@ -18,17 +16,13 @@ def create_app():
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 
     # ============================================
-    # ⚙️ DATABASE INITIALIZATION (NEW LOCATION)
+    # ⚙️ DATABASE INITIALIZATION
     # ============================================
     print("🔧 Initializing database schema...")
     try:
-        # ✅ CRITICAL: Import models FIRST so SQLAlchemy knows about them
         from backend import models
-        
-        # ✅ CRITICAL: checkfirst=True ensures we don't drop existing tables
         Base.metadata.create_all(bind=engine, checkfirst=True)
         
-        # Verify tables
         from sqlalchemy import inspect
         inspector = inspect(engine)
         tables = inspector.get_table_names()
@@ -40,12 +34,23 @@ def create_app():
         traceback.print_exc()
 
     # ============================================
-    # CORS
+    # CORS - FIXED FOR LOCALHOST
     # ============================================
     CORS(
         app,
-        resources={r"/*": {"origins": "*"}},
-        supports_credentials=False,
+        resources={r"/*": {
+            "origins": [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "https://aztec-interior.vercel.app",  # Add your Vercel URL later
+            ],
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "expose_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True,
+            "max_age": 3600
+        }},
+        supports_credentials=True,
     )
 
     # ============================================
@@ -55,9 +60,10 @@ def create_app():
     def handle_preflight():
         if request.method == "OPTIONS":
             resp = jsonify({"status": "ok"})
-            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
             resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-            resp.headers["Access-Control-Allow-Headers"] = "*"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
             return resp, 200
 
     # ============================================
@@ -65,13 +71,25 @@ def create_app():
     # ============================================
     @app.after_request
     def add_cors_headers(resp):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
+        origin = request.headers.get("Origin")
+        allowed_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://aztec-interior.vercel.app",
+        ]
+        
+        if origin in allowed_origins:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+        else:
+            resp.headers["Access-Control-Allow-Origin"] = allowed_origins[0]
+            
         resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "*"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
         return resp
 
     # ============================================
-    # MOCK AUTH
+    # MOCK AUTH (DEV MODE)
     # ============================================
     @app.before_request
     def set_mock_user():
@@ -109,13 +127,13 @@ def create_app():
     # BLUEPRINTS
     # ============================================
     from backend.routes import (
-        auth_routes, approvals_routes, form_routes, db_routes,
+        auth_routes, form_routes, db_routes,
         notification_routes, assignment_routes, appliance_routes,
-        customer_routes, file_routes, materials_routes, job_routes, action_items_routes, quotation_routes,
+        customer_routes, file_routes, materials_routes, job_routes, 
+        action_items_routes, quotation_routes,
     )
 
     app.register_blueprint(auth_routes.auth_bp)
-    # app.register_blueprint(approvals_routes.approvals_bp)
     app.register_blueprint(form_routes.form_bp)
     app.register_blueprint(customer_routes.customer_bp)
     app.register_blueprint(db_routes.db_bp)
@@ -125,7 +143,7 @@ def create_app():
     app.register_blueprint(file_routes.file_bp)
     app.register_blueprint(materials_routes.materials_bp)
     app.register_blueprint(job_routes.job_bp)
-    app.register_blueprint(action_items_routes.action_items_bp)  # ✅ FIXED
+    app.register_blueprint(action_items_routes.action_items_bp)
     app.register_blueprint(quotation_routes.quotation_bp)
 
     # ============================================
@@ -133,7 +151,11 @@ def create_app():
     # ============================================
     @app.route("/health", methods=["GET"])
     def health_check():
-        return jsonify({"status": "ok", "message": "Server is running"}), 200
+        return jsonify({
+            "status": "ok", 
+            "message": "Server is running",
+            "environment": "development" if os.getenv("DEV_MODE", "false").lower() == "true" else "production"
+        }), 200
 
     return app
 
@@ -147,14 +169,7 @@ if __name__ == "__main__":
     print("🔧 INITIALISING DATABASE...")
     print("=" * 60)
 
-    # Import models to register metadata
-    from backend import models  # ensures all classes subclass Base
-
-    # # Create missing tables (safe)
-    # Base.metadata.create_all(bind=engine)
-    # test_connection()
-
-    # List tables
+    from backend import models
     from sqlalchemy import inspect
     inspector = inspect(engine)
     tables = inspector.get_table_names()
@@ -167,5 +182,9 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", 5000))
     debug_mode = os.getenv("DEV_MODE", "false").lower() == "true"
+    
+    print(f"\n🚀 Starting Flask server on http://localhost:{port}")
+    print(f"🔧 Debug mode: {debug_mode}")
+    print("=" * 60 + "\n")
+    
     app.run(debug=debug_mode, host="0.0.0.0", port=port, threaded=True)
-
