@@ -1,11 +1,10 @@
-# backend/app.py (FULL create_app function replacement)
-from flask import Flask, request, jsonify, g
+# backend/app.py - CORRECTED for StreemLyne_MT schema
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
 
-from backend.routes import tasks_routes
-from .db import Base, engine, SessionLocal, test_connection, init_db
+from .db import SessionLocal, test_connection
 
 load_dotenv()
 
@@ -18,20 +17,14 @@ def create_app():
     app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 
     # ============================================
-    # ⚙️ DATABASE INITIALIZATION
+    # ⚙️ DATABASE CONNECTION TEST
     # ============================================
-    print("🔧 Initializing database schema...")
+    print("🔧 Testing database connection...")
     try:
-        from backend import models
-        Base.metadata.create_all(bind=engine, checkfirst=True)
-        
-        from sqlalchemy import inspect
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        print(f"✅ Database schema initialized - {len(tables)} tables exist")
-        
+        test_connection()
+        print("✅ Database connection successful")
     except Exception as e:
-        print(f"❌ Database initialization failed: {e}")
+        print(f"❌ Database connection failed: {e}")
         import traceback
         traceback.print_exc()
 
@@ -44,7 +37,8 @@ def create_app():
             "origins": [
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
-                "https://aztec-interior.vercel.app",  # Add your Vercel URL later
+                "https://streemlyne.vercel.app",
+                "https://*.vercel.app",
             ],
             "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
             "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
@@ -77,10 +71,12 @@ def create_app():
         allowed_origins = [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
-            "https://aztec-interior.vercel.app",
+            "https://streemlyne.vercel.app",
         ]
         
         if origin in allowed_origins:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+        elif origin and origin.endswith(".vercel.app"):
             resp.headers["Access-Control-Allow-Origin"] = origin
         else:
             resp.headers["Access-Control-Allow-Origin"] = allowed_origins[0]
@@ -91,76 +87,112 @@ def create_app():
         return resp
 
     # ============================================
-    # MOCK AUTH (DEV MODE)
+    # BLUEPRINTS - Direct imports
     # ============================================
-    @app.before_request
-    def set_mock_user():
-        if request.method == "OPTIONS":
-            return None
+    from .routes.auth_routes import auth_bp
+    from .routes.invite_routes import invite_bp
+    from .routes.project_routes import project_bp
+    from .routes.notification_routes import notification_bp
+    from .routes.materials_routes import materials_bp
+    from .routes.quotation_routes import quotation_bp
+    from .routes.pricelist_routes import pricelist_bp
+    
+    # Existing routes
+    from .routes.form_routes import form_bp
+    from .routes.customer_routes import customer_bp
+    from .routes.appliance_routes import appliance_bp
+    from .routes.file_routes import file_bp
+    from .routes.pipeline_routes import pipeline_bp
+    from .routes.tasks_routes import tasks_bp
+    from .routes.calendar_routes import calendar_bp
+    from .routes.action_items_routes import action_items_bp
 
-        from backend.models import User
-        try:
-            session = SessionLocal()
-            user = session.query(User).first()
-            session.close()
-            if user:
-                g.user = user
-            else:
-                g.user = type("User", (), {
-                    "id": 1,
-                    "email": "dev@test.com",
-                    "first_name": "Dev",
-                    "last_name": "User",
-                    "role": "Manager",
-                    "is_active": True,
-                })()
-        except Exception:
-            g.user = type("User", (), {
-                "id": 1,
-                "email": "dev@test.com",
-                "first_name": "Dev",
-                "last_name": "User",
-                "role": "Manager",
-                "is_active": True,
-            })()
-        return None
-
-    # ============================================
-    # BLUEPRINTS
-    # ============================================
-    from backend.routes import (
-        auth_routes, form_routes,
-        notification_routes, appliance_routes,
-        customer_routes, file_routes, materials_routes, 
-        action_items_routes, quotation_routes, pipeline_routes, tasks_routes, calendar_routes, project_routes,
-    )
-
-    app.register_blueprint(auth_routes.auth_bp)
-    app.register_blueprint(form_routes.form_bp)
-    app.register_blueprint(customer_routes.customer_bp)
-    app.register_blueprint(notification_routes.notification_bp)
-    app.register_blueprint(appliance_routes.appliance_bp)
-    app.register_blueprint(file_routes.file_bp)
-    app.register_blueprint(materials_routes.materials_bp)
-    app.register_blueprint(pipeline_routes.pipeline_bp)
-    app.register_blueprint(tasks_routes.tasks_bp)
-    app.register_blueprint(calendar_routes.calendar_bp)
-    app.register_blueprint(project_routes.project_bp)
-    app.register_blueprint(action_items_routes.action_items_bp)
-    app.register_blueprint(quotation_routes.quotation_bp)
+    app.register_blueprint(auth_bp, url_prefix='/api')
+    app.register_blueprint(invite_bp)
+    app.register_blueprint(form_bp)
+    app.register_blueprint(customer_bp)
+    app.register_blueprint(project_bp)
+    app.register_blueprint(notification_bp)
+    app.register_blueprint(appliance_bp)
+    app.register_blueprint(file_bp)
+    app.register_blueprint(materials_bp)
+    app.register_blueprint(pipeline_bp)
+    app.register_blueprint(tasks_bp)
+    app.register_blueprint(calendar_bp)
+    app.register_blueprint(action_items_bp)
+    app.register_blueprint(quotation_bp)
+    app.register_blueprint(pricelist_bp)
 
     # ============================================
     # HEALTH CHECK
     # ============================================
     @app.route("/health", methods=["GET"])
     def health_check():
+        """Health check endpoint"""
+        session = SessionLocal()
+        try:
+            from sqlalchemy import text
+            session.execute(text("SELECT 1"))
+            db_status = "connected"
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+        finally:
+            session.close()
+        
         return jsonify({
             "status": "ok", 
-            "message": "Server is running",
-            "environment": "development" if os.getenv("DEV_MODE", "false").lower() == "true" else "production"
+            "message": "StreemLyne API Server",
+            "database": db_status,
+            "environment": "development" if os.getenv("DEV_MODE", "false").lower() == "true" else "production",
+            "version": "2.0.0-mt"
         }), 200
 
+    @app.route("/", methods=["GET"])
+    def root():
+        """Root endpoint"""
+        return jsonify({
+            "message": "StreemLyne Multi-Tenant CRM API",
+            "version": "2.0.0",
+            "endpoints": {
+                "health": "/health",
+                "api": "/api",
+                "auth": "/api/login"
+            }
+        }), 200
+
+    # ============================================
+    # ERROR HANDLERS
+    # ============================================
+    @app.errorhandler(404)
+    def not_found(error):
+        return jsonify({
+            "error": "Not Found",
+            "message": "The requested endpoint does not exist"
+        }), 404
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        return jsonify({
+            "error": "Internal Server Error",
+            "message": "An unexpected error occurred"
+        }), 500
+
+    @app.errorhandler(401)
+    def unauthorized(error):
+        return jsonify({
+            "error": "Unauthorized",
+            "message": "Authentication required"
+        }), 401
+
+    @app.errorhandler(403)
+    def forbidden(error):
+        return jsonify({
+            "error": "Forbidden",
+            "message": "You do not have permission to access this resource"
+        }), 403
+
     return app
+
 
 # ============================================
 # STANDALONE LAUNCH
@@ -168,26 +200,20 @@ def create_app():
 if __name__ == "__main__":
     app = create_app()
 
+    print("\n" + "=" * 60)
+    print("🚀 STREEMLYNE MULTI-TENANT CRM API")
     print("=" * 60)
-    print("🔧 INITIALISING DATABASE...")
-    print("=" * 60)
-
-    from backend import models
-    from sqlalchemy import inspect
-    inspector = inspect(engine)
-    tables = inspector.get_table_names()
-    print(f"\n📋 {len(tables)} tables detected:")
-    for t in tables:
-        print(f"   ✓ {t}")
-
-    print("\n✅ Database initialised successfully!\n")
-    print("=" * 60)
+    print("\n📊 Database Schema: StreemLyne_MT")
+    print("🔐 Authentication: JWT with username/password")
+    print("👥 Multi-Tenant: tenant_id isolation")
+    print("🎭 Roles: Platform Admin (1), Salesperson (5)")
 
     port = int(os.getenv("PORT", 5000))
     debug_mode = os.getenv("DEV_MODE", "false").lower() == "true"
     
     print(f"\n🚀 Starting Flask server on http://localhost:{port}")
     print(f"🔧 Debug mode: {debug_mode}")
+    print(f"📡 Health check: http://localhost:{port}/health")
     print("=" * 60 + "\n")
     
     app.run(debug=debug_mode, host="0.0.0.0", port=port, threaded=True)
