@@ -1,213 +1,412 @@
 from flask import Blueprint, request, jsonify, current_app, send_file
-from backend.db import SessionLocal
-from backend.models import CustomerFormData, Customer, Quotation, QuotationItem, PriceListItem
-from backend.routes.auth_helpers import token_required
-import json
+from sqlalchemy import text
 from datetime import datetime
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+import json
+
+from ..db import SessionLocal
+from .auth_helpers import token_required, require_tenant
 
 quotation_bp = Blueprint('quotations', __name__)
 
-# Helper function to get current user's email
-def get_current_user_email(data=None):
-    if hasattr(request, 'current_user') and hasattr(request.current_user, 'email'):
-        return request.current_user.email
-    return data.get('created_by', 'System') if isinstance(data, dict) else 'System'
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def calculate_quotation_total(session, quotation_id):
+    """Calculate total from quotation items"""
+    query = text("""
+        SELECT COALESCE(SUM(amount * quantity), 0) as total
+        FROM "StreemLyne_MT"."Quotation_Items"
+        WHERE quotation_id = :quotation_id
+    """)
+    
+    result = session.execute(query, {'quotation_id': quotation_id}).fetchone()
+    return float(result.total) if result else 0.0
 
 
-@quotation_bp.route('/quotations', methods=['GET', 'POST', 'OPTIONS'])
+def find_price_for_item(session, tenant_id, item_name, category='bedroom', color=None):
+    """
+    Find matching price from PriceList_Master
+    Returns (price, pricelist_id, dimension_formula, needs_manual_pricing)
+    """
+    try:
+        current_app.logger.info(f"🔍 Searching for '{item_name}' in category '{category}'")
+        
+        # Name mappings for common items
+        name_mappings = {
+            'door': ['Door', 'Wardrobe Door'],
+            'bedside': ['Bedside', 'Bedside Cabinet'],
+            'dresser': ['Dresser'],
+            'mirror': ['Mirror'],
+            'panel': ['Panel', 'End Panel'],
+            'plinth': ['Plinth'],
+            'handle': ['Handle'],
+            'worktop': ['Worktop'],
+            'sink': ['Sink'],
+            'tap': ['Tap']
+        }
+        
+        item_lower = item_name.lower().strip()
+        search_terms = name_mappings.get(item_lower, [item_name])
+        
+        # Search for matching items
+        for term in search_terms:
+            query = text("""
+                SELECT pricelist_id, item_name, base_price, dimension_formula
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                    AND category = :category
+                    AND LOWER(item_name) LIKE LOWER(:search_term)
+                ORDER BY base_price ASC
+                LIMIT 1
+            """)
+            
+            result = session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'category': category,
+                'search_term': f'%{term}%'
+            }).fetchone()
+            
+            if result:
+                current_app.logger.info(f"✅ Found: {result.item_name} - £{result.base_price}")
+                return (
+                    float(result.base_price),
+                    result.pricelist_id,
+                    result.dimension_formula,
+                    False  # Has price
+                )
+        
+        # No match
+        current_app.logger.warning(f"⚠️ No price found for: {item_name}")
+        return (0.0, None, None, True)  # Needs manual pricing
+        
+    except Exception as e:
+        current_app.logger.error(f"❌ Error finding price: {e}")
+        return (0.0, None, None, True)
+
+
+# ============================================================================
+# GET/CREATE QUOTATIONS
+# ============================================================================
+
+@quotation_bp.route('/quotations', methods=['GET'])
 @token_required
-def handle_quotations():
-    """GET all quotations or POST to create a new quotation"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
+@require_tenant
+def get_quotations(tenant_id, employee_id):
+    """Get all quotations with optional filters"""
     session = SessionLocal()
     try:
-        if request.method == 'POST':
-            data = request.json
-            
-            # ✅ FIXED: Get items_data BEFORE calculating total
-            items_data = data.get('items', [])
-            
-            # Calculate total from items
-            total = sum(
-                float(item.get('amount', 0)) * int(item.get('quantity', 1))
-                for item in items_data
-            )
-            
-            # Generate reference number
-            ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{session.query(Quotation).count() + 1}"
-            
-            quotation = Quotation(
-                customer_id=data.get('customer_id'),
-                reference_number=ref_num,
-                total=total,  # ✅ Now uses calculated total
-                status=data.get('status', 'Draft'),
-                notes=data.get('notes', '')
-            )
-            session.add(quotation)
-            session.flush()
-
-            # Add items to quotation
-            for item in items_data:
-                q_item = QuotationItem(
-                    quotation_id=quotation.id,
-                    item=item.get('item', ''),
-                    description=item.get('description', ''),
-                    quantity=item.get('quantity', 1),
-                    amount=item.get('amount', 0)
-                )
-                session.add(q_item)
-            session.commit()
-            return jsonify({'id': quotation.id, 'message': 'Quotation created successfully'}), 201
-
-        # GET all quotations
-        quotations = session.query(Quotation).order_by(Quotation.created_at.desc()).all()
-        return jsonify([q.to_dict(include_items=True) for q in quotations])
+        # Build WHERE clause
+        where_conditions = ["q.tenant_id = :tenant_id"]
+        params = {'tenant_id': str(tenant_id)}
+        
+        # Filter by client
+        client_id = request.args.get('client_id')
+        if client_id:
+            where_conditions.append("q.client_id = :client_id")
+            params['client_id'] = int(client_id)
+        
+        # Filter by project
+        project_id = request.args.get('project_id')
+        if project_id:
+            where_conditions.append("q.project_id = :project_id")
+            params['project_id'] = int(project_id)
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        query = text(f"""
+            SELECT 
+                q.*,
+                c.client_company_name,
+                (SELECT COUNT(*) FROM "StreemLyne_MT"."Quotation_Items" 
+                 WHERE quotation_id = q.quotation_id) as items_count
+            FROM "StreemLyne_MT"."Quotations" q
+            INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
+            WHERE {where_clause}
+            ORDER BY q.created_at DESC
+        """)
+        
+        quotations = session.execute(query, params).fetchall()
+        
+        result = []
+        for q in quotations:
+            result.append({
+                'quotation_id': q.quotation_id,
+                'reference_number': q.reference_number,
+                'client_id': q.client_id,
+                'client_name': q.client_company_name,
+                'project_id': q.project_id,
+                'total': float(q.total) if q.total else 0.0,
+                'status': q.status,
+                'notes': q.notes,
+                'items_count': q.items_count or 0,
+                'created_at': q.created_at.isoformat() if q.created_at else None,
+                'updated_at': q.updated_at.isoformat() if q.updated_at else None
+            })
+        
+        return jsonify(result), 200
+        
     except Exception as e:
-        session.rollback()
-        current_app.logger.error(f"Error in /quotations: {e}")
+        current_app.logger.error(f"Error fetching quotations: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@quotation_bp.route('/quotations/generate-from-checklist/<string:form_submission_id>', methods=['POST', 'OPTIONS'])
+@quotation_bp.route('/quotations', methods=['POST'])
 @token_required
-def generate_quote_from_checklist(form_submission_id):
-    """Generate quotation from checklist - auto-extracts items"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def create_quotation(tenant_id, employee_id):
+    """Create a new quotation"""
     session = SessionLocal()
     try:
-        current_app.logger.info(f"📋 Generating quote from checklist: {form_submission_id}")
+        data = request.get_json()
+        
+        # Validate
+        if not data.get('client_id'):
+            return jsonify({'error': 'client_id is required'}), 400
+        
+        # Verify client exists
+        client_query = text("""
+            SELECT client_id FROM "StreemLyne_MT"."Client_Master"
+            WHERE client_id = :client_id AND tenant_id = :tenant_id
+        """)
+        client = session.execute(client_query, {
+            'client_id': int(data['client_id']),
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not client:
+            return jsonify({'error': 'Client not found'}), 404
+        
+        # Generate reference number
+        count_query = text("""
+            SELECT COUNT(*) as count FROM "StreemLyne_MT"."Quotations"
+            WHERE tenant_id = :tenant_id
+        """)
+        count = session.execute(count_query, {'tenant_id': str(tenant_id)}).fetchone().count
+        ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+        
+        # Calculate total from items
+        items_data = data.get('items', [])
+        total = sum(
+            float(item.get('amount', 0)) * int(item.get('quantity', 1))
+            for item in items_data
+        )
+        
+        # Create quotation
+        insert_query = text("""
+            INSERT INTO "StreemLyne_MT"."Quotations"
+            (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id)
+            VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id)
+            RETURNING quotation_id
+        """)
+        
+        result = session.execute(insert_query, {
+            'tenant_id': str(tenant_id),
+            'client_id': int(data['client_id']),
+            'project_id': data.get('project_id'),
+            'reference_number': ref_num,
+            'total': total,
+            'status': data.get('status', 'Draft'),
+            'notes': data.get('notes', ''),
+            'employee_id': employee_id
+        })
+        
+        quotation_id = result.fetchone().quotation_id
+        
+        # Add items
+        for item in items_data:
+            item_insert = text("""
+                INSERT INTO "StreemLyne_MT"."Quotation_Items"
+                (quotation_id, item_name, description, color, quantity, amount,
+                 width, height, depth, needs_manual_pricing, pricelist_id)
+                VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
+                        :width, :height, :depth, :needs_manual, :pricelist_id)
+            """)
+            
+            session.execute(item_insert, {
+                'quotation_id': quotation_id,
+                'item_name': item.get('item', ''),
+                'description': item.get('description', ''),
+                'color': item.get('color'),
+                'quantity': item.get('quantity', 1),
+                'amount': item.get('amount', 0),
+                'width': item.get('width'),
+                'height': item.get('height'),
+                'depth': item.get('depth'),
+                'needs_manual': item.get('needs_manual_pricing', False),
+                'pricelist_id': item.get('price_list_item_id')
+            })
+        
+        session.commit()
+        
+        current_app.logger.info(f"Quotation {ref_num} created")
+        
+        return jsonify({
+            'quotation_id': quotation_id,
+            'reference_number': ref_num,
+            'message': 'Quotation created successfully'
+        }), 201
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error creating quotation: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# GENERATE FROM CHECKLIST
+# ============================================================================
+
+@quotation_bp.route('/quotations/generate-from-checklist/<int:form_submission_id>', methods=['POST'])
+@token_required
+@require_tenant  
+def generate_from_checklist(form_submission_id, tenant_id, employee_id):
+    """Generate quotation from checklist form submission"""
+    session = SessionLocal()
+    try:
+        current_app.logger.info(f"📋 Generating quote from submission {form_submission_id}")
         
         # Get form submission
-        form_submission = session.query(CustomerFormData).filter_by(id=form_submission_id).first()
-        if not form_submission:
-            current_app.logger.error(f"❌ Form submission not found: {form_submission_id}")
+        form_query = text("""
+            SELECT * FROM "StreemLyne_MT"."Customer_Form_Submissions"
+            WHERE submission_id = :submission_id AND tenant_id = :tenant_id
+        """)
+        
+        form = session.execute(form_query, {
+            'submission_id': form_submission_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not form:
             return jsonify({'error': 'Form submission not found'}), 404
         
-        # ✅ CHECK: Does a quote already exist for this checklist?
-        existing_quote = session.query(Quotation).filter(
-            Quotation.reference_number.like(f"%{str(form_submission_id)[:8]}%")
-        ).first()
+        # Check if quote already exists
+        existing_query = text("""
+            SELECT quotation_id, reference_number, total
+            FROM "StreemLyne_MT"."Quotations"
+            WHERE tenant_id = :tenant_id
+                AND reference_number LIKE :pattern
+        """)
         
-        if existing_quote:
-            current_app.logger.info(f"✅ Quote already exists: {existing_quote.reference_number}")
-            
-            # Return existing quote data
+        existing = session.execute(existing_query, {
+            'tenant_id': str(tenant_id),
+            'pattern': f'%{form_submission_id}%'
+        }).fetchone()
+        
+        if existing:
             return jsonify({
                 'success': True,
-                'quotation_id': existing_quote.id,
-                'reference_number': existing_quote.reference_number,
-                'items_count': len(existing_quote.items) if existing_quote.items else 0,
-                'total': float(existing_quote.total),
-                'checklist_type': 'bedroom' if 'bed' in str(existing_quote.notes).lower() else 'kitchen',
-                'project_id': existing_quote.project_id,
+                'quotation_id': existing.quotation_id,
+                'reference_number': existing.reference_number,
+                'total': float(existing.total) if existing.total else 0,
                 'message': 'Quote already exists for this checklist'
             }), 200
         
         # Parse form data
-        form_data = json.loads(form_submission.form_data) if isinstance(form_submission.form_data, str) else form_submission.form_data
-        
-        # Detect checklist type
+        form_data = json.loads(form.form_data) if isinstance(form.form_data, str) else form.form_data
         form_type = form_data.get('form_type', '').lower()
         checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
         
-        current_app.logger.info(f"📊 Detected checklist type: {checklist_type}")
-        
-        # Get customer
-        customer = session.query(Customer).filter_by(id=form_submission.customer_id).first()
-        if not customer:
-            current_app.logger.error(f"❌ Customer not found: {form_submission.customer_id}")
-            return jsonify({'error': 'Customer not found'}), 404
-        
-        # ✅ Get project_id from form submission if it exists
-        project_id = form_submission.project_id if hasattr(form_submission, 'project_id') else None
-        
-        # ✅ FIXED: Generate unique reference number with timestamp
+        # Generate reference
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        ref_num = f"Q-{timestamp}-{str(form_submission_id)[:8]}"
+        ref_num = f"Q-{timestamp}-{form_submission_id}"
         
         # Create quotation
-        quotation = Quotation(
-            customer_id=form_submission.customer_id,
-            project_id=project_id,
-            reference_number=ref_num,
-            total=0,
-            status='Draft',
-            notes=f"Auto-generated from {checklist_type} checklist",
-            created_by=get_current_user_email()
-        )
-        session.add(quotation)
-        session.flush()
+        insert_query = text("""
+            INSERT INTO "StreemLyne_MT"."Quotations"
+            (tenant_id, client_id, reference_number, total, status, notes, employee_id)
+            VALUES (:tenant_id, :client_id, :reference_number, 0, 'Draft', :notes, :employee_id)
+            RETURNING quotation_id
+        """)
         
-        current_app.logger.info(f"✅ Quotation created with ID: {quotation.id}, Ref: {ref_num}, Project ID: {project_id}")
+        result = session.execute(insert_query, {
+            'tenant_id': str(tenant_id),
+            'client_id': form.client_id,
+            'reference_number': ref_num,
+            'notes': f"Auto-generated from {checklist_type} checklist",
+            'employee_id': employee_id
+        })
         
-        # ✅ FIXED: Extract items from checklist with price matching (pass session)
-        extracted_items = extract_checklist_items(form_data, checklist_type, session)
+        quotation_id = result.fetchone().quotation_id
         
-        current_app.logger.info(f"📦 Extracted {len(extracted_items)} items from checklist")
+        # Extract and add items
+        extracted_items = extract_checklist_items(form_data, checklist_type, session, tenant_id)
         
-        # Add items to quotation
-        total = 0
-        matched_items = 0
-        manual_items = 0
+        total = 0.0
+        matched_count = 0
+        manual_count = 0
         
-        for item_data in extracted_items:
-            quote_item = QuotationItem(
-                quotation_id=quotation.id,
-                item=item_data['item_name'],
-                description=item_data['description'],
-                color=item_data.get('color', ''),
-                quantity=item_data.get('quantity', 1),
-                width=item_data.get('width'),
-                height=item_data.get('height'),
-                depth=item_data.get('depth'),
-                amount=item_data.get('price', 0),
-                needs_manual_pricing=item_data.get('needs_manual_pricing', False),
-                price_list_item_id=item_data.get('price_list_item_id')
-            )
-            session.add(quote_item)
-            total += quote_item.amount * quote_item.quantity
+        item_insert = text("""
+            INSERT INTO "StreemLyne_MT"."Quotation_Items"
+            (quotation_id, item_name, description, color, quantity, amount,
+             width, height, depth, needs_manual_pricing, pricelist_id)
+            VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
+                    :width, :height, :depth, :needs_manual, :pricelist_id)
+        """)
+        
+        for item in extracted_items:
+            session.execute(item_insert, {
+                'quotation_id': quotation_id,
+                'item_name': item['item_name'],
+                'description': item['description'],
+                'color': item.get('color'),
+                'quantity': item.get('quantity', 1),
+                'amount': item.get('price', 0),
+                'width': item.get('width'),
+                'height': item.get('height'),
+                'depth': item.get('depth'),
+                'needs_manual': item.get('needs_manual_pricing', False),
+                'pricelist_id': item.get('pricelist_id')
+            })
             
-            # Count matched vs manual pricing items
-            if item_data.get('needs_manual_pricing'):
-                manual_items += 1
+            total += item.get('price', 0) * item.get('quantity', 1)
+            
+            if item.get('needs_manual_pricing'):
+                manual_count += 1
             else:
-                matched_items += 1
+                matched_count += 1
         
-        quotation.total = total
+        # Update total
+        update_total = text("""
+            UPDATE "StreemLyne_MT"."Quotations"
+            SET total = :total
+            WHERE quotation_id = :quotation_id
+        """)
+        
+        session.execute(update_total, {
+            'total': total,
+            'quotation_id': quotation_id
+        })
+        
         session.commit()
         
-        current_app.logger.info(f"✅ Quote generation complete: {ref_num}")
-        current_app.logger.info(f"   💰 Total: £{total:.2f}")
-        current_app.logger.info(f"   ✅ Auto-priced items: {matched_items}")
-        current_app.logger.info(f"   ⚠️  Manual pricing needed: {manual_items}")
+        current_app.logger.info(f"✅ Quote {ref_num}: {matched_count} auto-priced, {manual_count} manual")
         
         return jsonify({
             'success': True,
-            'quotation_id': quotation.id,
-            'reference_number': quotation.reference_number,
+            'quotation_id': quotation_id,
+            'reference_number': ref_num,
             'items_count': len(extracted_items),
-            'matched_items': matched_items,
-            'manual_items': manual_items,
-            'total': float(total),
+            'matched_items': matched_count,
+            'manual_items': manual_count,
+            'total': total,
             'checklist_type': checklist_type,
-            'project_id': project_id,
-            'message': f'Quote generated: {matched_items} items auto-priced, {manual_items} need manual pricing'
+            'message': f'Quote generated: {matched_count} auto-priced, {manual_count} need manual pricing'
         }), 201
-    
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"❌ Error generating quotation: {e}")
+        current_app.logger.error(f"Error generating quotation: {e}")
         import traceback
         current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
@@ -215,767 +414,298 @@ def generate_quote_from_checklist(form_submission_id):
         session.close()
 
 
-@quotation_bp.route('/quotations/<int:quotation_id>/match-prices', methods=['POST', 'OPTIONS'])
-@token_required
-def match_item_price(quotation_id):
-    """Match quote item with price list based on dimensions"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
-    session = SessionLocal()
-    try:
-        data = request.json
-        item_id = data.get('item_id')
-        width = data.get('width')
-        height = data.get('height')
-        depth = data.get('depth')
-        
-        # Get quotation item
-        quote_item = session.query(QuotationItem).filter_by(
-            id=item_id,
-            quotation_id=quotation_id
-        ).first()
-        
-        if not quote_item:
-            return jsonify({'error': 'Quote item not found'}), 404
-        
-        # Get quotation to determine category
-        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
-        if not quotation:
-            return jsonify({'error': 'Quotation not found'}), 404
-        
-        # Determine category from notes or assume bedroom
-        category = 'bedroom'  # Default
-        if quotation.notes and 'kitchen' in quotation.notes.lower():
-            category = 'kitchen'
-        
-        # Find matching price list item
-        query = session.query(PriceListItem).filter_by(category=category)
-        
-        if width:
-            query = query.filter_by(width=width)
-        if height:
-            query = query.filter_by(height=height)
-        if depth:
-            query = query.filter_by(depth=depth)
-        
-        matched_item = query.first()
-        
-        if matched_item:
-            # Update quote item
-            quote_item.amount = float(matched_item.base_price)
-            quote_item.price_list_item_id = matched_item.id
-            quote_item.needs_manual_pricing = False
-            quote_item.width = width
-            quote_item.height = height
-            quote_item.depth = depth
-            
-            # Recalculate total
-            items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
-            total = sum(item.amount * item.quantity for item in items)
-            quotation.total = total
-            
-            session.commit()
-            
-            return jsonify({
-                'success': True,
-                'matched_item': {
-                    'code': matched_item.item_code,
-                    'name': matched_item.item_name,
-                    'price': float(matched_item.base_price)
-                },
-                'new_amount': float(quote_item.amount),
-                'new_total': float(total)
-            }), 200
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'No matching item found in price list'
-            }), 404
-    
-    except Exception as e:
-        session.rollback()
-        current_app.logger.error(f"Error matching price: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
-
-def extract_checklist_items(form_data: dict, checklist_type: str, session) -> list:
-    """Extract billable items from checklist with automatic price matching"""
+def extract_checklist_items(form_data, checklist_type, session, tenant_id):
+    """Extract billable items from checklist with auto-pricing"""
     items = []
     
-    current_app.logger.info(f"📦 Extracting items from {checklist_type} checklist")
-    
-    # Helper function to find price in database
-    def find_price(item_name, color=None, width=None, height=None, depth=None):
-        """
-        Search price list for matching item.
-        Returns (price, price_list_item_id, width, height, depth, needs_manual_pricing)
-        """
-        try:
-            current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{checklist_type}'")
-            
-            # Map common checklist names to price list names
-            name_mappings = {
-                'door': ['Door', 'robe', 'wardrobe'],
-                'bedside': ['Bedside', 'Bedside Cabinet'],
-                'bedside cabinets': ['Bedside', 'Bedside Cabinet'],
-                'bedside cabinet': ['Bedside', 'Bedside Cabinet'],
-                'dresser': ['Dresser', 'Dresser/Desk'],
-                'dresser/desk': ['Dresser', 'Dresser/Desk'],
-                'mirror': ['Mirror'],
-                'end panel': ['End Panel', 'Panel'],
-                'panel': ['End Panel', 'Panel'],
-                'plinth': ['Plinth', 'Plinth/Filler'],
-                'plinth/filler': ['Plinth', 'Plinth/Filler'],
-                'handle': ['Handle'],
-                'handles': ['Handle'],
-            }
-            
-            # Get search terms
-            item_lower = item_name.lower().strip()
-            search_terms = name_mappings.get(item_lower, [item_name])
-            
-            current_app.logger.info(f"📝 Search terms: {search_terms}")
-            
-            # Try to find matching items
-            matched_items = []
-            
-            for term in search_terms:
-                query = session.query(PriceListItem).filter(
-                    PriceListItem.category == checklist_type,
-                    PriceListItem.active == True,
-                    PriceListItem.item_name.ilike(f'%{term}%')
-                )
-                
-                # For dimension-based items, order by price (smallest first)
-                results = query.order_by(PriceListItem.base_price.asc()).all()
-                matched_items.extend(results)
-            
-            if matched_items:
-                # Use the first (cheapest/smallest) match as default
-                best_match = matched_items[0]
-                
-                current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{best_match.base_price} ({best_match.width}mm)")
-                
-                return (
-                    float(best_match.base_price),
-                    best_match.id,
-                    best_match.width,
-                    best_match.height,
-                    best_match.depth,
-                    False  # needs_manual_pricing = False because we found a price
-                )
-            
-            # No match found
-            current_app.logger.warning(f"⚠️  No price found for: {item_name}")
-            return (0, None, None, None, None, True)
-            
-        except Exception as e:
-            current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
-            return (0, None, None, None, None, True)
-    
-    # DOORS - Main door
+    # Main door
     if form_data.get('door_style') and form_data.get('door_color'):
-        door_desc = f"{form_data.get('door_style')} - {form_data.get('door_manufacturer', '')} {form_data.get('door_name', '')}".strip()
-        color = form_data.get('door_color', '')
-        
-        price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
+        price, pricelist_id, formula, needs_manual = find_price_for_item(
+            session, tenant_id, 'door', checklist_type, form_data.get('door_color')
+        )
         
         items.append({
             'item_name': 'Door',
-            'description': door_desc,
-            'color': color,
-            'price': price,
+            'description': f"{form_data.get('door_style')} - {form_data.get('door_name', '')}",
+            'color': form_data.get('door_color', ''),
             'quantity': 1,
-            'width': width,
-            'height': height,
-            'depth': depth,
+            'price': price,
             'needs_manual_pricing': needs_manual,
-            'price_list_item_id': price_list_id
+            'pricelist_id': pricelist_id
         })
-        
-        current_app.logger.info(f"  ✅ Door: £{price} (ID: {price_list_id})")
     
-    # ADDITIONAL DOORS
+    # Additional doors
     for idx, door in enumerate(form_data.get('additional_doors', [])):
         if door.get('door_style'):
-            door_desc = f"{door.get('door_style')} - {door.get('door_manufacturer', '')} {door.get('door_name', '')}".strip()
-            qty = int(door.get('quantity', 1)) if door.get('quantity') else 1
-            color = door.get('door_color', '')
-            
-            price, price_list_id, width, height, depth, needs_manual = find_price('door', color=color)
+            price, pricelist_id, formula, needs_manual = find_price_for_item(
+                session, tenant_id, 'door', checklist_type
+            )
             
             items.append({
                 'item_name': f'Additional Door {idx + 1}',
-                'description': door_desc,
-                'color': color,
-                'quantity': qty,
+                'description': door.get('door_style', ''),
+                'color': door.get('door_color', ''),
+                'quantity': int(door.get('quantity', 1)),
                 'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
                 'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
+                'pricelist_id': pricelist_id
             })
-            
-            current_app.logger.info(f"  ✅ Additional Door {idx + 1}: £{price} x{qty}")
     
-    # PANELS
+    # Panels
     if form_data.get('end_panel_color'):
-        color = form_data.get('end_panel_color')
-        price, price_list_id, width, height, depth, needs_manual = find_price('end panel', color=color)
+        price, pricelist_id, formula, needs_manual = find_price_for_item(
+            session, tenant_id, 'panel', checklist_type
+        )
         
         items.append({
             'item_name': 'End Panel',
             'description': 'End Panel',
-            'color': color,
+            'color': form_data.get('end_panel_color'),
+            'quantity': 1,
             'price': price,
-            'width': width,
-            'height': height,
-            'depth': depth,
             'needs_manual_pricing': needs_manual,
-            'price_list_item_id': price_list_id
+            'pricelist_id': pricelist_id
         })
-        
-        current_app.logger.info(f"  ✅ End Panel: £{price}")
     
-    # PLINTH/FILLER
-    if form_data.get('plinth_filler_color'):
-        color = form_data.get('plinth_filler_color')
-        price, price_list_id, width, height, depth, needs_manual = find_price('plinth', color=color)
-        
-        items.append({
-            'item_name': 'Plinth/Filler',
-            'description': 'Plinth/Filler',
-            'color': color,
-            'price': price,
-            'width': width,
-            'height': height,
-            'depth': depth,
-            'needs_manual_pricing': needs_manual,
-            'price_list_item_id': price_list_id
-        })
-        
-        current_app.logger.info(f"  ✅ Plinth/Filler: £{price}")
-    
-    # HANDLES
+    # Handles
     if form_data.get('handles_code'):
-        qty = int(form_data.get('handles_quantity', 1)) if form_data.get('handles_quantity') else 1
-        price, price_list_id, width, height, depth, needs_manual = find_price('handle')
+        price, pricelist_id, formula, needs_manual = find_price_for_item(
+            session, tenant_id, 'handle', checklist_type
+        )
         
         items.append({
             'item_name': 'Handles',
-            'description': f"Code: {form_data.get('handles_code')} - Size: {form_data.get('handles_size', 'N/A')}",
-            'quantity': qty,
+            'description': f"Code: {form_data.get('handles_code')}",
+            'quantity': int(form_data.get('handles_quantity', 1)),
             'price': price,
-            'width': width,
-            'height': height,
-            'depth': depth,
             'needs_manual_pricing': needs_manual,
-            'price_list_item_id': price_list_id
+            'pricelist_id': pricelist_id
         })
-        
-        current_app.logger.info(f"  ✅ Handles: £{price} x{qty}")
     
-    # BEDROOM SPECIFIC
+    # Bedroom specific
     if checklist_type == 'bedroom':
         if form_data.get('bedside_cabinets_type'):
-            qty = int(form_data.get('bedside_cabinets_qty', 1)) if form_data.get('bedside_cabinets_qty') else 1
-            price, price_list_id, width, height, depth, needs_manual = find_price('bedside')
+            price, pricelist_id, formula, needs_manual = find_price_for_item(
+                session, tenant_id, 'bedside', checklist_type
+            )
             
             items.append({
                 'item_name': 'Bedside Cabinets',
                 'description': form_data.get('bedside_cabinets_type'),
-                'quantity': qty,
+                'quantity': int(form_data.get('bedside_cabinets_qty', 1)),
                 'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
                 'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
+                'pricelist_id': pricelist_id
             })
-            
-            current_app.logger.info(f"  ✅ Bedside Cabinets: £{price} x{qty}")
-        
-        if form_data.get('dresser_desk') == 'yes':
-            price, price_list_id, width, height, depth, needs_manual = find_price('dresser')
-            
-            items.append({
-                'item_name': 'Dresser/Desk',
-                'description': form_data.get('dresser_desk_details', 'Dresser/Desk'),
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-            
-            current_app.logger.info(f"  ✅ Dresser/Desk: £{price}")
-        
-        if form_data.get('mirror_type'):
-            qty = int(form_data.get('mirror_qty', 0)) if form_data.get('mirror_qty') else 0
-            price, price_list_id, width, height, depth, needs_manual = find_price('mirror')
-            
-            items.append({
-                'item_name': 'Mirror',
-                'description': form_data.get('mirror_type'),
-                'quantity': qty,
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-            
-            current_app.logger.info(f"  ✅ Mirror: £{price} x{qty}")
     
-    # KITCHEN SPECIFIC
+    # Kitchen specific
     elif checklist_type == 'kitchen':
         if form_data.get('worktop_material_type'):
-            color = form_data.get('worktop_material_color', '')
-            price, price_list_id, width, height, depth, needs_manual = find_price('Worktop', color=color)
+            price, pricelist_id, formula, needs_manual = find_price_for_item(
+                session, tenant_id, 'worktop', checklist_type
+            )
             
             items.append({
                 'item_name': 'Worktop',
-                'description': f"{form_data.get('worktop_material_type')} - {form_data.get('worktop_size', '')}",
-                'color': color,
+                'description': form_data.get('worktop_material_type'),
+                'color': form_data.get('worktop_material_color', ''),
+                'quantity': 1,
                 'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
                 'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-        
-        # APPLIANCES
-        appliance_names = ["Oven", "Microwave", "Washing Machine", "Dryer", "HOB", "Extractor", "INTG Dishwasher"]
-        for idx, appliance in enumerate(form_data.get('appliances', [])):
-            if appliance.get('make') or appliance.get('model'):
-                name = appliance_names[idx] if idx < len(appliance_names) else f'Appliance {idx + 1}'
-                price, price_list_id, width, height, depth, needs_manual = find_price(name)
-                
-                items.append({
-                    'item_name': name,
-                    'description': f"{appliance.get('make', '')} {appliance.get('model', '')}".strip(),
-                    'price': price,
-                    'width': width,
-                    'height': height,
-                    'depth': depth,
-                    'needs_manual_pricing': needs_manual,
-                    'price_list_item_id': price_list_id
-                })
-        
-        # INTEGRATED APPLIANCES
-        if form_data.get('integ_fridge_make') or form_data.get('integ_fridge_model'):
-            qty = int(form_data.get('integ_fridge_qty', 1)) if form_data.get('integ_fridge_qty') else 1
-            price, price_list_id, width, height, depth, needs_manual = find_price('Fridge')
-            
-            items.append({
-                'item_name': 'Integrated Fridge',
-                'description': f"{form_data.get('integ_fridge_make', '')} {form_data.get('integ_fridge_model', '')}".strip(),
-                'quantity': qty,
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-        
-        if form_data.get('integ_freezer_make') or form_data.get('integ_freezer_model'):
-            qty = int(form_data.get('integ_freezer_qty', 1)) if form_data.get('integ_freezer_qty') else 1
-            price, price_list_id, width, height, depth, needs_manual = find_price('Freezer')
-            
-            items.append({
-                'item_name': 'Integrated Freezer',
-                'description': f"{form_data.get('integ_freezer_make', '')} {form_data.get('integ_freezer_model', '')}".strip(),
-                'quantity': qty,
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-        
-        if form_data.get('sink_details'):
-            price, price_list_id, width, height, depth, needs_manual = find_price('Sink')
-            
-            items.append({
-                'item_name': 'Sink',
-                'description': f"{form_data.get('sink_details')} - {form_data.get('sink_model', '')}",
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
-            })
-        
-        if form_data.get('tap_details'):
-            price, price_list_id, width, height, depth, needs_manual = find_price('Tap')
-            
-            items.append({
-                'item_name': 'Tap',
-                'description': f"{form_data.get('tap_details')} - {form_data.get('tap_model', '')}",
-                'price': price,
-                'width': width,
-                'height': height,
-                'depth': depth,
-                'needs_manual_pricing': needs_manual,
-                'price_list_item_id': price_list_id
+                'pricelist_id': pricelist_id
             })
     
-    current_app.logger.info(f"📊 Total items extracted: {len(items)}")
+    current_app.logger.info(f"📊 Extracted {len(items)} items")
     
     return items
 
-@quotation_bp.route('/quotations/<int:quotation_id>', methods=['GET', 'PUT', 'DELETE', 'OPTIONS'])
+
+# ============================================================================
+# SINGLE QUOTATION OPERATIONS
+# ============================================================================
+
+@quotation_bp.route('/quotations/<int:quotation_id>', methods=['GET', 'PUT', 'DELETE'])
 @token_required
-def handle_single_quotation(quotation_id):
-    """GET, UPDATE, or DELETE a single quotation"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def handle_quotation(quotation_id, tenant_id, employee_id):
+    """Get, update, or delete a quotation"""
     session = SessionLocal()
     try:
-        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
-        
-        if not quotation:
-            return jsonify({'error': 'Quotation not found'}), 404
-        
         if request.method == 'GET':
-            # ✅ Get customer details
-            customer = session.query(Customer).filter_by(id=quotation.customer_id).first()
+            # Get quotation with items
+            quote_query = text("""
+                SELECT 
+                    q.*,
+                    c.client_company_name,
+                    c.address as client_address,
+                    c.client_phone
+                FROM "StreemLyne_MT"."Quotations" q
+                INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
+                WHERE q.quotation_id = :quotation_id AND q.tenant_id = :tenant_id
+            """)
             
-            # Build response with full details
-            response = {
-                'id': quotation.id,
-                'reference_number': quotation.reference_number,
-                'customer_id': quotation.customer_id,
-                'customer_name': customer.name if customer else 'Unknown',
-                'customer_address': customer.address if customer else None,
-                'customer_phone': customer.phone if customer else None,
-                'project_id': quotation.project_id,
-                'total': float(quotation.total),
-                'status': quotation.status,
-                'notes': quotation.notes,
-                'valid_until': quotation.valid_until.isoformat() if quotation.valid_until else None,
-                'created_at': quotation.created_at.isoformat() if quotation.created_at else None,
-                'updated_at': quotation.updated_at.isoformat() if quotation.updated_at else None,
-                'items': []
+            quote = session.execute(quote_query, {
+                'quotation_id': quotation_id,
+                'tenant_id': str(tenant_id)
+            }).fetchone()
+            
+            if not quote:
+                return jsonify({'error': 'Quotation not found'}), 404
+            
+            # Get items
+            items_query = text("""
+                SELECT * FROM "StreemLyne_MT"."Quotation_Items"
+                WHERE quotation_id = :quotation_id
+                ORDER BY item_id
+            """)
+            
+            items = session.execute(items_query, {'quotation_id': quotation_id}).fetchall()
+            
+            result = {
+                'quotation_id': quote.quotation_id,
+                'reference_number': quote.reference_number,
+                'client_id': quote.client_id,
+                'client_name': quote.client_company_name,
+                'client_address': quote.client_address,
+                'client_phone': quote.client_phone,
+                'project_id': quote.project_id,
+                'total': float(quote.total) if quote.total else 0,
+                'status': quote.status,
+                'notes': quote.notes,
+                'created_at': quote.created_at.isoformat() if quote.created_at else None,
+                'items': [{
+                    'item_id': i.item_id,
+                    'item_name': i.item_name,
+                    'description': i.description,
+                    'color': i.color,
+                    'quantity': i.quantity,
+                    'amount': float(i.amount) if i.amount else 0,
+                    'width': i.width,
+                    'height': i.height,
+                    'depth': i.depth,
+                    'needs_manual_pricing': i.needs_manual_pricing
+                } for i in items]
             }
             
-            # Add items
-            for item in quotation.items:
-                response['items'].append({
-                    'id': item.id,
-                    'item': item.item,
-                    'description': item.description,
-                    'color': item.color,
-                    'quantity': item.quantity,
-                    'amount': float(item.amount),
-                    'width': item.width,
-                    'height': item.height,
-                    'depth': item.depth,
-                    'needs_manual_pricing': item.needs_manual_pricing
-                })
-            
-            return jsonify(response), 200
+            return jsonify(result), 200
         
         elif request.method == 'PUT':
             # Update quotation
-            data = request.json
+            data = request.get_json()
+            
+            update_fields = []
+            params = {'quotation_id': quotation_id, 'tenant_id': str(tenant_id)}
             
             if 'status' in data:
-                quotation.status = data['status']
+                update_fields.append("status = :status")
+                params['status'] = data['status']
             if 'notes' in data:
-                quotation.notes = data['notes']
+                update_fields.append("notes = :notes")
+                params['notes'] = data['notes']
             if 'total' in data:
-                quotation.total = data['total']
-            if 'valid_until' in data:
-                quotation.valid_until = datetime.fromisoformat(data['valid_until']) if data['valid_until'] else None
+                update_fields.append("total = :total")
+                params['total'] = data['total']
             
-            quotation.updated_by = get_current_user_email()
-            quotation.updated_at = datetime.utcnow()
+            if not update_fields:
+                return jsonify({'error': 'No fields to update'}), 400
             
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            
+            update_query = text(f"""
+                UPDATE "StreemLyne_MT"."Quotations"
+                SET {', '.join(update_fields)}
+                WHERE quotation_id = :quotation_id AND tenant_id = :tenant_id
+            """)
+            
+            session.execute(update_query, params)
             session.commit()
             
             return jsonify({
                 'success': True,
-                'message': 'Quotation updated successfully'
+                'message': 'Quotation updated'
             }), 200
         
         elif request.method == 'DELETE':
-            # Delete quotation and its items (cascade handles items)
-            session.delete(quotation)
-            session.commit()
+            # Delete items first
+            delete_items = text("""
+                DELETE FROM "StreemLyne_MT"."Quotation_Items"
+                WHERE quotation_id = :quotation_id
+            """)
+            session.execute(delete_items, {'quotation_id': quotation_id})
             
-            current_app.logger.info(f"✅ Deleted quotation: {quotation.reference_number}")
+            # Delete quotation
+            delete_quote = text("""
+                DELETE FROM "StreemLyne_MT"."Quotations"
+                WHERE quotation_id = :quotation_id AND tenant_id = :tenant_id
+            """)
+            session.execute(delete_quote, {
+                'quotation_id': quotation_id,
+                'tenant_id': str(tenant_id)
+            })
+            
+            session.commit()
             
             return jsonify({
                 'success': True,
-                'message': 'Quotation deleted successfully'
+                'message': 'Quotation deleted'
             }), 200
-    
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error handling quotation {quotation_id}: {e}")
+        current_app.logger.error(f"Error handling quotation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
-@quotation_bp.route('/quotations', methods=['GET'])
+
+# ============================================================================
+# DELETE QUOTATION ITEM
+# ============================================================================
+
+@quotation_bp.route('/quotations/<int:quotation_id>/items/<int:item_id>', methods=['DELETE'])
 @token_required
-def get_quotations():
-    """GET all quotations with optional filters"""
+@require_tenant
+def delete_quotation_item(quotation_id, item_id, tenant_id, employee_id):
+    """Delete a single quotation item and recalculate total"""
     session = SessionLocal()
     try:
-        query = session.query(Quotation)
+        # Delete item
+        delete_query = text("""
+            DELETE FROM "StreemLyne_MT"."Quotation_Items"
+            WHERE item_id = :item_id AND quotation_id = :quotation_id
+        """)
         
-        # Filter by customer_id
-        customer_id = request.args.get('customer_id')
-        if customer_id:
-            query = query.filter_by(customer_id=customer_id)
+        result = session.execute(delete_query, {
+            'item_id': item_id,
+            'quotation_id': quotation_id
+        })
         
-        # Filter by project_id
-        project_id = request.args.get('project_id')
-        if project_id:
-            query = query.filter_by(project_id=project_id)
-        
-        # Order by created date (newest first)
-        quotations = query.order_by(Quotation.created_at.desc()).all()
-        
-        # Build response
-        result = []
-        for quote in quotations:
-            customer = session.query(Customer).filter_by(id=quote.customer_id).first()
-            
-            result.append({
-                'id': quote.id,
-                'reference_number': quote.reference_number,
-                'customer_id': quote.customer_id,
-                'customer_name': customer.name if customer else 'Unknown',
-                'project_id': quote.project_id,
-                'total': float(quote.total),
-                'status': quote.status,
-                'notes': quote.notes,
-                'items_count': len(quote.items) if quote.items else 0,
-                'created_at': quote.created_at.isoformat() if quote.created_at else None,
-                'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
-            })
-        
-        return jsonify(result), 200
-    
-    except Exception as e:
-        current_app.logger.error(f"Error fetching quotations: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
-@quotation_bp.route('/quotations/<int:quotation_id>/pdf', methods=['GET', 'OPTIONS'])
-@token_required
-def generate_quotation_pdf(quotation_id):
-    """Generate PDF for quotation"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
-    session = SessionLocal()
-    try:
-        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
-        
-        if not quotation:
-            return jsonify({'error': 'Quotation not found'}), 404
-        
-        # Get customer
-        customer = session.query(Customer).filter_by(id=quotation.customer_id).first()
-        
-        # Create PDF in memory
-        buffer = BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4)
-        elements = []
-        styles = getSampleStyleSheet()
-        
-        # Title
-        title = Paragraph(f"<b>QUOTATION {quotation.reference_number}</b>", styles['Title'])
-        elements.append(title)
-        elements.append(Spacer(1, 20))
-        
-        # Customer Info
-        customer_info = f"""
-        <b>Customer:</b> {customer.name if customer else 'N/A'}<br/>
-        <b>Address:</b> {customer.address if customer and customer.address else 'N/A'}<br/>
-        <b>Phone:</b> {customer.phone if customer and customer.phone else 'N/A'}<br/>
-        <b>Date:</b> {quotation.created_at.strftime('%d %B %Y') if quotation.created_at else 'N/A'}
-        """
-        elements.append(Paragraph(customer_info, styles['Normal']))
-        elements.append(Spacer(1, 20))
-        
-        # Items Table
-        table_data = [['Item', 'Description', 'Color', 'Qty', 'Amount']]
-        
-        for item in quotation.items:
-            table_data.append([
-                item.item or '',
-                item.description or '',
-                item.color or '',
-                str(item.quantity),
-                f"£{float(item.amount):.2f}"
-            ])
-        
-        # Total row
-        table_data.append(['', '', '', 'TOTAL:', f"£{float(quotation.total):.2f}"])
-        
-        # Create table
-        table = Table(table_data, colWidths=[100, 200, 80, 40, 80])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, -1), (-1, -1), colors.lightgrey),
-            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black)
-        ]))
-        
-        elements.append(table)
-        elements.append(Spacer(1, 20))
-        
-        # Notes
-        if quotation.notes:
-            notes = Paragraph(f"<b>Notes:</b><br/>{quotation.notes}", styles['Normal'])
-            elements.append(notes)
-        
-        # Build PDF
-        doc.build(elements)
-        buffer.seek(0)
-        
-        return send_file(
-            buffer,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=f'Quotation_{quotation.reference_number}.pdf'
-        )
-    
-    except Exception as e:
-        current_app.logger.error(f"Error generating PDF: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
-def find_default_price_for_item(session, item_name, category='bedroom', color=None):
-    """
-    Find the default (smallest/cheapest) price for an item in the price list.
-    Returns (price, price_list_item_id, width, height, depth, needs_manual_pricing)
-    """
-    try:
-        current_app.logger.info(f"🔍 Searching for: '{item_name}' in category '{category}'")
-        
-        # Map common checklist names to price list names
-        name_mappings = {
-            'door': ['Door', 'robe', 'wardrobe'],
-            'bedside cabinets': ['Bedside', 'Bedside Cabinet'],
-            'bedside cabinet': ['Bedside', 'Bedside Cabinet'],
-            'dresser/desk': ['Dresser', 'Dresser/Desk'],
-            'dresser': ['Dresser', 'Dresser/Desk'],
-            'mirror': ['Mirror'],
-            'end panel': ['End Panel', 'Panel'],
-            'panel': ['End Panel', 'Panel'],
-            'plinth/filler': ['Plinth', 'Plinth/Filler'],
-            'plinth': ['Plinth', 'Plinth/Filler'],
-            'handles': ['Handle'],
-            'handle': ['Handle'],
-        }
-        
-        # Get search terms
-        item_lower = item_name.lower().strip()
-        search_terms = name_mappings.get(item_lower, [item_name])
-        
-        current_app.logger.info(f"📝 Search terms: {search_terms}")
-        
-        # Try to find matching items
-        matched_items = []
-        
-        for term in search_terms:
-            query = session.query(PriceListItem).filter(
-                PriceListItem.category == category,
-                PriceListItem.active == True,
-                PriceListItem.item_name.ilike(f'%{term}%')
-            )
-            
-            # For dimension-based items, get the smallest/cheapest
-            results = query.order_by(PriceListItem.base_price.asc()).all()
-            matched_items.extend(results)
-        
-        if matched_items:
-            # Use the first (cheapest) match
-            best_match = matched_items[0]
-            
-            current_app.logger.info(f"✅ Found match: {best_match.item_name} - £{best_match.base_price}")
-            
-            return (
-                float(best_match.base_price),
-                best_match.id,
-                best_match.width,
-                best_match.height,
-                best_match.depth,
-                False  # needs_manual_pricing = False because we found a price
-            )
-        
-        # No match found
-        current_app.logger.warning(f"⚠️  No price found for: {item_name}")
-        return (0, None, None, None, None, True)
-        
-    except Exception as e:
-        current_app.logger.error(f"❌ Error finding price for {item_name}: {e}")
-        return (0, None, None, None, None, True)
-
-@quotation_bp.route('/quotations/<int:quotation_id>/items/<int:item_id>', methods=['DELETE', 'OPTIONS'])
-@token_required
-def delete_quotation_item(quotation_id, item_id):
-    """Delete a single quotation item"""
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
-    session = SessionLocal()
-    try:
-        # Get the item
-        item = session.query(QuotationItem).filter_by(
-            id=item_id,
-            quotation_id=quotation_id
-        ).first()
-        
-        if not item:
+        if result.rowcount == 0:
             return jsonify({'error': 'Item not found'}), 404
         
-        # Delete the item
-        session.delete(item)
+        # Recalculate total
+        new_total = calculate_quotation_total(session, quotation_id)
         
-        # Recalculate quotation total
-        quotation = session.query(Quotation).filter_by(id=quotation_id).first()
-        remaining_items = session.query(QuotationItem).filter_by(quotation_id=quotation_id).all()
+        update_total = text("""
+            UPDATE "StreemLyne_MT"."Quotations"
+            SET total = :total, updated_at = CURRENT_TIMESTAMP
+            WHERE quotation_id = :quotation_id AND tenant_id = :tenant_id
+        """)
         
-        total = sum(i.amount * i.quantity for i in remaining_items if i.id != item_id)
-        quotation.total = total
-        quotation.updated_at = datetime.utcnow()
+        session.execute(update_total, {
+            'total': new_total,
+            'quotation_id': quotation_id,
+            'tenant_id': str(tenant_id)
+        })
         
         session.commit()
         
-        current_app.logger.info(f"✅ Deleted item {item_id} from quotation {quotation_id}")
-        
         return jsonify({
             'success': True,
-            'message': 'Item deleted successfully',
-            'new_total': float(total),
-            'remaining_items': len(remaining_items) - 1
+            'message': 'Item deleted',
+            'new_total': new_total
         }), 200
-    
+        
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error deleting item: {e}")

@@ -1,407 +1,445 @@
 from flask import Blueprint, jsonify, request, current_app
-from ..models import ProductionNotification, User
-from .auth_helpers import token_required 
+from sqlalchemy import text
 from datetime import datetime
+
 from ..db import SessionLocal
-from sqlalchemy.exc import SQLAlchemyError
-import uuid
+from .auth_helpers import token_required, require_tenant
 
 notification_bp = Blueprint('notification', __name__)
+
 
 # ============================================================================
 # HELPER FUNCTION: Create Activity Notification
 # ============================================================================
 
-def create_activity_notification(session, message, job_id=None, customer_id=None, 
-                                moved_by=None, form_submission_id=None, form_type=None):
+def create_activity_notification(session, tenant_id, message, client_id=None, 
+                                contract_id=None, property_id=None, employee_id=None,
+                                notification_type='activity', priority='medium'):
     """
-    ✅ NEW: Create notifications for ALL eligible users (Manager, HR, Production)
-    Each user gets their own copy of the notification
+    Create notification for all users in tenant or specific employee
     
     Args:
         session: Active SQLAlchemy session
+        tenant_id: Tenant ID (required)
         message: Notification message text
-        job_id: Optional job ID reference
-        customer_id: Optional customer ID reference
-        moved_by: Username or ID of person who performed the action
-        form_submission_id: Optional form submission ID
-        form_type: Optional form type (kitchen, bedroom, etc.)
+        client_id: Optional client ID reference
+        contract_id: Optional contract ID reference
+        property_id: Optional property ID reference
+        employee_id: Optional - if provided, notification goes to this employee only
+        notification_type: Type of notification
+        priority: Priority level (low, medium, high)
     """
     try:
-        # ✅ Get all users who should receive notifications
-        eligible_roles = ['Manager', 'HR', 'Production']
-        users = session.query(User).filter(
-            User.role.in_(eligible_roles),
-            User.is_active == True
-        ).all()
+        insert_query = text("""
+            INSERT INTO "StreemLyne_MT"."Notification_Master"
+            (tenant_id, employee_id, client_id, contract_id, property_id,
+             notification_type, priority, message, read, dismissed)
+            VALUES (:tenant_id, :employee_id, :client_id, :contract_id, :property_id,
+                    :notification_type, :priority, :message, false, false)
+        """)
         
-        if not users:
-            current_app.logger.warning("⚠️ No eligible users found for notifications")
-            return
-        
-        # ✅ Create a separate notification for EACH user
-        for user in users:
-            notification = ProductionNotification(
-                id=str(uuid.uuid4()),
-                user_id=user.id,  # ✅ Assign to specific user
-                customer_id=customer_id,
-                job_id=job_id,
-                form_submission_id=form_submission_id,
-                form_type=form_type,
-                message=message,
-                moved_by=moved_by,
-                read=False,
-                dismissed=False,  # ✅ Not dismissed initially
-                created_at=datetime.utcnow()
-            )
-            session.add(notification)
+        session.execute(insert_query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id,
+            'client_id': client_id,
+            'contract_id': contract_id,
+            'property_id': property_id,
+            'notification_type': notification_type,
+            'priority': priority,
+            'message': message
+        })
         
         session.commit()
-        current_app.logger.info(f"✅ Created {len(users)} notifications for eligible users")
+        current_app.logger.info(f"✅ Created notification for tenant {tenant_id}")
         
     except Exception as e:
-        current_app.logger.error(f"❌ Failed to create notifications: {e}")
+        current_app.logger.error(f"❌ Failed to create notification: {e}")
         session.rollback()
         raise
 
 
 # ============================================================================
-# GET ALL NOTIFICATIONS (for current user only)
+# GET ALL NOTIFICATIONS (for current user)
 # ============================================================================
 
-@notification_bp.route('/notifications/production', methods=['GET', 'OPTIONS'])
+@notification_bp.route('/notifications', methods=['GET'])
 @token_required
-def get_production_notifications():
-    """
-    ✅ Get notifications for the CURRENT USER ONLY.
-    Returns all notifications (not dismissed) sorted by creation date (newest first).
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
+@require_tenant
+def get_notifications(tenant_id, employee_id):
+    """Get notifications for current employee (not dismissed)"""
     session = SessionLocal()
     try:
-        # ✅ Filter by current user
-        notifications = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id,
-            ProductionNotification.dismissed == False  # ✅ Sidebar doesn't show dismissed
-        ).order_by(
-            ProductionNotification.created_at.desc()
-        ).all()
-
-        return jsonify([
-            {
-                'id': n.id,
-                'job_id': n.job_id,
-                'customer_id': n.customer_id,
-                'form_submission_id': n.form_submission_id,
-                'form_type': n.form_type,
-                'message': n.message,
-                'created_at': n.created_at.isoformat() if n.created_at else None,
-                'moved_by': n.moved_by,
-                'read': n.read,
-                'dismissed': n.dismissed
-            } for n in notifications
-        ]), 200
+        # Get notifications for this employee or tenant-wide notifications
+        query = text("""
+            SELECT 
+                n.*,
+                c.client_company_name
+            FROM "StreemLyne_MT"."Notification_Master" n
+            LEFT JOIN "StreemLyne_MT"."Client_Master" c ON n.client_id = c.client_id
+            WHERE n.tenant_id = :tenant_id
+                AND n.dismissed = false
+                AND (n.employee_id = :employee_id OR n.employee_id IS NULL)
+            ORDER BY n.created_at DESC
+        """)
         
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_app.logger.exception(f"Database error fetching notifications: {e}")
-        return jsonify({'error': 'Database error occurred'}), 500
-    except Exception as e:
-        session.rollback()
-        current_app.logger.exception(f"Error fetching notifications: {e}")
-        return jsonify({'error': 'An unexpected error occurred'}), 500
-    finally:
-        session.close()
-
-
-@notification_bp.route('/notifications/production/all', methods=['GET', 'OPTIONS'])
-@token_required
-def get_all_notifications_including_dismissed():
-    """
-    ✅ NEW: Get ALL notifications for current user (including dismissed)
-    Used by the full notifications page
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-
-    session = SessionLocal()
-    try:
-        # ✅ Get ALL notifications for current user (including dismissed)
-        notifications = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id
-        ).order_by(
-            ProductionNotification.created_at.desc()
-        ).all()
-
-        return jsonify([
-            {
-                'id': n.id,
-                'job_id': n.job_id,
-                'customer_id': n.customer_id,
-                'form_submission_id': n.form_submission_id,
-                'form_type': n.form_type,
+        notifications = session.execute(query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        }).fetchall()
+        
+        result = []
+        for n in notifications:
+            result.append({
+                'notification_id': n.notification_id,
+                'employee_id': n.employee_id,
+                'client_id': n.client_id,
+                'client_name': n.client_company_name if hasattr(n, 'client_company_name') else None,
+                'contract_id': n.contract_id,
+                'property_id': n.property_id,
+                'notification_type': n.notification_type,
+                'priority': n.priority,
                 'message': n.message,
-                'created_at': n.created_at.isoformat() if n.created_at else None,
-                'moved_by': n.moved_by,
                 'read': n.read,
-                'dismissed': n.dismissed
-            } for n in notifications
-        ]), 200
+                'dismissed': n.dismissed,
+                'created_at': n.created_at.isoformat() if n.created_at else None,
+                'read_at': n.read_at.isoformat() if n.read_at else None
+            })
+        
+        return jsonify(result), 200
         
     except Exception as e:
-        session.rollback()
-        current_app.logger.exception(f"Error fetching all notifications: {e}")
+        current_app.logger.error(f"Error fetching notifications: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/<string:notification_id>/read', methods=['PATCH', 'OPTIONS'])
+@notification_bp.route('/notifications/all', methods=['GET'])
 @token_required
-def mark_as_read(notification_id):
-    """
-    Mark a specific notification as read (but don't delete it).
-    ✅ Only works for notifications owned by current user
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
-    session = SessionLocal() 
+@require_tenant
+def get_all_notifications_including_dismissed(tenant_id, employee_id):
+    """Get ALL notifications for current employee (including dismissed)"""
+    session = SessionLocal()
     try:
-        notification = session.get(ProductionNotification, notification_id)
+        query = text("""
+            SELECT 
+                n.*,
+                c.client_company_name
+            FROM "StreemLyne_MT"."Notification_Master" n
+            LEFT JOIN "StreemLyne_MT"."Client_Master" c ON n.client_id = c.client_id
+            WHERE n.tenant_id = :tenant_id
+                AND (n.employee_id = :employee_id OR n.employee_id IS NULL)
+            ORDER BY n.created_at DESC
+        """)
+        
+        notifications = session.execute(query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        }).fetchall()
+        
+        result = []
+        for n in notifications:
+            result.append({
+                'notification_id': n.notification_id,
+                'employee_id': n.employee_id,
+                'client_id': n.client_id,
+                'client_name': n.client_company_name if hasattr(n, 'client_company_name') else None,
+                'contract_id': n.contract_id,
+                'property_id': n.property_id,
+                'notification_type': n.notification_type,
+                'priority': n.priority,
+                'message': n.message,
+                'read': n.read,
+                'dismissed': n.dismissed,
+                'created_at': n.created_at.isoformat() if n.created_at else None,
+                'read_at': n.read_at.isoformat() if n.read_at else None
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error fetching all notifications: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# MARK AS READ
+# ============================================================================
+
+@notification_bp.route('/notifications/<int:notification_id>/read', methods=['PATCH'])
+@token_required
+@require_tenant
+def mark_as_read(notification_id, tenant_id, employee_id):
+    """Mark a specific notification as read"""
+    session = SessionLocal()
+    try:
+        # Verify notification exists and belongs to user
+        check_query = text("""
+            SELECT notification_id FROM "StreemLyne_MT"."Notification_Master"
+            WHERE notification_id = :notification_id
+                AND tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+        """)
+        
+        notification = session.execute(check_query, {
+            'notification_id': notification_id,
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        }).fetchone()
+        
         if not notification:
             return jsonify({'error': 'Notification not found'}), 404
-
-        # ✅ Check ownership
-        if notification.user_id != request.current_user.id:
-            return jsonify({'error': 'Unauthorized'}), 403
-
-        notification.read = True
+        
+        # Mark as read
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Notification_Master"
+            SET read = true,
+                read_at = CURRENT_TIMESTAMP
+            WHERE notification_id = :notification_id
+        """)
+        
+        session.execute(update_query, {'notification_id': notification_id})
         session.commit()
+        
         return jsonify({'message': 'Notification marked as read'}), 200
-            
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_app.logger.exception(f"Database error marking notification as read: {e}")
-        return jsonify({'error': 'Database error occurred'}), 500
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error marking notification as read: {e}")
+        current_app.logger.error(f"Error marking notification as read: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/mark-all-read', methods=['PATCH', 'OPTIONS'])
+@notification_bp.route('/notifications/mark-all-read', methods=['PATCH'])
 @token_required
-def mark_all_as_read():
-    """
-    ✅ Mark all unread notifications as read for CURRENT USER ONLY
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def mark_all_as_read(tenant_id, employee_id):
+    """Mark all unread notifications as read for current employee"""
     session = SessionLocal()
     try:
-        updated_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id,
-            ProductionNotification.read == False
-        ).update(
-            {'read': True},
-            synchronize_session='fetch'
-        )
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Notification_Master"
+            SET read = true,
+                read_at = CURRENT_TIMESTAMP
+            WHERE tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+                AND read = false
+        """)
+        
+        result = session.execute(update_query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        })
+        
         session.commit()
         
         return jsonify({
             'message': 'All notifications marked as read',
-            'count': updated_count
+            'count': result.rowcount
         }), 200
-            
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_app.logger.exception(f"Database error marking all as read: {e}")
-        return jsonify({'error': 'Database error occurred'}), 500
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error marking all as read: {e}")
+        current_app.logger.error(f"Error marking all as read: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/<string:notification_id>/dismiss', methods=['POST', 'OPTIONS'])
+# ============================================================================
+# DISMISS NOTIFICATION
+# ============================================================================
+
+@notification_bp.route('/notifications/<int:notification_id>/dismiss', methods=['POST'])
 @token_required
-def dismiss_notification(notification_id):
-    """
-    ✅ NEW: Dismiss notification from sidebar (but keep in full notifications page)
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def dismiss_notification(notification_id, tenant_id, employee_id):
+    """Dismiss notification from sidebar (but keep in full notifications page)"""
     session = SessionLocal()
     try:
-        notification = session.get(ProductionNotification, notification_id)
+        # Verify notification exists
+        check_query = text("""
+            SELECT notification_id FROM "StreemLyne_MT"."Notification_Master"
+            WHERE notification_id = :notification_id
+                AND tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+        """)
+        
+        notification = session.execute(check_query, {
+            'notification_id': notification_id,
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        }).fetchone()
         
         if not notification:
             return jsonify({'error': 'Notification not found'}), 404
         
-        # ✅ Check ownership
-        if notification.user_id != request.current_user.id:
-            return jsonify({'error': 'Unauthorized'}), 403
+        # Mark as dismissed
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Notification_Master"
+            SET dismissed = true
+            WHERE notification_id = :notification_id
+        """)
         
-        notification.dismissed = True
+        session.execute(update_query, {'notification_id': notification_id})
         session.commit()
         
         return jsonify({'success': True, 'message': 'Notification dismissed'}), 200
         
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error dismissing notification: {e}")
+        current_app.logger.error(f"Error dismissing notification: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/<string:notification_id>', methods=['DELETE', 'OPTIONS'])
+# ============================================================================
+# DELETE NOTIFICATION
+# ============================================================================
+
+@notification_bp.route('/notifications/<int:notification_id>', methods=['DELETE'])
 @token_required
-def delete_notification(notification_id):
-    """
-    ✅ Permanently delete notification (only for current user)
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def delete_notification(notification_id, tenant_id, employee_id):
+    """Permanently delete notification"""
     session = SessionLocal()
     try:
-        notification = session.get(ProductionNotification, notification_id)
+        delete_query = text("""
+            DELETE FROM "StreemLyne_MT"."Notification_Master"
+            WHERE notification_id = :notification_id
+                AND tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+        """)
         
-        if not notification:
+        result = session.execute(delete_query, {
+            'notification_id': notification_id,
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        })
+        
+        if result.rowcount == 0:
             return jsonify({'error': 'Notification not found'}), 404
         
-        # ✅ Check ownership
-        if notification.user_id != request.current_user.id:
-            return jsonify({'error': 'Unauthorized'}), 403
-        
-        session.delete(notification)
         session.commit()
         
         return jsonify({'message': 'Notification deleted'}), 200
-            
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_app.logger.exception(f"Database error deleting notification: {e}")
-        return jsonify({'error': 'Database error occurred'}), 500
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error deleting notification: {e}")
+        current_app.logger.error(f"Error deleting notification: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/clear-all', methods=['DELETE', 'OPTIONS'])
+@notification_bp.route('/notifications/clear-all', methods=['DELETE'])
 @token_required
-def clear_all_notifications():
-    """
-    ✅ Delete all notifications permanently for CURRENT USER ONLY
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def clear_all_notifications(tenant_id, employee_id):
+    """Delete all notifications permanently for current employee"""
     session = SessionLocal()
     try:
-        deleted_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id
-        ).delete(synchronize_session='fetch')
+        delete_query = text("""
+            DELETE FROM "StreemLyne_MT"."Notification_Master"
+            WHERE tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+        """)
+        
+        result = session.execute(delete_query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        })
+        
         session.commit()
         
         return jsonify({
             'message': 'All notifications cleared',
-            'count': deleted_count
+            'count': result.rowcount
         }), 200
-            
-    except SQLAlchemyError as e:
-        session.rollback()
-        current_app.logger.exception(f"Database error clearing all notifications: {e}")
-        return jsonify({'error': 'Database error occurred'}), 500
+        
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error clearing all notifications: {e}")
+        current_app.logger.error(f"Error clearing all notifications: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/clear-dismissed', methods=['POST', 'OPTIONS'])
+@notification_bp.route('/notifications/clear-dismissed', methods=['POST'])
 @token_required
-def clear_dismissed_notifications():
-    """
-    ✅ NEW: Clear all dismissed notifications for current user
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
-    
+@require_tenant
+def clear_dismissed_notifications(tenant_id, employee_id):
+    """Clear all dismissed notifications for current employee"""
     session = SessionLocal()
     try:
-        deleted_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id,
-            ProductionNotification.dismissed == True
-        ).delete(synchronize_session='fetch')
+        delete_query = text("""
+            DELETE FROM "StreemLyne_MT"."Notification_Master"
+            WHERE tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+                AND dismissed = true
+        """)
+        
+        result = session.execute(delete_query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        })
         
         session.commit()
+        
         return jsonify({
             'success': True,
-            'message': f'Cleared {deleted_count} dismissed notifications',
-            'count': deleted_count
+            'message': f'Cleared {result.rowcount} dismissed notifications',
+            'count': result.rowcount
         }), 200
         
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Error clearing dismissed notifications: {e}")
+        current_app.logger.error(f"Error clearing dismissed notifications: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
 
 
-@notification_bp.route('/notifications/production/stats', methods=['GET', 'OPTIONS'])
-@token_required
-def get_notification_stats():
-    """
-    ✅ Get statistics about notifications for CURRENT USER ONLY
-    """
-    if request.method == 'OPTIONS':
-        return jsonify({}), 200
+# ============================================================================
+# NOTIFICATION STATS
+# ============================================================================
 
+@notification_bp.route('/notifications/stats', methods=['GET'])
+@token_required
+@require_tenant
+def get_notification_stats(tenant_id, employee_id):
+    """Get statistics about notifications for current employee"""
     session = SessionLocal()
     try:
-        total_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id
-        ).count()
+        stats_query = text("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN read = false THEN 1 ELSE 0 END) as unread,
+                SUM(CASE WHEN read = true THEN 1 ELSE 0 END) as read,
+                SUM(CASE WHEN dismissed = true THEN 1 ELSE 0 END) as dismissed
+            FROM "StreemLyne_MT"."Notification_Master"
+            WHERE tenant_id = :tenant_id
+                AND (employee_id = :employee_id OR employee_id IS NULL)
+        """)
         
-        unread_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id,
-            ProductionNotification.read == False
-        ).count()
-        
-        dismissed_count = session.query(ProductionNotification).filter(
-            ProductionNotification.user_id == request.current_user.id,
-            ProductionNotification.dismissed == True
-        ).count()
-        
-        read_count = total_count - unread_count
+        stats = session.execute(stats_query, {
+            'tenant_id': str(tenant_id),
+            'employee_id': employee_id
+        }).fetchone()
         
         return jsonify({
-            'total': total_count,
-            'unread': unread_count,
-            'read': read_count,
-            'dismissed': dismissed_count
+            'total': stats.total or 0,
+            'unread': stats.unread or 0,
+            'read': stats.read or 0,
+            'dismissed': stats.dismissed or 0
         }), 200
-            
+        
     except Exception as e:
-        session.rollback()
-        current_app.logger.exception(f"Error fetching notification stats: {e}")
+        current_app.logger.error(f"Error fetching notification stats: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()

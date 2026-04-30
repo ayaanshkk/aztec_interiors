@@ -3,6 +3,8 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
+
+from backend.routes import tasks_routes
 from .db import Base, engine, SessionLocal, test_connection, init_db
 
 load_dotenv()
@@ -127,22 +129,23 @@ def create_app():
     # BLUEPRINTS
     # ============================================
     from backend.routes import (
-        auth_routes, form_routes, db_routes,
-        notification_routes, assignment_routes, appliance_routes,
-        customer_routes, file_routes, materials_routes, job_routes, 
-        action_items_routes, quotation_routes,
+        auth_routes, form_routes,
+        notification_routes, appliance_routes,
+        customer_routes, file_routes, materials_routes, 
+        action_items_routes, quotation_routes, pipeline_routes, tasks_routes, calendar_routes, project_routes,
     )
 
     app.register_blueprint(auth_routes.auth_bp)
     app.register_blueprint(form_routes.form_bp)
     app.register_blueprint(customer_routes.customer_bp)
-    app.register_blueprint(db_routes.db_bp)
     app.register_blueprint(notification_routes.notification_bp)
-    app.register_blueprint(assignment_routes.assignment_bp)
     app.register_blueprint(appliance_routes.appliance_bp)
     app.register_blueprint(file_routes.file_bp)
     app.register_blueprint(materials_routes.materials_bp)
-    app.register_blueprint(job_routes.job_bp)
+    app.register_blueprint(pipeline_routes.pipeline_bp)
+    app.register_blueprint(tasks_routes.tasks_bp)
+    app.register_blueprint(calendar_routes.calendar_bp)
+    app.register_blueprint(project_routes.project_bp)
     app.register_blueprint(action_items_routes.action_items_bp)
     app.register_blueprint(quotation_routes.quotation_bp)
 
