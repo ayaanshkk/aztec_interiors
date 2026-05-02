@@ -183,7 +183,7 @@ def create_customer(tenant_id, employee_id):
 @customer_bp.route('/customers/<int:customer_id>', methods=['GET'])
 @token_required
 @require_tenant
-def get_customer(customer_id, tenant_id, employee_id):
+def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Get a single client by ID with all their projects"""
     session = SessionLocal()
     try:
@@ -201,18 +201,37 @@ def get_customer(customer_id, tenant_id, employee_id):
         if not client:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Get projects
+        # Get projects with form counts (excluding customer_checklist)
         projects_query = text("""
-            SELECT * FROM "StreemLyne_MT"."Project_Details"
-            WHERE client_id = :client_id
-            ORDER BY created_at DESC
+            SELECT 
+                pd.project_id,
+                pd.project_title,
+                pd.project_type,
+                pd.stage,
+                pd.date_of_measure,
+                pd.project_description,
+                pd.start_date,
+                pd.end_date,
+                pd.status,
+                pd.notes,
+                pd.created_at,
+                (
+                    SELECT COUNT(*) 
+                    FROM "StreemLyne_MT"."Customer_Form_Submissions" cfs
+                    WHERE cfs.project_id = pd.project_id
+                      AND cfs.form_type != 'customer_checklist'
+                ) as form_count
+            FROM "StreemLyne_MT"."Project_Details" pd
+            WHERE pd.client_id = :client_id AND pd.tenant_id = :tenant_id
+            ORDER BY pd.created_at DESC
         """)
         
         projects = session.execute(projects_query, {
-            'client_id': customer_id
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
         }).fetchall()
         
-        # Get form submissions
+        # Get form submissions (exclude customer_checklist - it's just metadata)
         forms_query = text("""
             SELECT 
                 form_submission_id,
@@ -224,7 +243,9 @@ def get_customer(customer_id, tenant_id, employee_id):
                 project_id,
                 opportunity_id
             FROM "StreemLyne_MT"."Customer_Form_Submissions"
-            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            WHERE client_id = :client_id 
+              AND tenant_id = :tenant_id
+              AND form_type != 'customer_checklist'
             ORDER BY submitted_at DESC
         """)
         
@@ -248,12 +269,18 @@ def get_customer(customer_id, tenant_id, employee_id):
             'created_at': client.created_at.isoformat() if client.created_at else None,
             'projects': [{
                 'id': p.project_id,
+                'project_name': p.project_title,  # ✅ Frontend expects this
                 'project_title': p.project_title,
+                'project_type': p.project_type,
+                'stage': p.stage,
+                'date_of_measure': p.date_of_measure.isoformat() if p.date_of_measure else None,
                 'project_description': p.project_description,
                 'start_date': p.start_date.isoformat() if p.start_date else None,
                 'end_date': p.end_date.isoformat() if p.end_date else None,
                 'status': p.status,
-                'created_at': p.created_at.isoformat() if p.created_at else None
+                'notes': p.notes,
+                'created_at': p.created_at.isoformat() if p.created_at else None,
+                'form_count': p.form_count or 0
             } for p in projects],
             'forms': [{
                 'id': f.form_submission_id,
@@ -275,11 +302,10 @@ def get_customer(customer_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @customer_bp.route('/customers/<int:customer_id>', methods=['PUT'])
 @token_required
 @require_tenant
-def update_customer(customer_id, tenant_id, employee_id):
+def update_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Update a client"""
     session = SessionLocal()
     try:
@@ -330,11 +356,10 @@ def update_customer(customer_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @customer_bp.route('/customers/<int:customer_id>/stage', methods=['PATCH'])
 @token_required
 @require_tenant
-def update_customer_stage(customer_id, tenant_id, employee_id):
+def update_customer_stage(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Update customer stage directly"""
     session = SessionLocal()
     try:
@@ -391,22 +416,22 @@ def update_customer_stage(customer_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @customer_bp.route('/customers/<int:customer_id>', methods=['DELETE'])
 @token_required
 @require_tenant
-def delete_customer(customer_id, tenant_id, employee_id):
+def delete_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Delete a client (soft delete)"""
     session = SessionLocal()
     try:
         # Check if client has projects
         check_query = text("""
             SELECT COUNT(*) as count FROM "StreemLyne_MT"."Project_Details"
-            WHERE client_id = :client_id
+            WHERE client_id = :client_id AND tenant_id = :tenant_id
         """)
         
         result = session.execute(check_query, {
-            'client_id': customer_id
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
         }).fetchone()
         
         if result.count > 0:
@@ -440,7 +465,6 @@ def delete_customer(customer_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 # ==========================================
 # PROJECT ENDPOINTS
 # ==========================================
@@ -448,7 +472,7 @@ def delete_customer(customer_id, tenant_id, employee_id):
 @customer_bp.route('/customers/<int:customer_id>/projects', methods=['GET'])
 @token_required
 @require_tenant
-def get_customer_projects(customer_id, tenant_id, employee_id):
+def get_customer_projects(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Get all projects for a specific customer"""
     session = SessionLocal()
     try:
@@ -459,12 +483,13 @@ def get_customer_projects(customer_id, tenant_id, employee_id):
             FROM "StreemLyne_MT"."Project_Details" p
             INNER JOIN "StreemLyne_MT"."Client_Master" c 
                 ON p.client_id = c.client_id
-            WHERE p.client_id = :client_id
+            WHERE p.client_id = :client_id AND p.tenant_id = :tenant_id
             ORDER BY p.created_at DESC
         """)
         
         projects = session.execute(query, {
-            'client_id': customer_id
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
         }).fetchall()
         
         result = {
@@ -493,11 +518,10 @@ def get_customer_projects(customer_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @customer_bp.route('/customers/<int:customer_id>/projects', methods=['POST'])
 @token_required
 @require_tenant
-def create_project(customer_id, tenant_id, employee_id):
+def create_project(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Create a new project for a customer"""
     session = SessionLocal()
     try:
@@ -510,14 +534,15 @@ def create_project(customer_id, tenant_id, employee_id):
         
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Project_Details"
-            (client_id, project_title, project_description, start_date, end_date, 
+            (tenant_id, client_id, project_title, project_description, start_date, end_date, 
              employee_id, assigned_employee_id, status)
-            VALUES (:client_id, :title, :description, :start_date, :end_date, 
+            VALUES (:tenant_id, :client_id, :title, :description, :start_date, :end_date, 
                     :employee_id, :assigned_to, :status)
             RETURNING project_id
         """)
         
         result = session.execute(insert_query, {
+            'tenant_id': str(tenant_id),
             'client_id': customer_id,
             'title': data['project_title'],
             'description': data.get('project_description', ''),
@@ -545,7 +570,6 @@ def create_project(customer_id, tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @customer_bp.route('/projects/<int:project_id>', methods=['GET'])
 @token_required
@@ -717,7 +741,7 @@ def delete_project(project_id, tenant_id, employee_id):
 @customer_bp.route('/customers/<int:customer_id>/forms', methods=['GET'])
 @token_required
 @require_tenant
-def get_customer_forms(customer_id, tenant_id, employee_id):
+def get_customer_forms(tenant_id, employee_id, customer_id):
     """Get all form submissions for a customer"""
     session = SessionLocal()
     try:
@@ -737,7 +761,9 @@ def get_customer_forms(customer_id, tenant_id, employee_id):
                 reviewed_at,
                 review_notes
             FROM "StreemLyne_MT"."Customer_Form_Submissions"
-            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            WHERE client_id = :client_id 
+              AND tenant_id = :tenant_id
+              AND form_type != 'customer_checklist'  -- ✅ EXCLUDE customer_checklist
             ORDER BY submitted_at DESC
         """)
         
@@ -931,7 +957,7 @@ def review_form_submission(form_id, tenant_id, employee_id):
 @customer_bp.route('/customers/<int:customer_id>/documents', methods=['GET'])
 @token_required
 @require_tenant
-def get_customer_documents(customer_id, tenant_id, employee_id):
+def get_customer_documents(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
     """Get all documents for a customer"""
     session = SessionLocal()
     try:
@@ -964,7 +990,6 @@ def get_customer_documents(customer_id, tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @customer_bp.route('/documents/<int:document_id>', methods=['DELETE'])
 @token_required

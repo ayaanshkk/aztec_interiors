@@ -804,7 +804,6 @@ def submit_customer_form():
     finally:
         session.close()
 
-
 @form_bp.route('/cleanup-expired-tokens', methods=['POST'])
 def cleanup_expired_tokens():
     """Cleanup expired tokens"""

@@ -485,23 +485,51 @@ def view_document(filename):
 # BACKWARD COMPATIBILITY ROUTES
 # ==========================================
 
-@file_bp.route('/files/drawings', methods=['GET', 'POST'])
+@file_bp.route('/files/drawings', methods=['GET'])
 @token_required
 @require_tenant
 def handle_drawings_compat(tenant_id, employee_id):
-    """Backward compatibility for drawings - redirects to documents with category filter"""
-    if request.method == 'GET':
-        # Add category=drawing to args
-        request.args = request.args.copy()
-        request.args['category'] = 'drawing'
-        return handle_customer_documents(tenant_id, employee_id)
+    """Get customer drawing documents"""
+    customer_id = request.args.get('customer_id')
     
-    elif request.method == 'POST':
-        # Ensure category is set to drawing
-        if 'category' not in request.form:
-            request.form = request.form.copy()
-            request.form['category'] = 'drawing'
-        return handle_customer_documents(tenant_id, employee_id)
+    session = SessionLocal()
+    try:
+        query = text("""
+            SELECT 
+                id,
+                client_id,
+                file_name,
+                file_url,
+                document_category,
+                uploaded_at
+            FROM "StreemLyne_MT"."Customer_Documents"
+            WHERE (:customer_id IS NULL OR client_id = :customer_id)
+            AND (document_category IN ('pdf', 'image', 'drawing') OR document_category IS NULL)
+            ORDER BY uploaded_at DESC
+        """)
+        
+        docs = session.execute(query, {
+            'customer_id': customer_id
+        }).fetchall()
+        
+        result = []
+        for doc in docs:
+            result.append({
+                'id': str(doc.id),
+                'customer_id': doc.client_id,
+                'filename': doc.file_name,
+                'url': doc.file_url,
+                'type': doc.document_category or 'other',
+                'created_at': doc.uploaded_at.isoformat() if doc.uploaded_at else None
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error fetching drawings: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
 
 
 @file_bp.route('/files/drawings/<int:drawing_id>', methods=['GET', 'PATCH', 'DELETE'])
@@ -518,22 +546,51 @@ def view_drawing_compat(filename):
     return view_document(filename)
 
 
-@file_bp.route('/files/forms', methods=['GET', 'POST'])
+@file_bp.route('/files/forms', methods=['GET'])
 @token_required
 @require_tenant
 def handle_forms_compat(tenant_id, employee_id):
-    """Backward compatibility for forms - redirects to documents with category filter"""
-    if request.method == 'GET':
-        request.args = request.args.copy()
-        request.args['category'] = 'form'
-        return handle_customer_documents(tenant_id, employee_id)
+    """Get customer form documents"""
+    customer_id = request.args.get('customer_id')
     
-    elif request.method == 'POST':
-        if 'category' not in request.form:
-            request.form = request.form.copy()
-            request.form['category'] = 'form'
-        return handle_customer_documents(tenant_id, employee_id)
-
+    session = SessionLocal()
+    try:
+        query = text("""
+            SELECT 
+                id,
+                client_id,
+                file_name,
+                file_url,
+                document_category,
+                uploaded_at
+            FROM "StreemLyne_MT"."Customer_Documents"
+            WHERE (:customer_id IS NULL OR client_id = :customer_id)
+            AND document_category IN ('excel', 'pdf', 'csv')
+            ORDER BY uploaded_at DESC
+        """)
+        
+        docs = session.execute(query, {
+            'customer_id': customer_id
+        }).fetchall()
+        
+        result = []
+        for doc in docs:
+            result.append({
+                'id': str(doc.id),
+                'customer_id': doc.client_id,
+                'filename': doc.file_name,
+                'url': doc.file_url,
+                'type': doc.document_category or 'other',
+                'created_at': doc.uploaded_at.isoformat() if doc.uploaded_at else None
+            })
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error fetching form documents: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
 
 @file_bp.route('/files/forms/<int:form_id>', methods=['GET', 'PATCH', 'DELETE'])
 @token_required
