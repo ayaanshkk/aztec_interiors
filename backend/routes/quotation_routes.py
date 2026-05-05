@@ -126,10 +126,13 @@ def get_quotations(tenant_id, employee_id):
         result = []
         for q in quotations:
             result.append({
-                'quotation_id': q.quotation_id,
+                'id': q.quotation_id,  # ✅ CRITICAL: Frontend needs this for delete!
+                'quotation_id': q.quotation_id,  # Keep for backward compatibility
                 'reference_number': q.reference_number,
                 'client_id': q.client_id,
+                'customer_id': q.client_id,  # ✅ ADDED: Frontend also checks this
                 'client_name': q.client_company_name,
+                'customer_name': q.client_company_name,  # ✅ ADDED: Alternative field name
                 'project_id': q.project_id,
                 'total': float(q.total) if q.total else 0.0,
                 'status': q.status,
@@ -146,7 +149,6 @@ def get_quotations(tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @quotation_bp.route('/quotations', methods=['POST'])
 @token_required
