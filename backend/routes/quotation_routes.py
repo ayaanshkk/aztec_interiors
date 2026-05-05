@@ -142,7 +142,7 @@ def get_quotations(tenant_id, employee_id):
         return jsonify(result), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error fetching quotations: {e}")
+        print(f"Error fetching quotations: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -236,7 +236,7 @@ def create_quotation(tenant_id, employee_id):
         
         session.commit()
         
-        current_app.logger.info(f"Quotation {ref_num} created")
+        print(f"Quotation {ref_num} created")
         
         return jsonify({
             'quotation_id': quotation_id,
@@ -246,7 +246,7 @@ def create_quotation(tenant_id, employee_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error creating quotation: {e}")
+        print(f"Error creating quotation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -263,7 +263,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
     """Generate quotation from checklist form submission"""
     session = SessionLocal()
     try:
-        current_app.logger.info(f"📋 Generating quote from submission {form_submission_id}")
+        print(f"📋 Generating quote from submission {form_submission_id}")
         
         # Get form submission
         form_query = text("""
@@ -380,7 +380,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         
         session.commit()
         
-        current_app.logger.info(f"✅ Quote {ref_num}: {matched_count} auto-priced, {manual_count} manual")
+        print(f"✅ Quote {ref_num}: {matched_count} auto-priced, {manual_count} manual")
         
         return jsonify({
             'success': True,
@@ -396,9 +396,9 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error generating quotation: {e}")
+        print(f"Error generating quotation: {e}")
         import traceback
-        current_app.logger.error(traceback.format_exc())
+        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -409,7 +409,7 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
     Returns (price, pricelist_id, width, height, depth, needs_manual_pricing, description)
     """
     try:
-        current_app.logger.info(f"🔍 Looking up code: {item_code}, door_type: {door_type}")
+        print(f"🔍 Looking up code: {item_code}, door_type: {door_type}")
         
         # Build query based on whether door_type is specified
         if door_type and door_type != 'Base Cabinet Only':
@@ -461,7 +461,7 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
             }).fetchone()
         
         if result:
-            current_app.logger.info(
+            print(
                 f"✅ Found: {result.item_name} ({result.door_type or 'Base'}) - £{result.base_price}"
             )
             return (
@@ -475,47 +475,132 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
             )
         
         # No match found
-        current_app.logger.warning(f"⚠️ No price found for code: {item_code} with door_type: {door_type}")
+        print(f"⚠️ No price found for code: {item_code} with door_type: {door_type}")
         return (0.0, None, None, None, None, True, None)  # Needs manual pricing
         
     except Exception as e:
-        current_app.logger.error(f"❌ Error finding price by code: {e}")
+        print(f"❌ Error finding price by code: {e}")
         return (0.0, None, None, None, None, True, None)
 
 
 def extract_checklist_items(form_data, session, tenant_id):
     """
     Extract ONLY main components from checklist for quotation.
-    
-    Main components:
-    1. Door Type
-    2. Handle Code
-    3. Worktop Material Type
-    4. Appliances (if not N/A)
-    5. Sink (if not N/A)
-    6. Tap (if not N/A)
+    WITH DIAGNOSTIC LOGGING to debug additional doors
     """
     items = []
     
-    # ===== 1. DOOR TYPE =====
+    # ===== DIAGNOSTIC LOGGING START =====
+    import json
+    print("=" * 80)
+    print("📋 BEDROOM CHECKLIST DEBUG")
+    print("=" * 80)
+    print(f"🔑 All keys: {list(form_data.keys())}")
+    print(f"🚪 door_type: {form_data.get('door_type')}")
+    print(f"🚪 door_color: {form_data.get('door_color')}")
+    print(f"🚪 door_details: {form_data.get('door_details')}")
+    print(f"🚪 door_style: {form_data.get('door_style')}")
+    print(f"📄 FULL FORM DATA:")
+    try:
+        print(json.dumps(form_data, indent=2, default=str))
+    except:
+        print(str(form_data))
+    print("=" * 80)
+    # ===== DIAGNOSTIC LOGGING END =====
+    
+    # ===== 1. MAIN DOOR TYPE =====
     door_type = form_data.get('door_type', '').strip()
+    door_color = form_data.get('door_color', '').strip()
     
     if door_type and door_type != 'N/A' and door_type != '':
         items.append({
             'item': f'Door - {door_type}',
             'description': '',
-            'colour': 'Colour',
+            'colour': door_color if door_color and door_color != 'N/A' else 'Colour',
             'qty': 1,
             'price': 0,
             'amount': 0,
             'pricelist_id': None,
             'needs_manual_pricing': True
         })
+        print(f"✅ Added main door: {door_type} ({door_color})")
+    
+    # ===== 1B. ADDITIONAL DOORS - TRY MULTIPLE FIELD NAMES =====
+    # Try different possible field names
+    additional_doors = None
+    
+    for field_name in ['door_details', 'additional_doors', 'extra_doors', 'doorDetails', 'additionalDoors']:
+        if field_name in form_data:
+            additional_doors = form_data.get(field_name, [])
+            print(f"✅ Found additional doors in field: '{field_name}'")
+            print(f"   Value: {additional_doors}")
+            break
+    
+    if not additional_doors:
+        print("⚠️ No additional doors field found")
+    
+    if additional_doors and isinstance(additional_doors, list):
+        print(f"📦 Processing {len(additional_doors)} additional door entries")
+        
+        for idx, additional_door in enumerate(additional_doors):
+            print(f"   Door {idx + 1}: {additional_door}")
+            
+            if not isinstance(additional_door, dict):
+                print(f"   ⚠️ Not a dict, skipping")
+                continue
+            
+            # Try multiple field name variations
+            add_door_style = (
+                additional_door.get('door_style') or 
+                additional_door.get('doorStyle') or 
+                additional_door.get('style') or ''
+            ).strip()
+            
+            add_door_color = (
+                additional_door.get('door_color') or 
+                additional_door.get('doorColor') or 
+                additional_door.get('color') or ''
+            ).strip()
+            
+            add_quantity = (
+                additional_door.get('quantity') or 
+                additional_door.get('qty') or ''
+            ).strip()
+            
+            print(f"   Extracted: style={add_door_style}, color={add_door_color}, qty={add_quantity}")
+            
+            # Skip if no door style
+            if not add_door_style or add_door_style == 'N/A':
+                print(f"   ⚠️ No door style, skipping")
+                continue
+            
+            # Parse quantity
+            qty = 1
+            try:
+                qty = int(add_quantity) if add_quantity and add_quantity != 'N/A' else 1
+            except:
+                qty = 1
+            
+            # Skip if quantity is 0
+            if qty <= 0:
+                print(f"   ⚠️ Quantity is 0, skipping")
+                continue
+            
+            items.append({
+                'item': f'Door - {add_door_style}',
+                'description': '',
+                'colour': add_door_color if add_door_color and add_door_color != 'N/A' else 'Colour',
+                'qty': qty,
+                'price': 0,
+                'amount': 0,
+                'pricelist_id': None,
+                'needs_manual_pricing': True
+            })
+            print(f"   ✅ Added additional door: {add_door_style} ({add_door_color}) x{qty}")
     
     # ===== 2. HANDLES =====
     handles_code = form_data.get('handles_code', '').strip()
     handles_qty = form_data.get('handles_quantity', '').strip()
-    handles_size = form_data.get('handles_size', '').strip()
     
     if handles_code and handles_code != 'N/A' and handles_code != '':
         handle_price, handle_pricelist_id, _, needs_pricing = find_price_for_item(
@@ -530,7 +615,7 @@ def extract_checklist_items(form_data, session, tenant_id):
         
         items.append({
             'item': f'Handles - {handles_code}',
-            'description': f'{handles_size} size' if handles_size and handles_size != 'N/A' else '-',
+            'description': '',
             'colour': 'Colour',
             'qty': qty,
             'price': handle_price,
@@ -542,26 +627,15 @@ def extract_checklist_items(form_data, session, tenant_id):
     # ===== 3. WORKTOP =====
     worktop_type = form_data.get('worktop_material_type', '').strip()
     worktop_color = form_data.get('worktop_material_color', '').strip()
-    worktop_size = form_data.get('worktop_size', '').strip()
     
     if worktop_type and worktop_type != 'N/A' and worktop_type != '':
         worktop_price, worktop_pricelist_id, _, needs_pricing = find_price_for_item(
-            session, tenant_id, 'worktop', 'Worktops', f'{worktop_type} {worktop_size}'
+            session, tenant_id, 'worktop', 'Worktops', f'{worktop_type}'
         )
-        
-        description_parts = []
-        if worktop_size and worktop_size != 'N/A':
-            description_parts.append(f'{worktop_size} thickness')
-        
-        worktop_features = form_data.get('worktop_features', [])
-        if worktop_features and isinstance(worktop_features, list):
-            features = [f for f in worktop_features if f and f != 'N/A']
-            if features:
-                description_parts.append(', '.join(features))
         
         items.append({
             'item': f'Worktop - {worktop_type}',
-            'description': ', '.join(description_parts) if description_parts else '-',
+            'description': '',
             'colour': worktop_color if worktop_color and worktop_color != 'N/A' else 'H1',
             'qty': 1,
             'price': worktop_price,
@@ -598,7 +672,7 @@ def extract_checklist_items(form_data, session, tenant_id):
                 
                 items.append({
                     'item': f'Appliance - {appliance_name}',
-                    'description': f'Make: {make}, Model: {model}',
+                    'description': '',  # ✅ BLANK
                     'colour': 'Colour',
                     'qty': 1,
                     'price': appliance_price,
@@ -622,7 +696,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             
             items.append({
                 'item': 'Appliance - INTG Fridge',
-                'description': f'Make: {integ_fridge_make}, Model: {form_data.get("integ_fridge_model", "N/A")}',
+                'description': '',  # ✅ BLANK
                 'colour': 'Colour',
                 'qty': qty,
                 'price': fridge_price,
@@ -646,7 +720,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             
             items.append({
                 'item': 'Appliance - INTG Freezer',
-                'description': f'Make: {integ_freezer_make}, Model: {form_data.get("integ_freezer_model", "N/A")}',
+                'description': '',  # ✅ BLANK
                 'colour': 'Colour',
                 'qty': qty,
                 'price': freezer_price,
@@ -668,7 +742,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             
             items.append({
                 'item': 'Sink',
-                'description': f'{sink_details}, Model: {form_data.get("sink_model", "N/A")}',
+                'description': '',  # ✅ BLANK
                 'colour': 'Colour',
                 'qty': 1,
                 'price': sink_price,
@@ -688,7 +762,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             
             items.append({
                 'item': 'Tap',
-                'description': f'{tap_details}, Model: {form_data.get("tap_model", "N/A")}',
+                'description': '',  # ✅ BLANK
                 'colour': 'Colour',
                 'qty': 1,
                 'price': tap_price,
@@ -697,6 +771,7 @@ def extract_checklist_items(form_data, session, tenant_id):
                 'needs_manual_pricing': needs_pricing
             })
     
+    print(f"📊 Total items extracted: {len(items)}")
     return items
  
  
@@ -755,7 +830,7 @@ def find_price_for_item(session, tenant_id, item_type, category, search_term):
         )
         
     except Exception as e:
-        current_app.logger.error(f"Error finding price for {item_type}: {e}")
+        print(f"Error finding price for {item_type}: {e}")
         return (0.0, None, None, True)
  
 @quotation_bp.route('/pricelist/search', methods=['GET'])
@@ -862,7 +937,7 @@ def search_pricelist(tenant_id, employee_id):
         }), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error searching pricelist: {e}")
+        print(f"Error searching pricelist: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -1007,7 +1082,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error handling quotation: {e}")
+        print(f"Error handling quotation: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -1063,7 +1138,7 @@ def delete_quotation_item(quotation_id, item_id, tenant_id, employee_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error deleting item: {e}")
+        print(f"Error deleting item: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -1140,7 +1215,7 @@ def update_quotation_item(quotation_id, item_id, tenant_id, employee_id):
         
     except Exception as e:
         session.rollback()
-        current_app.logger.error(f"Error updating item: {e}")
+        print(f"Error updating item: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -1150,13 +1225,13 @@ def update_quotation_item(quotation_id, item_id, tenant_id, employee_id):
 @require_tenant
 def auto_price_lookup(tenant_id, employee_id):
     """
-    SMART auto-lookup price - tries multiple strategies:
-    1. Exact item_code match (prefers Kitchen category)
-    2. Width-based code generation (150mm → 15BPO, 15B)
-    3. Description keyword search
-    4. Width dimension match
+    SMART auto-lookup price with BEDROOM category detection
     
-    Returns best match with confidence score
+    Priority:
+    1. Detect category from description (robe, wardrobe, linen press, etc.)
+    2. Exact item_code match in detected category
+    3. Width-based code generation with bedroom suffixes
+    4. Fallback to Kitchen if no category detected
     """
     db_session = SessionLocal()
     try:
@@ -1164,7 +1239,7 @@ def auto_price_lookup(tenant_id, employee_id):
         description = data.get('description', '').strip()
         door_type = data.get('door_type', '').strip()
         
-        current_app.logger.info(f"🔍 Smart lookup: description='{description}', door_type='{door_type}'")
+        print(f"🔍 Smart lookup: description='{description}', door_type='{door_type}'")
         
         if not description:
             return jsonify({'found': False, 'error': 'description is required'}), 400
@@ -1172,16 +1247,43 @@ def auto_price_lookup(tenant_id, employee_id):
         import re
         
         # ==================================================================
+        # NEW: CATEGORY DETECTION
+        # ==================================================================
+        category_keywords = {
+            'Wardrobes': ['robe', 'wardrobe', 'corner robe', 'diagonal corner'],
+            'Linen Press': ['linen press', 'linen', 'press'],
+            'Wall Units': ['bridging', 'wall unit'],
+            'Chest of drawers': ['drawer', 'chest', 'bdrw'],
+        }
+        
+        detected_category = None
+        description_lower = description.lower()
+        
+        for category, keywords in category_keywords.items():
+            for keyword in keywords:
+                if keyword in description_lower:
+                    detected_category = category
+                    print(f"🏷️ Detected category: {detected_category}")
+                    break
+            if detected_category:
+                break
+        
+        # ==================================================================
         # STRATEGY 1: Direct code match
-        # Look for codes like "15BPO", "30B", "40B" directly in description
         # ==================================================================
         code_patterns = [
-            r'\b(\d+BPO)\b',  # 15BPO, 30BPO
-            r'\b(\d+BDL)\b',  # Drawerline (check BEFORE \d+B to avoid matching 40B instead of 40BDL)
-            r'\b(\d+BC)\b',   # Corner bases
-            r'\b(\d+BDD)\b',  # Dummy drawer
-            r'\b(\d+BA)\b',   # Angled base
-            r'\b(\d+B)\b',    # 15B, 30B, 40B (LAST - most generic)
+            r'\b(\d+R)\b',        # 40R, 50R, 60R (bedroom robes)
+            r'\b(\d+RC)\b',       # 80RC, 90RC (corner robes)
+            r'\b(\d+RDCNR)\b',    # 90RDCNR (diagonal corner)
+            r'\b(\d+RLP)\b',      # 40RLP, 50RLP (linen press)
+            r'\b(\d+BRS)\b',      # 40BRS, 50BRS (bridging)
+            r'\b(\d+BDRW)\b',     # 403BDRW, 402BDRW (chest)
+            r'\b(\d+BPO)\b',      # 15BPO, 30BPO (kitchen pull-out)
+            r'\b(\d+BDL)\b',      # Drawerline
+            r'\b(\d+BC)\b',       # Corner bases
+            r'\b(\d+BDD)\b',      # Dummy drawer
+            r'\b(\d+BA)\b',       # Angled base
+            r'\b(\d+B)\b',        # 15B, 30B, 40B (generic base)
         ]
         
         found_code = None
@@ -1189,70 +1291,122 @@ def auto_price_lookup(tenant_id, employee_id):
             match = re.search(pattern, description, re.IGNORECASE)
             if match:
                 found_code = match.group(1).upper()
-                current_app.logger.info(f"✅ Strategy 1: Found code '{found_code}' in description")
+                print(f"✅ Found code '{found_code}' in description")
                 break
         
         # ==================================================================
-        # STRATEGY 2: Intelligent keyword + width code generation
-        # Detect special keywords: Drawerline, Corner, Dummy, Angled
+        # STRATEGY 2: Width parsing
         # ==================================================================
         width_mm = None
         mm_match = re.search(r'(\d+)\s*mm', description, re.IGNORECASE)
         if mm_match:
             width_mm = int(mm_match.group(1))
-            current_app.logger.info(f"✅ Strategy 2: Parsed width {width_mm}mm")
+            print(f"✅ Parsed width {width_mm}mm")
         
-        # Detect special unit types from description
+        # Detect kitchen unit type suffix
         unit_type_suffix = ""
         if re.search(r'\bdrawerline\b', description, re.IGNORECASE):
             unit_type_suffix = "DL"
-            current_app.logger.info(f"✅ Detected: Drawerline unit")
-        elif re.search(r'\bcorner\b', description, re.IGNORECASE):
-            unit_type_suffix = "C"
-            current_app.logger.info(f"✅ Detected: Corner unit")
         elif re.search(r'\bdummy\b', description, re.IGNORECASE):
             unit_type_suffix = "DD"
-            current_app.logger.info(f"✅ Detected: Dummy drawer unit")
         elif re.search(r'\bangled?\b', description, re.IGNORECASE):
             unit_type_suffix = "A"
-            current_app.logger.info(f"✅ Detected: Angled unit")
         
         # ==================================================================
-        # STRATEGY 3: Build search candidates with intelligent type detection
+        # STRATEGY 3: Build search candidates WITH BEDROOM CODES
         # ==================================================================
         search_candidates = []
         
-        # Add directly found code
         if found_code:
             search_candidates.append(found_code)
         
-        # Add width-based codes WITH unit type suffix
         if width_mm:
             width_code = width_mm // 10
             
-            # If special type detected (Drawerline, Corner, etc.), prioritize that code
+            # ==== BEDROOM-SPECIFIC CODE GENERATION ====
+            if 'linen press' in description_lower or ('linen' in description_lower and 'press' in description_lower):
+                # Linen press codes: 40RLP, 50RLP, etc.
+                search_candidates.extend([
+                    f"{width_code}RLP",
+                    f"{width_mm}RLP",
+                ])
+                print(f"🛏️ Generated linen press codes: {width_code}RLP")
+            
+            elif 'bridging' in description_lower:
+                # Bridging codes: 40BRS, 50BRS, etc.
+                search_candidates.extend([
+                    f"{width_code}BRS",
+                    f"{width_mm}BRS",
+                ])
+                print(f"🛏️ Generated bridging codes: {width_code}BRS")
+            
+            elif 'corner robe' in description_lower or ('corner' in description_lower and 'robe' in description_lower):
+                # Corner robe codes: 80RC, 90RC, etc.
+                search_candidates.extend([
+                    f"{width_code}RC",
+                    f"{width_mm}RC",
+                ])
+                print(f"🛏️ Generated corner robe codes: {width_code}RC")
+            
+            elif 'diagonal' in description_lower:
+                # Diagonal corner: 90RDCNR
+                search_candidates.append(f"{width_code}RDCNR")
+                print(f"🛏️ Generated diagonal corner code: {width_code}RDCNR")
+            
+            elif 'robe' in description_lower or 'wardrobe' in description_lower:
+                # Standard robe codes: 40R, 50R, etc.
+                search_candidates.extend([
+                    f"{width_code}R",
+                    f"{width_mm}R",
+                ])
+                print(f"🛏️ Generated robe codes: {width_code}R")
+            
+            elif 'drawer' in description_lower or 'chest' in description_lower:
+                # Chest of drawers codes: 403BDRW, 402BDRW, 405BDRW
+                # Try to detect drawer count from description
+                drawer_count = None
+                if '3 x' in description_lower or 'three' in description_lower or '3x' in description_lower or '3 drawer' in description_lower:
+                    drawer_count = 3
+                elif '2 x' in description_lower or 'two' in description_lower or '2x' in description_lower or '2 drawer' in description_lower:
+                    drawer_count = 2
+                elif '5 x' in description_lower or 'five' in description_lower or '5x' in description_lower or '5 drawer' in description_lower:
+                    drawer_count = 5
+                
+                if drawer_count:
+                    search_candidates.extend([
+                        f"{width_code}{drawer_count}BDRW",
+                        f"{width_mm}{drawer_count}BDRW",
+                    ])
+                    print(f"🛏️ Generated chest codes: {width_code}{drawer_count}BDRW")
+                else:
+                    # Try all variants if count not specified
+                    for count in [2, 3, 5]:
+                        search_candidates.extend([
+                            f"{width_code}{count}BDRW",
+                        ])
+                    print(f"🛏️ Generated multiple chest codes for width {width_code}")
+            
+            # ==== KITCHEN CODE GENERATION (FALLBACK) ====
             if unit_type_suffix:
                 search_candidates.extend([
-                    f"{width_code}B{unit_type_suffix}",  # e.g., 40BDL for Drawerline
-                    f"{width_mm}B{unit_type_suffix}",    # e.g., 400BDL
+                    f"{width_code}B{unit_type_suffix}",
+                    f"{width_mm}B{unit_type_suffix}",
                 ])
             
-            # Always add standard codes as fallback
+            # Generic kitchen codes
             search_candidates.extend([
-                f"{width_code}BPO",  # e.g., 15BPO
-                f"{width_code}B",    # e.g., 15B
-                f"{width_mm}B",      # e.g., 150B (some items use full width)
+                f"{width_code}BPO",
+                f"{width_code}B",
+                f"{width_mm}B",
             ])
         
-        current_app.logger.info(f"🔍 Search candidates: {search_candidates}")
+        print(f"🔍 Search candidates: {search_candidates}")
         
         # ==================================================================
-        # STRATEGY 4: Try each candidate with door type matching
+        # Door type mapping
         # ==================================================================
-        
-        # Map door types to database values
         DOOR_TYPE_MAP = {
-            'basic slab': 'Basic Slab',  # ← CHANGED: Now maps to "Basic Slab" not "Base Cabinet Only"
+            'basic slab': 'Basic Slab',
             'acrylic gloss/matt': 'Acrylic Gloss/Matt',
             'acrylic gloss': 'Acrylic Gloss/Matt',
             'acrylic matt': 'Acrylic Gloss/Matt',
@@ -1264,8 +1418,38 @@ def auto_price_lookup(tenant_id, employee_id):
         
         result = None
         
-        # Try exact code + door type match first (PREFER KITCHEN CATEGORY)
-        if search_candidates and db_door_type:
+        # ==================================================================
+        # STRATEGY 4A: Category-specific code match (BEDROOM FIRST!)
+        # ==================================================================
+        if detected_category and search_candidates and db_door_type:
+            for code in search_candidates:
+                query = text("""
+                    SELECT 
+                        pricelist_id, item_code, item_name, description,
+                        base_price, door_type, width, height, depth, category
+                    FROM "StreemLyne_MT"."PriceList_Master"
+                    WHERE tenant_id = :tenant_id
+                        AND category = :category
+                        AND UPPER(item_code) = UPPER(:item_code)
+                        AND door_type = :door_type
+                    LIMIT 1
+                """)
+                
+                result = db_session.execute(query, {
+                    'tenant_id': str(tenant_id),
+                    'category': detected_category,
+                    'item_code': code,
+                    'door_type': db_door_type
+                }).fetchone()
+                
+                if result:
+                    print(f"✅ Category match: {code} in {detected_category}")
+                    break
+        
+        # ==================================================================
+        # STRATEGY 4B: Try exact code + door type (Kitchen priority)
+        # ==================================================================
+        if not result and search_candidates and db_door_type:
             for code in search_candidates:
                 query = text("""
                     SELECT 
@@ -1291,45 +1475,42 @@ def auto_price_lookup(tenant_id, employee_id):
                 }).fetchone()
                 
                 if result:
-                    current_app.logger.info(f"✅ Match: {code} + {db_door_type} (category: {result.category})")
-                    break
-        
-        # If no match, try without door type (fallback) - STILL PREFER KITCHEN
-        if not result and search_candidates:
-            for code in search_candidates:
-                query = text("""
-                    SELECT 
-                        pricelist_id, item_code, item_name, description,
-                        base_price, door_type, width, height, depth, category
-                    FROM "StreemLyne_MT"."PriceList_Master"
-                    WHERE tenant_id = :tenant_id
-                        AND UPPER(item_code) = UPPER(:item_code)
-                    ORDER BY 
-                        CASE 
-                            WHEN category = 'Kitchen' THEN 1
-                            WHEN category = 'Base Units' THEN 2
-                            ELSE 3
-                        END,
-                        CASE 
-                            WHEN door_type = :door_type THEN 1
-                            ELSE 2
-                        END
-                    LIMIT 1
-                """)
-                
-                result = db_session.execute(query, {
-                    'tenant_id': str(tenant_id),
-                    'item_code': code,
-                    'door_type': db_door_type or 'Basic Slab'
-                }).fetchone()
-                
-                if result:
-                    current_app.logger.info(f"✅ Fallback match: {code} (category: {result.category})")
+                    print(f"✅ Code match: {code} + {db_door_type}")
                     break
         
         # ==================================================================
-        # STRATEGY 5: Description keyword search (PREFER KITCHEN)
-        # "Base Unit 150mm" → search description field
+        # STRATEGY 5A: Width match in detected category
+        # ==================================================================
+        if not result and detected_category and width_mm:
+            query = text("""
+                SELECT 
+                    pricelist_id, item_code, item_name, description,
+                    base_price, door_type, width, height, depth, category
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                    AND category = :category
+                    AND width = :width
+                ORDER BY 
+                    CASE 
+                        WHEN door_type = :door_type THEN 1
+                        ELSE 2
+                    END,
+                    base_price DESC
+                LIMIT 1
+            """)
+            
+            result = db_session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'category': detected_category,
+                'width': width_mm,
+                'door_type': db_door_type or 'Basic Slab'
+            }).fetchone()
+            
+            if result:
+                print(f"✅ Category width match: {width_mm}mm in {detected_category}")
+        
+        # ==================================================================
+        # STRATEGY 5B: Width match (Kitchen priority fallback)
         # ==================================================================
         if not result and width_mm:
             query = text("""
@@ -1360,52 +1541,13 @@ def auto_price_lookup(tenant_id, employee_id):
             }).fetchone()
             
             if result:
-                current_app.logger.info(f"✅ Width match: {width_mm}mm → {result.item_code} (category: {result.category})")
-        
-        # ==================================================================
-        # STRATEGY 6: Fuzzy description match (last resort)
-        # ==================================================================
-        if not result:
-            # Extract key terms from description
-            search_terms = re.findall(r'\b\w+\b', description.lower())
-            search_terms = [t for t in search_terms if len(t) > 3][:3]  # Top 3 meaningful words
-            
-            if search_terms:
-                like_clause = ' AND '.join([f"LOWER(item_name) LIKE '%{term}%'" for term in search_terms])
-                
-                query = text(f"""
-                    SELECT 
-                        pricelist_id, item_code, item_name, description,
-                        base_price, door_type, width, height, depth, category
-                    FROM "StreemLyne_MT"."PriceList_Master"
-                    WHERE tenant_id = :tenant_id
-                        AND ({like_clause})
-                    ORDER BY 
-                        CASE 
-                            WHEN category = 'Kitchen' THEN 1
-                            WHEN category = 'Base Units' THEN 2
-                            ELSE 3
-                        END,
-                        CASE 
-                            WHEN door_type = :door_type THEN 1
-                            ELSE 2
-                        END
-                    LIMIT 1
-                """)
-                
-                result = db_session.execute(query, {
-                    'tenant_id': str(tenant_id),
-                    'door_type': db_door_type or 'Basic Slab'
-                }).fetchone()
-                
-                if result:
-                    current_app.logger.info(f"✅ Fuzzy match: {search_terms} → {result.item_code}")
+                print(f"✅ Width fallback match: {width_mm}mm")
         
         # ==================================================================
         # RETURN RESULT
         # ==================================================================
         if result:
-            current_app.logger.info(
+            print(
                 f"✅ FOUND: {result.item_name} ({result.door_type or 'No door'}) - £{result.base_price}"
             )
             return jsonify({
@@ -1421,18 +1563,18 @@ def auto_price_lookup(tenant_id, employee_id):
                 'description': result.description
             }), 200
         else:
-            current_app.logger.warning(
+            print(
                 f"⚠️ NO MATCH for: '{description}' (door: {door_type})"
             )
             return jsonify({
                 'found': False,
-                'error': f'No pricing found. Tried codes: {search_candidates}, width: {width_mm}mm'
+                'error': f'No pricing found. Tried codes: {search_candidates}, width: {width_mm}mm, category: {detected_category}'
             }), 404
         
     except Exception as e:
-        current_app.logger.error(f"❌ Error in smart lookup: {e}")
+        print(f"❌ Error in smart lookup: {e}")
         import traceback
-        current_app.logger.error(traceback.format_exc())
+        print(traceback.format_exc())
         return jsonify({'found': False, 'error': str(e)}), 500
     finally:
         db_session.close()
