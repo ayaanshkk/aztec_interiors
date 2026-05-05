@@ -630,6 +630,7 @@ def save_checklist(tenant_id, employee_id):
 # ==========================================
 
 @form_bp.route('/customers/<int:customer_id>/generate-form-link', methods=['POST'])
+@token_required
 @require_tenant
 def generate_customer_form_link(customer_id, tenant_id, employee_id):
     """Generate form link for specific customer"""
@@ -716,18 +717,90 @@ def submit_customer_form():
         data = request.get_json(silent=True) or {}
         token = data.get('token')
         form_data = data.get('formData', {})
-
+        is_walkin_mode = data.get('isWalkinMode', False)
+ 
         if not form_data:
             return jsonify({'success': False, 'error': 'Missing form data'}), 400
-
+ 
         client_id = None
         tenant_id = None
         
-        # Validate token
-        if token:
+        # ===== WALK-IN CUSTOMER CREATION =====
+        if is_walkin_mode:
+            current_app.logger.info("Processing walk-in customer submission")
+            
+            # Extract customer data from form
+            customer_name = form_data.get('customer_name', '').strip()
+            customer_phone = form_data.get('customer_phone', '').strip()
+            customer_address = form_data.get('customer_address', '').strip()
+            customer_postcode = form_data.get('customer_postcode') or form_data.get('postcode', '')
+            customer_postcode = customer_postcode.strip() if customer_postcode else ''
+            
+            # Validate required fields
+            if not customer_name:
+                return jsonify({'success': False, 'error': 'Customer name is required for walk-in submission'}), 400
+            if not customer_phone:
+                return jsonify({'success': False, 'error': 'Customer phone is required for walk-in submission'}), 400
+            if not customer_address:
+                return jsonify({'success': False, 'error': 'Customer address is required for walk-in submission'}), 400
+            if not customer_postcode:
+                return jsonify({'success': False, 'error': 'Customer postcode is required for walk-in submission'}), 400
+            
+            # Default tenant for walk-in customers
+            tenant_id = '7'  # ← CHANGED from 'tenant_1' to match your actual tenant
+            
+            # Check if customer already exists (by phone or exact name match)
+            existing_customer_query = text("""
+                SELECT client_id FROM "StreemLyne_MT"."Client_Master"
+                WHERE tenant_id = :tenant_id 
+                AND (client_phone = :phone OR client_company_name = :name)
+                AND (is_deleted IS NULL OR is_deleted = FALSE)
+                LIMIT 1
+            """)
+            
+            existing_customer = session.execute(existing_customer_query, {
+                'tenant_id': str(tenant_id),
+                'phone': customer_phone,
+                'name': customer_name
+            }).fetchone()
+            
+            if existing_customer:
+                client_id = existing_customer.client_id
+                current_app.logger.info(f"Found existing customer: {client_id}")
+            else:
+                # Create new customer
+                current_app.logger.info(f"Creating new walk-in customer: {customer_name}")
+                
+                insert_customer_query = text("""
+                    INSERT INTO "StreemLyne_MT"."Client_Master"
+                    (tenant_id, client_company_name, client_phone, address, post_code, 
+                     client_type, created_at, is_deleted)
+                    VALUES (:tenant_id, :name, :phone, :address, :postcode,
+                            'walk_in', CURRENT_TIMESTAMP, FALSE)
+                    RETURNING client_id
+                """)
+                
+                result = session.execute(insert_customer_query, {
+                    'tenant_id': str(tenant_id),
+                    'name': customer_name,
+                    'phone': customer_phone,
+                    'address': customer_address,
+                    'postcode': customer_postcode
+                })
+                
+                client_id = result.fetchone().client_id
+                session.flush()  # Ensure client_id is available
+                
+                current_app.logger.info(f"Created new customer with ID: {client_id}")
+            
+            # Update form_data with the client_id
+            form_data['customer_id'] = str(client_id)
+        
+        # ===== EXISTING TOKEN VALIDATION (for non-walk-in) =====
+        elif token:
             if token not in form_tokens:
                 return jsonify({'success': False, 'error': 'Invalid or expired token'}), 400
-
+ 
             token_data = form_tokens[token]
             
             if datetime.now() > token_data['expires_at']:
@@ -736,7 +809,7 @@ def submit_customer_form():
                 
             if token_data['used']:
                 return jsonify({'success': False, 'error': 'Token has already been used'}), 410
-
+ 
             client_id = token_data.get('customer_id')
             tenant_id = token_data.get('tenant_id')
             
@@ -756,6 +829,15 @@ def submit_customer_form():
                 
                 form_tokens[token]['used'] = True
         
+        # ===== EXTRACT customer_id FROM form_data IF NOT SET =====
+        # CRITICAL FIX: Check form_data for customer_id if still None
+        if client_id is None:
+            # Try to get from form_data (for forms submitted with customerId in URL)
+            customer_id_from_form = form_data.get('customer_id', '')
+            if customer_id_from_form and customer_id_from_form.strip():
+                client_id = int(customer_id_from_form)
+                current_app.logger.info(f"✅ Extracted client_id from form_data: {client_id}")
+        
         # Get project_id
         project_id = (
             request.args.get('projectId') or
@@ -768,38 +850,64 @@ def submit_customer_form():
         if project_id in ('', 'null', 'undefined'):
             project_id = None
         
+        # Use default tenant if still None
+        if tenant_id is None:
+            tenant_id = '7'  # ← CHANGED from 'tenant_1' to match your actual tenant
+        
+        # ===== CRITICAL VALIDATION: client_id MUST NOT BE NULL =====
+        if client_id is None:
+            current_app.logger.error("❌ client_id is None - cannot insert")
+            return jsonify({
+                'success': False, 
+                'error': 'Customer ID is required. Please select a customer or use walk-in mode.'
+            }), 400
+        
         # Save form submission
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Customer_Form_Submissions"
             (tenant_id, client_id, project_id, form_type, form_data,
              token_used, submitted_by, submission_status)
-            VALUES (:tenant_id, :client_id, :project_id, 'general', :form_data,
-                    :token, 'Public Form', 'submitted')
+            VALUES (:tenant_id, :client_id, :project_id, :form_type, :form_data,
+                    :token, :submitted_by, 'submitted')
             RETURNING form_submission_id
         """)
         
+        # Determine form type
+        form_type = form_data.get('form_type', 'general')
+        if form_type == 'kitchen':
+            form_type = 'kitchen_checklist'
+        elif form_type == 'bedroom':
+            form_type = 'bedroom_checklist'
+        
+        current_app.logger.info(f"💾 Saving form: tenant_id={tenant_id}, client_id={client_id}, form_type={form_type}")
+        
         result = session.execute(insert_query, {
-            'tenant_id': str(tenant_id) if tenant_id else 'tenant_1',  # Default tenant
-            'client_id': int(client_id) if client_id else None,
+            'tenant_id': str(tenant_id),
+            'client_id': int(client_id),  # Ensure it's an integer
             'project_id': int(project_id) if project_id else None,
+            'form_type': form_type,
             'form_data': json.dumps(form_data),
-            'token': token or ''
+            'token': token or '',
+            'submitted_by': 'Walk-in Customer' if is_walkin_mode else 'Public Form'
         })
         
         form_id = result.fetchone().form_submission_id
         session.commit()
-
+ 
+        current_app.logger.info(f"✅ Form submitted successfully: form_id={form_id}")
+ 
         return jsonify({
             'success': True,
+            'customer_id': client_id,  # Return customer_id for frontend redirect
             'client_id': client_id,
             'project_id': project_id,
             'form_submission_id': form_id,
-            'message': 'Form submitted successfully'
+            'message': 'Walk-in customer created and form submitted successfully' if is_walkin_mode else 'Form submitted successfully'
         }), 201
-
+ 
     except Exception as e:
         session.rollback()
-        current_app.logger.exception(f"Form submission failed")
+        current_app.logger.exception(f"❌ Form submission failed: {e}")
         return jsonify({'success': False, 'error': f'Form submission failed: {str(e)}'}), 500
     finally:
         session.close()
@@ -916,5 +1024,49 @@ def handle_form_submission(submission_id, tenant_id, employee_id):
         session.rollback()
         current_app.logger.exception(f"Error handling form submission {submission_id}: {e}")
         return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+    finally:
+        session.close()
+
+@form_bp.route('/customers', methods=['GET'])
+@token_required
+@require_tenant
+def get_customers_for_forms(tenant_id, employee_id):
+    """Get all customers for the current tenant"""
+    session = SessionLocal()
+    try:
+        query = text("""
+            SELECT 
+                client_id as id,
+                client_company_name as name,
+                address,
+                client_phone as phone,
+                client_email as email,
+                post_code as postcode
+            FROM "StreemLyne_MT"."Client_Master"
+            WHERE tenant_id = :tenant_id
+            AND (is_deleted IS NULL OR is_deleted = FALSE)
+            ORDER BY client_company_name ASC
+        """)
+        
+        customers = session.execute(query, {
+            'tenant_id': str(tenant_id)
+        }).fetchall()
+        
+        customers_list = []
+        for customer in customers:
+            customers_list.append({
+                'id': str(customer.id),
+                'name': customer.name or 'N/A',
+                'address': customer.address or '',
+                'phone': customer.phone or '',
+                'email': customer.email or '',
+                'postcode': customer.postcode or ''
+            })
+        
+        return jsonify(customers_list), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"Failed to fetch customers: {e}")
+        return jsonify({'error': f'Failed to fetch customers: {str(e)}'}), 500
     finally:
         session.close()

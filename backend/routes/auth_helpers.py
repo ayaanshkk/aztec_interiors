@@ -66,6 +66,12 @@ def require_tenant(f):
         @require_tenant
         def my_route(tenant_id, employee_id):
             # tenant_id and employee_id are now available
+        
+        # OR for routes with path parameters:
+        @token_required
+        @require_tenant
+        def my_route(path_param, tenant_id, employee_id):
+            # path_param comes from route, tenant_id and employee_id from decorator
     """
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -81,8 +87,8 @@ def require_tenant(f):
         if not employee_id:
             return jsonify({'error': 'Employee ID not found in token'}), 401
         
-        # Pass tenant_id and employee_id as first two arguments
-        return f(tenant_id, employee_id, *args, **kwargs)
+        # ✅ FIXED: Pass route args first, then inject tenant_id and employee_id as keyword args
+        return f(*args, tenant_id=tenant_id, employee_id=employee_id, **kwargs)
     
     return decorated
 

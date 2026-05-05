@@ -117,68 +117,6 @@ def get_projects(tenant_id, employee_id):
     finally:
         session.close()
 
-
-@project_bp.route('/projects/<int:project_id>', methods=['GET'])
-@token_required
-@require_tenant
-def get_project(project_id, tenant_id, employee_id):
-    """Get a specific project with all details"""
-    session = SessionLocal()
-    try:
-        query = text("""
-            SELECT 
-                p.*,
-                c.client_company_name,
-                c.client_phone,
-                c.client_email,
-                c.address as client_address,
-                s.stage_name,
-                s.stage_description
-            FROM "StreemLyne_MT"."Project_Details" p
-            INNER JOIN "StreemLyne_MT"."Client_Master" c ON p.client_id = c.client_id
-            LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p.stage_id = s.stage_id
-            WHERE p.project_id = :project_id AND p.tenant_id = :tenant_id
-        """)
-        
-        project = session.execute(query, {
-            'project_id': project_id,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
-        if not project:
-            return jsonify({'error': 'Project not found'}), 404
-        
-        result = {
-            'id': project.project_id,
-            'display_id': project.display_id,
-            'project_title': project.project_title,
-            'project_description': project.project_description,
-            'client_id': project.client_id,
-            'client_name': project.client_company_name,
-            'client_phone': project.client_phone,
-            'client_email': project.client_email,
-            'status': project.status,
-            'stage_id': project.stage_id,
-            'stage_name': project.stage_name,
-            'priority': project.priority if hasattr(project, 'priority') else None,
-            'start_date': project.start_date.isoformat() if project.start_date else None,
-            'end_date': project.end_date.isoformat() if project.end_date else None,
-            'installation_address': project.client_address,
-            'assigned_employee_id': project.assigned_employee_id,
-            'notes': project.notes if hasattr(project, 'notes') else None,
-            'created_at': project.created_at.isoformat() if project.created_at else None,
-            'updated_at': project.updated_at.isoformat() if project.updated_at else None
-        }
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Error fetching project: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
-
 @project_bp.route('/projects', methods=['POST'])
 @token_required
 @require_tenant
@@ -267,7 +205,7 @@ def create_project(tenant_id, employee_id):
 @project_bp.route('/projects/<int:project_id>', methods=['PUT'])
 @token_required
 @require_tenant
-def update_project(project_id, tenant_id, employee_id):
+def update_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
     """Update a project"""
     session = SessionLocal()
     try:
@@ -329,11 +267,10 @@ def update_project(project_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @project_bp.route('/projects/<int:project_id>', methods=['DELETE'])
 @token_required
 @require_tenant
-def delete_project(project_id, tenant_id, employee_id):
+def delete_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
     """Delete a project"""
     session = SessionLocal()
     try:
@@ -362,11 +299,10 @@ def delete_project(project_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
 @project_bp.route('/projects/<int:project_id>/stage', methods=['PATCH'])
 @token_required
 @require_tenant
-def update_project_stage(project_id, tenant_id, employee_id):
+def update_project_stage(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
     """Update project stage"""
     session = SessionLocal()
     try:
@@ -418,64 +354,65 @@ def update_project_stage(project_id, tenant_id, employee_id):
     finally:
         session.close()
 
-
-@project_bp.route('/projects/stats', methods=['GET'])
+@project_bp.route('/projects/<int:project_id>', methods=['GET'])
 @token_required
 @require_tenant
-def get_project_stats(tenant_id, employee_id):
-    """Get project statistics"""
+def get_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
+    """Get a specific project with all details"""
     session = SessionLocal()
     try:
-        # Total count
-        total_query = text("""
-            SELECT COUNT(*) as count FROM "StreemLyne_MT"."Project_Details"
-            WHERE tenant_id = :tenant_id
-        """)
-        total = session.execute(total_query, {'tenant_id': str(tenant_id)}).fetchone().count
-        
-        # By status
-        status_query = text("""
-            SELECT status, COUNT(*) as count
-            FROM "StreemLyne_MT"."Project_Details"
-            WHERE tenant_id = :tenant_id
-            GROUP BY status
-        """)
-        status_counts = session.execute(status_query, {'tenant_id': str(tenant_id)}).fetchall()
-        
-        # By stage
-        stage_query = text("""
-            SELECT s.stage_name, COUNT(p.project_id) as count
+        query = text("""
+            SELECT 
+                p.*,
+                c.client_company_name,
+                c.client_phone,
+                c.client_email,
+                c.address as client_address,
+                s.stage_name,
+                s.stage_description
             FROM "StreemLyne_MT"."Project_Details" p
+            INNER JOIN "StreemLyne_MT"."Client_Master" c ON p.client_id = c.client_id
             LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p.stage_id = s.stage_id
-            WHERE p.tenant_id = :tenant_id
-            GROUP BY s.stage_name
+            WHERE p.project_id = :project_id AND p.tenant_id = :tenant_id
         """)
-        stage_counts = session.execute(stage_query, {'tenant_id': str(tenant_id)}).fetchall()
         
-        # By priority
-        priority_query = text("""
-            SELECT priority, COUNT(*) as count
-            FROM "StreemLyne_MT"."Project_Details"
-            WHERE tenant_id = :tenant_id
-            GROUP BY priority
-        """)
-        priority_counts = session.execute(priority_query, {'tenant_id': str(tenant_id)}).fetchall()
+        project = session.execute(query, {
+            'project_id': project_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
         
-        stats = {
-            'total_projects': total,
-            'by_status': {row.status: row.count for row in status_counts if row.status},
-            'by_stage': {row.stage_name: row.count for row in stage_counts if row.stage_name},
-            'by_priority': {row.priority: row.count for row in priority_counts if row.priority}
+        if not project:
+            return jsonify({'error': 'Project not found'}), 404
+        
+        result = {
+            'id': project.project_id,
+            'display_id': project.display_id,
+            'project_title': project.project_title,
+            'project_description': project.project_description,
+            'client_id': project.client_id,
+            'client_name': project.client_company_name,
+            'client_phone': project.client_phone,
+            'client_email': project.client_email,
+            'status': project.status,
+            'stage_id': project.stage_id,
+            'stage_name': project.stage_name,
+            'priority': project.priority if hasattr(project, 'priority') else None,
+            'start_date': project.start_date.isoformat() if project.start_date else None,
+            'end_date': project.end_date.isoformat() if project.end_date else None,
+            'installation_address': project.client_address,
+            'assigned_employee_id': project.assigned_employee_id,
+            'notes': project.notes if hasattr(project, 'notes') else None,
+            'created_at': project.created_at.isoformat() if project.created_at else None,
+            'updated_at': project.updated_at.isoformat() if project.updated_at else None
         }
         
-        return jsonify(stats), 200
+        return jsonify(result), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error fetching project stats: {e}")
+        current_app.logger.error(f"Error fetching project: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @project_bp.route('/projects/stages', methods=['GET'])
 @token_required

@@ -74,10 +74,14 @@ def get_customers(tenant_id, employee_id):
                 c.created_at,
                 c.is_deleted,
                 c.is_archived,
+                e.employee_name as salesperson_name,
                 COUNT(DISTINCT p.project_id) as project_count,
                 COUNT(DISTINCT doc.id) as document_count,
-                COUNT(DISTINCT f.form_submission_id) as form_count
+                COUNT(DISTINCT f.form_submission_id) as form_count,
+                c.project_types
             FROM "StreemLyne_MT"."Client_Master" c
+            LEFT JOIN "StreemLyne_MT"."Employee_Master" e
+                ON c.assigned_employee_id = e.employee_id AND e.tenant_id = c.tenant_id
             LEFT JOIN "StreemLyne_MT"."Project_Details" p 
                 ON c.client_id = p.client_id AND p.tenant_id = c.tenant_id
             LEFT JOIN "StreemLyne_MT"."Customer_Documents" doc
@@ -88,7 +92,7 @@ def get_customers(tenant_id, employee_id):
             GROUP BY c.client_id, c.client_company_name, c.client_contact_name,
                      c.client_phone, c.client_email, c.address, c.post_code, 
                      c.stage, c.assigned_employee_id, c.is_allocated, c.is_cleansed,
-                     c.created_at, c.is_deleted, c.is_archived
+                     c.created_at, c.is_deleted, c.is_archived, e.employee_name
             ORDER BY c.created_at DESC
         """)
         
@@ -106,6 +110,8 @@ def get_customers(tenant_id, employee_id):
                 'postcode': client.postcode or '',
                 'stage': client.stage or 'Lead',
                 'assigned_employee_id': client.assigned_employee_id,
+                'salesperson': client.salesperson_name or '',
+                'project_types': client.project_types if client.project_types else [],
                 'is_allocated': bool(client.is_allocated),
                 'is_cleansed': bool(client.is_cleansed),
                 'created_at': client.created_at.isoformat() if client.created_at else None,
@@ -123,7 +129,6 @@ def get_customers(tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @customer_bp.route('/customers', methods=['POST'])
 @token_required
@@ -1017,5 +1022,48 @@ def delete_document(document_id, tenant_id, employee_id):
         session.rollback()
         current_app.logger.error(f"Error deleting document: {e}")
         return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+@customer_bp.route('/api/customers', methods=['GET'])
+@token_required
+@require_tenant
+def get_customers_list(tenant_id, employee_id):
+    """Get all customers for the current tenant"""
+    session = SessionLocal()
+    try:
+        query = text("""
+            SELECT 
+                client_id as id,
+                client_company_name as name,
+                client_address as address,
+                client_phone as phone,
+                client_email as email,
+                client_postcode as postcode
+            FROM "StreemLyne_MT"."Client_Master"
+            WHERE tenant_id = :tenant_id
+            ORDER BY client_company_name ASC
+        """)
+        
+        customers = session.execute(query, {
+            'tenant_id': str(tenant_id)
+        }).fetchall()
+        
+        customers_list = []
+        for customer in customers:
+            customers_list.append({
+                'id': str(customer.id),
+                'name': customer.name or 'N/A',
+                'address': customer.address or '',
+                'phone': customer.phone or '',
+                'email': customer.email or '',
+                'postcode': customer.postcode or ''
+            })
+        
+        return jsonify(customers_list), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"Failed to fetch customers: {e}")
+        return jsonify({'error': f'Failed to fetch customers: {str(e)}'}), 500
     finally:
         session.close()

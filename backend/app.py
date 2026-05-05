@@ -41,7 +41,7 @@ def create_app():
                 "https://*.vercel.app",
             ],
             "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "X-Tenant-ID"],
             "expose_headers": ["Content-Type", "Authorization"],
             "supports_credentials": True,
             "max_age": 3600
@@ -58,7 +58,7 @@ def create_app():
             resp = jsonify({"status": "ok"})
             resp.headers["Access-Control-Allow-Origin"] = request.headers.get("Origin", "*")
             resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-            resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With,X-Tenant-ID"
             resp.headers["Access-Control-Allow-Credentials"] = "true"
             return resp, 200
 
@@ -82,7 +82,7 @@ def create_app():
             resp.headers["Access-Control-Allow-Origin"] = allowed_origins[0]
             
         resp.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With,X-Tenant-ID"
         resp.headers["Access-Control-Allow-Credentials"] = "true"
         return resp
 
@@ -109,7 +109,7 @@ def create_app():
 
     app.register_blueprint(auth_bp, url_prefix='/api')
     app.register_blueprint(invite_bp)
-    app.register_blueprint(form_bp)
+    app.register_blueprint(form_bp, url_prefix='/api/form')
     app.register_blueprint(customer_bp)
     app.register_blueprint(project_bp)
     app.register_blueprint(notification_bp)

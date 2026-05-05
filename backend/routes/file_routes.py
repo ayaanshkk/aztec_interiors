@@ -491,26 +491,54 @@ def view_document(filename):
 def handle_drawings_compat(tenant_id, employee_id):
     """Get customer drawing documents"""
     customer_id = request.args.get('customer_id')
+    project_id = request.args.get('project_id')  # ✅ ADD THIS
     
     session = SessionLocal()
     try:
-        query = text("""
+        # ✅ Build WHERE conditions properly
+        where_conditions = [
+            "(document_category IN ('pdf', 'image', 'drawing') OR document_category IS NULL)"
+        ]
+        params = {}
+        
+        if customer_id:
+            where_conditions.append("cd.client_id = :customer_id")
+            params['customer_id'] = int(customer_id)
+        elif project_id:
+            # If project_id provided, get client_id from project
+            where_conditions.append("""
+                cd.client_id IN (
+                    SELECT client_id FROM "StreemLyne_MT"."Project_Details"
+                    WHERE project_id = :project_id AND tenant_id = :tenant_id
+                )
+            """)
+            params['project_id'] = int(project_id)
+            params['tenant_id'] = str(tenant_id)
+        else:
+            # ✅ CRITICAL: If no filter, return empty instead of everything
+            return jsonify([]), 200
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        query = text(f"""
             SELECT 
-                id,
-                client_id,
-                file_name,
-                file_url,
-                document_category,
-                uploaded_at
-            FROM "StreemLyne_MT"."Customer_Documents"
-            WHERE (:customer_id IS NULL OR client_id = :customer_id)
-            AND (document_category IN ('pdf', 'image', 'drawing') OR document_category IS NULL)
-            ORDER BY uploaded_at DESC
+                cd.id,
+                cd.client_id,
+                cd.file_name,
+                cd.file_url,
+                cd.document_category,
+                cd.uploaded_at
+            FROM "StreemLyne_MT"."Customer_Documents" cd
+            INNER JOIN "StreemLyne_MT"."Client_Master" cm 
+                ON cd.client_id = cm.client_id 
+                AND cm.tenant_id = :tenant_id
+            WHERE {where_clause}
+            ORDER BY cd.uploaded_at DESC
         """)
         
-        docs = session.execute(query, {
-            'customer_id': customer_id
-        }).fetchall()
+        params['tenant_id'] = str(tenant_id)
+        
+        docs = session.execute(query, params).fetchall()
         
         result = []
         for doc in docs:
@@ -530,7 +558,6 @@ def handle_drawings_compat(tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @file_bp.route('/files/drawings/<int:drawing_id>', methods=['GET', 'PATCH', 'DELETE'])
 @token_required
