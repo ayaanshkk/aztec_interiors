@@ -24,7 +24,7 @@ def generate_project_reference(session, tenant_id):
     # Ensure uniqueness
     while True:
         check_query = text("""
-            SELECT project_id FROM "StreemLyne_MT"."Project_Details"
+            SELECT display_id FROM "StreemLyne_MT"."Project_Details"
             WHERE display_id = :ref AND tenant_id = :tenant_id
         """)
         exists = session.execute(check_query, {
@@ -38,7 +38,6 @@ def generate_project_reference(session, tenant_id):
         project_reference = f"PRJ-{reference_number:03d}"
     
     return project_reference
-
 
 @project_bp.route('/projects', methods=['GET'])
 @token_required
