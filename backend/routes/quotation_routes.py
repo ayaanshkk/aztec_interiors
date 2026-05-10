@@ -67,7 +67,8 @@ def debug_pricelist(tenant_id, employee_id):
                 'category': i.category,
                 'item_name': i.item_name,
                 'price': float(i.base_price)
-            } for i in items])
+            } for i in items if (i.item_name and i.item_name.strip()) or (i.description and i.description.strip()) or (i.amount and float(i.amount) > 0)]
+            )
         
         return jsonify({
             'total_categories': len(categories),
@@ -194,8 +195,10 @@ def create_quotation(tenant_id, employee_id):
         # Create quotation
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
-            (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id)
-            VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id)
+            (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
+             customer_name, customer_address, customer_phone, customer_email, vat_percentage)
+            VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
+                    :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage)
             RETURNING quotation_id
         """)
         
@@ -207,7 +210,12 @@ def create_quotation(tenant_id, employee_id):
             'total': total,
             'status': data.get('status', 'Draft'),
             'notes': data.get('notes', ''),
-            'employee_id': employee_id
+            'employee_id': employee_id,
+            'customer_name': data.get('customer_name', ''),
+            'customer_address': data.get('customer_address', ''),
+            'customer_phone': data.get('customer_phone', ''),
+            'customer_email': data.get('customer_email', ''),
+            'vat_percentage': data.get('vat_percentage', 20.0)
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -308,6 +316,16 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         form_type = form_data.get('form_type', '').lower()
         checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
         
+        # ✅ NEW: Extract door_type and room_type from form data
+        door_type = form_data.get('door_type', 'Basic Slab')
+        
+        # Determine room type from checklist type
+        room_type = 'Kitchen' if checklist_type == 'kitchen' else 'Bedroom'
+        
+        print(f"🏷️  Checklist Type: {checklist_type}")
+        print(f"🚪 Door Type: {door_type}")
+        print(f"🏠 Room Type: {room_type}")
+        
         # Generate reference
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         ref_num = f"Q-{timestamp}-{form_submission_id}"
@@ -330,7 +348,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         
         quotation_id = result.fetchone().quotation_id
         
-        # ✅ FIXED: Extract items with correct parameters
+        # Extract items with correct parameters
         extracted_items = extract_checklist_items(form_data, session, tenant_id)
         
         total = 0.0
@@ -345,14 +363,13 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
                     :width, :height, :depth, :needs_manual, :pricelist_id)
         """)
         
-        # ✅ FIXED: Use correct field names from extracted items
         for item in extracted_items:
             session.execute(item_insert, {
                 'quotation_id': quotation_id,
-                'item_name': item['item'],           # ← 'item' not 'item_name'
+                'item_name': item['item'],
                 'description': item['description'],
-                'color': item.get('colour'),         # ← 'colour' not 'color'
-                'quantity': item.get('qty', 1),      # ← 'qty' not 'quantity'
+                'color': item.get('colour'),
+                'quantity': item.get('qty', 1),
                 'amount': item.get('price', 0),
                 'width': item.get('width'),
                 'height': item.get('height'),
@@ -361,7 +378,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
                 'pricelist_id': item.get('pricelist_id')
             })
             
-            total += item.get('price', 0) * item.get('qty', 1)  # ← use 'qty'
+            total += item.get('price', 0) * item.get('qty', 1)
             
             if item.get('needs_manual_pricing'):
                 manual_count += 1
@@ -384,6 +401,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         
         print(f"✅ Quote {ref_num}: {matched_count} auto-priced, {manual_count} manual")
         
+        # ✅ NEW: Include door_type and room_type in response
         return jsonify({
             'success': True,
             'quotation_id': quotation_id,
@@ -393,6 +411,8 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
             'manual_items': manual_count,
             'total': total,
             'checklist_type': checklist_type,
+            'door_type': door_type,      # ✅ ADD THIS
+            'room_type': room_type,      # ✅ ADD THIS
             'message': f'Quote generated: {matched_count} auto-priced, {manual_count} need manual pricing'
         }), 201
         
@@ -987,13 +1007,17 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             items = session.execute(items_query, {'quotation_id': quotation_id}).fetchall()
             
             result = {
-                'id': quote.quotation_id,  # ✅ Changed from quotation_id
-                'quotation_id': quote.quotation_id,  # Keep for backward compatibility
+                'id': quote.quotation_id,
+                'quotation_id': quote.quotation_id,
                 'reference_number': quote.reference_number,
-                'customer_id': str(quote.client_id),  # ✅ Changed from client_id
-                'customer_name': quote.client_company_name,  # ✅ Changed from client_name
-                'client_id': quote.client_id,  # Keep for backward compatibility
-                'client_name': quote.client_company_name,  # Keep for backward compatibility
+                'customer_id': str(quote.client_id),
+                'customer_name': quote.customer_name or quote.client_company_name,  # ← Use saved customer_name first
+                'customer_address': quote.customer_address or quote.client_address,  # ← Use saved customer_address first
+                'customer_phone': quote.customer_phone or quote.client_phone,        # ← Use saved customer_phone first
+                'customer_email': getattr(quote, 'customer_email', None),           # ← Add customer_email
+                'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
+                'client_id': quote.client_id,
+                'client_name': quote.client_company_name,
                 'client_address': quote.client_address,
                 'client_phone': quote.client_phone,
                 'project_id': quote.project_id,
@@ -1001,12 +1025,12 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'status': quote.status,
                 'notes': quote.notes,
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
-                'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,  # ✅ Added
+                'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
                 'items': [{
-                    'id': i.item_id,  # ✅ Changed from item_id
-                    'item_id': i.item_id,  # Keep for backward compatibility
-                    'item': i.item_name,  # ✅ Changed from item_name
-                    'item_name': i.item_name,  # Keep for backward compatibility
+                    'id': i.item_id,
+                    'item_id': i.item_id,
+                    'item': i.item_name,
+                    'item_name': i.item_name,
                     'description': i.description,
                     'color': i.color,
                     'quantity': i.quantity,
@@ -1015,8 +1039,8 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     'height': i.height,
                     'depth': i.depth,
                     'needs_manual_pricing': i.needs_manual_pricing,
-                    'price_list_item_id': i.pricelist_id  # ✅ Added
-                } for i in items]
+                    'price_list_item_id': i.pricelist_id
+                } for i in items if (i.item_name and i.item_name.strip()) or (i.description and i.description.strip()) or (i.amount and float(i.amount) > 0)]  # ← FILTER OUT EMPTY ITEMS
             }
             
             return jsonify(result), 200
@@ -1025,16 +1049,79 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             # Update quotation
             data = request.get_json()
             
+            # ===== UPDATE QUOTATION METADATA =====
             update_fields = []
             params = {'quotation_id': quotation_id, 'tenant_id': str(tenant_id)}
             
+            if 'customer_name' in data:
+                update_fields.append("customer_name = :customer_name")
+                params['customer_name'] = data['customer_name']
+            if 'customer_address' in data:
+                update_fields.append("customer_address = :customer_address")
+                params['customer_address'] = data['customer_address']
+            if 'customer_phone' in data:
+                update_fields.append("customer_phone = :customer_phone")
+                params['customer_phone'] = data['customer_phone']
+            if 'customer_email' in data:
+                update_fields.append("customer_email = :customer_email")
+                params['customer_email'] = data['customer_email']
+            if 'vat_percentage' in data:
+                update_fields.append("vat_percentage = :vat_percentage")
+                params['vat_percentage'] = data['vat_percentage']
             if 'status' in data:
                 update_fields.append("status = :status")
                 params['status'] = data['status']
             if 'notes' in data:
                 update_fields.append("notes = :notes")
                 params['notes'] = data['notes']
-            if 'total' in data:
+            
+            # ✅ NEW: UPDATE ITEMS
+            if 'items' in data:
+                # Delete all existing items
+                delete_items = text("""
+                    DELETE FROM "StreemLyne_MT"."Quotation_Items"
+                    WHERE quotation_id = :quotation_id
+                """)
+                session.execute(delete_items, {'quotation_id': quotation_id})
+                
+                # Insert new items
+                item_insert = text("""
+                    INSERT INTO "StreemLyne_MT"."Quotation_Items"
+                    (quotation_id, item_name, description, color, quantity, amount,
+                    width, height, depth, needs_manual_pricing, pricelist_id)
+                    VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
+                            :width, :height, :depth, :needs_manual, :pricelist_id)
+                """)
+                
+                total = 0.0
+                for item in data['items']:
+                    # Skip completely empty items
+                    if not item.get('item') and not item.get('description') and not item.get('amount'):
+                        continue
+                    
+                    item_amount = float(item.get('amount', 0))
+                    item_qty = int(item.get('quantity', 1))
+                    
+                    session.execute(item_insert, {
+                        'quotation_id': quotation_id,
+                        'item_name': item.get('item', ''),
+                        'description': item.get('description', ''),
+                        'color': item.get('color', ''),
+                        'quantity': item_qty,
+                        'amount': item_amount,
+                        'width': item.get('width'),
+                        'height': item.get('height'),
+                        'depth': item.get('depth'),
+                        'needs_manual': item.get('needs_manual_pricing', False),
+                        'pricelist_id': item.get('price_list_item_id')
+                    })
+                    
+                    total += item_amount * item_qty
+                
+                # Update total in quotation
+                update_fields.append("total = :total")
+                params['total'] = total
+            elif 'total' in data:
                 update_fields.append("total = :total")
                 params['total'] = data['total']
             
@@ -1054,7 +1141,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             
             return jsonify({
                 'success': True,
-                'message': 'Quotation updated'
+                'message': 'Quotation updated successfully'
             }), 200
         
         elif request.method == 'DELETE':
@@ -1240,13 +1327,34 @@ def auto_price_lookup(tenant_id, employee_id):
         data = request.get_json()
         description = data.get('description', '').strip()
         door_type = data.get('door_type', '').strip()
+        brand = data.get('brand', '').strip()
         
         print(f"🔍 Smart lookup: description='{description}', door_type='{door_type}'")
+        print(f"   Description: '{description}'")
+        print(f"   Door Type: '{door_type}'")
+        print(f"   Brand: '{brand}'")
         
         if not description:
             return jsonify({'found': False, 'error': 'description is required'}), 400
         
         import re
+
+        appliance_keywords = [
+            'hob', 'oven', 'hood', 'microwave', 'fridge', 'freezer', 
+            'dishwasher', 'washing', 'washer', 'dryer', 'extractor',
+            'combi', 'warming drawer'
+        ]
+        
+        description_lower = description.lower()
+        is_appliance = any(keyword in description_lower for keyword in appliance_keywords)
+        
+        # Also check for model number pattern (e.g., PCR9A5I90, BFL523MB0B)
+        model_pattern = r'\b[A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,}\b'
+        has_model_number = bool(re.search(model_pattern, description, re.IGNORECASE))
+        
+        if is_appliance or has_model_number:
+            print(f"   🔥 DETECTED: APPLIANCE")
+            return lookup_appliance(db_session, tenant_id, description, brand)
         
         # ==================================================================
         # NEW: CATEGORY DETECTION
@@ -1580,3 +1688,185 @@ def auto_price_lookup(tenant_id, employee_id):
         return jsonify({'found': False, 'error': str(e)}), 500
     finally:
         db_session.close()
+
+def lookup_appliance(session, tenant_id, description, brand=None):
+    """
+    Lookup appliance from PriceList_Master
+    
+    Strategy:
+    1. Extract model number from description
+    2. Search by model number (item_code)
+    3. If brand provided, filter by brand
+    4. Fallback: Search by product name (item_name)
+    """
+    import re
+    
+    print(f"\n🔥 APPLIANCE LOOKUP")
+    print(f"   Description: {description}")
+    print(f"   Brand: {brand}")
+    
+    # ====================================================================
+    # STRATEGY 1: Extract model number from description
+    # ====================================================================
+    # Model numbers like: PCR9A5I90, BFL523MB0B, KIR81NSE0G
+    model_pattern = r'\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,})\b'
+    model_match = re.search(model_pattern, description, re.IGNORECASE)
+    
+    model_number = None
+    if model_match:
+        model_number = model_match.group(1).upper()
+        print(f"   ✅ Extracted model number: {model_number}")
+    
+    # ====================================================================
+    # STRATEGY 2: Search by model number (item_code)
+    # ====================================================================
+    if model_number:
+        if brand:
+            # Search with brand filter
+            query = text("""
+                SELECT pricelist_id, item_code, item_name, description,
+                       base_price, width, height, depth, door_type, brand
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                  AND category = 'Appliances'
+                  AND UPPER(item_code) = :model_number
+                  AND UPPER(brand) = UPPER(:brand)
+                LIMIT 1
+            """)
+            
+            result = session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'model_number': model_number,
+                'brand': brand
+            }).fetchone()
+        else:
+            # Search without brand filter
+            query = text("""
+                SELECT pricelist_id, item_code, item_name, description,
+                       base_price, width, height, depth, door_type, brand
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                  AND category = 'Appliances'
+                  AND UPPER(item_code) = :model_number
+                LIMIT 1
+            """)
+            
+            result = session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'model_number': model_number
+            }).fetchone()
+        
+        if result:
+            print(f"   ✅ FOUND by model: {result.item_name} - £{result.base_price}")
+            
+            # Extract series from description (e.g., "S6", "S4", "S2")
+            series = None
+            series_match = re.search(r'\(([^)]+)\)', result.description or '')
+            if series_match:
+                series = series_match.group(1)
+            
+            return jsonify({
+                'found': True,
+                'price': float(result.base_price),
+                'item_code': result.item_code,
+                'item_name': result.item_name,
+                'description': result.description,
+                'pricelist_id': result.pricelist_id,
+                'brand': result.brand,
+                'series': series,
+                'door_type': result.door_type  # This is "Low"/"Mid"/"High" for appliances
+            }), 200
+    
+    # ====================================================================
+    # STRATEGY 3: Fallback - Search by product name (fuzzy match)
+    # ====================================================================
+    # Extract product type from description (e.g., "HOB", "Oven", "Fridge")
+    product_keywords = {
+        'HOB': ['hob'],
+        'Oven': ['oven'],
+        'Hood': ['hood', 'extractor'],
+        'Microwave': ['microwave'],
+        'Fridge': ['fridge'],
+        'Freezer': ['freezer'],
+        'Dishwasher': ['dishwasher'],
+        'Washing Machine': ['washing machine', 'washing'],
+        'Washer Dryer': ['washer dryer', 'washer/dryer']
+    }
+    
+    product_name = None
+    description_lower = description.lower()
+    
+    for product, keywords in product_keywords.items():
+        for keyword in keywords:
+            if keyword in description_lower:
+                product_name = product
+                break
+        if product_name:
+            break
+    
+    if product_name:
+        print(f"   🔍 Searching by product name: {product_name}")
+        
+        if brand:
+            query = text("""
+                SELECT pricelist_id, item_code, item_name, description,
+                       base_price, width, height, depth, door_type, brand
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                  AND category = 'Appliances'
+                  AND LOWER(item_name) LIKE LOWER(:product_pattern)
+                  AND UPPER(brand) = UPPER(:brand)
+                ORDER BY base_price ASC
+                LIMIT 1
+            """)
+            
+            result = session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'product_pattern': f'%{product_name}%',
+                'brand': brand
+            }).fetchone()
+        else:
+            query = text("""
+                SELECT pricelist_id, item_code, item_name, description,
+                       base_price, width, height, depth, door_type, brand
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                  AND category = 'Appliances'
+                  AND LOWER(item_name) LIKE LOWER(:product_pattern)
+                ORDER BY base_price ASC
+                LIMIT 1
+            """)
+            
+            result = session.execute(query, {
+                'tenant_id': str(tenant_id),
+                'product_pattern': f'%{product_name}%'
+            }).fetchone()
+        
+        if result:
+            print(f"   ✅ FOUND by product name: {result.item_name} - £{result.base_price}")
+            
+            series = None
+            series_match = re.search(r'\(([^)]+)\)', result.description or '')
+            if series_match:
+                series = series_match.group(1)
+            
+            return jsonify({
+                'found': True,
+                'price': float(result.base_price),
+                'item_code': result.item_code,
+                'item_name': result.item_name,
+                'description': result.description,
+                'pricelist_id': result.pricelist_id,
+                'brand': result.brand,
+                'series': series,
+                'door_type': result.door_type
+            }), 200
+    
+    # ====================================================================
+    # NOT FOUND
+    # ====================================================================
+    print(f"   ❌ NO MATCH for appliance: {description}")
+    return jsonify({
+        'found': False,
+        'error': f'No appliance found matching: {description}'
+    }), 404

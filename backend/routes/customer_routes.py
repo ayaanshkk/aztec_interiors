@@ -1036,7 +1036,7 @@ def get_customers_list(tenant_id, employee_id):
             SELECT 
                 client_id as id,
                 client_company_name as name,
-                client_address as address,
+                address as address,
                 client_phone as phone,
                 client_email as email,
                 client_postcode as postcode

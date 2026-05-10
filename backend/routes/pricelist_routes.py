@@ -28,6 +28,11 @@ def get_pricelist(tenant_id, employee_id):
         if category:
             where_conditions.append("category = :category")
             params['category'] = category
+
+        brand = request.args.get('brand')
+        if brand and brand != 'All':
+            where_conditions.append("brand = :brand")
+            params['brand'] = brand
         
         if search:
             where_conditions.append(
@@ -74,6 +79,7 @@ def get_pricelist(tenant_id, employee_id):
                 'unit': item.unit,
                 'dimension_based': item.dimension_based,
                 'dimension_formula': item.dimension_formula,
+                'brand': item.brand if hasattr(item, 'brand') else None,  # ← ADD THIS LINE
                 'created_at': item.created_at.isoformat() if item.created_at else None,
                 'updated_at': item.updated_at.isoformat() if item.updated_at else None
             })

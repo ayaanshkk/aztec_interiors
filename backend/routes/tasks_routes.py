@@ -11,7 +11,7 @@ VALID_TASK_FIELDS = [
     'type', 'title', 'date', 'start_date', 'end_date', 'customer_name',
     'assigned_to_employee_id', 'team_member', 'project_id', 'client_id', 'job_type',
     'start_time', 'end_time', 'estimated_hours',
-    'notes', 'priority', 'status', 'opportunity_id'
+    'notes', 'priority', 'status', 'opportunity_id', 'work_stage'
 ]
 
 def filter_task_data(data):
@@ -48,6 +48,7 @@ def serialize_task(task_row):
         'project_id': task_row.project_id,
         'opportunity_id': task_row.opportunity_id,
         'job_type': task_row.job_type,
+        'work_stage': task_row.work_stage if hasattr(task_row, 'work_stage') else None,
         'notes': task_row.notes,
         'priority': task_row.priority,
         'status': task_row.status,
@@ -156,21 +157,35 @@ def handle_tasks(tenant_id, employee_id):
                 if emp:
                     team_member_name = emp.employee_name
             
-            # Create task
+            # ✅ Generate sequential task number (Task-001, Task-002, etc.)
+            max_task_query = text("""
+                SELECT COALESCE(MAX(CAST(SUBSTRING(task_id FROM 6) AS INTEGER)), 0) as max_num
+                FROM "StreemLyne_MT"."Tasks_Master"
+                WHERE tenant_id = :tenant_id
+                AND task_id ~ '^Task-[0-9]+$'
+            """)
+            max_result = session.execute(max_task_query, {'tenant_id': str(tenant_id)}).fetchone()
+            next_task_num = (max_result.max_num if max_result and max_result.max_num else 0) + 1
+            task_id = f"Task-{next_task_num:03d}"
+            
+            current_app.logger.info(f"🆔 Generated task_id: {task_id}")
+            
+            # ✅ FIXED: Use Tasks_Master table with generated task_id
             insert_query = text("""
-                INSERT INTO "StreemLyne_MT"."Tasks"
-                (tenant_id, type, title, date, start_date, end_date, customer_name,
+                INSERT INTO "StreemLyne_MT"."Tasks_Master"
+                (task_id, tenant_id, type, title, date, start_date, end_date, customer_name,
                  assigned_to_employee_id, team_member, created_by_employee_id,
                  project_id, client_id, start_time, end_time, estimated_hours,
-                 notes, priority, status, job_type, opportunity_id)
-                VALUES (:tenant_id, :type, :title, :date, :start_date, :end_date, :customer_name,
+                 notes, priority, status, job_type, opportunity_id, work_stage)
+                VALUES (:task_id, :tenant_id, :type, :title, :date, :start_date, :end_date, :customer_name,
                         :assigned_to, :team_member, :created_by,
                         :project_id, :client_id, :start_time, :end_time, :estimated_hours,
-                        :notes, :priority, :status, :job_type, :opportunity_id)
+                        :notes, :priority, :status, :job_type, :opportunity_id, :work_stage)
                 RETURNING task_id
             """)
             
             result = session.execute(insert_query, {
+                'task_id': task_id,
                 'tenant_id': str(tenant_id),
                 'type': data.get('type', 'job'),
                 'title': data.get('title', ''),
@@ -190,28 +205,27 @@ def handle_tasks(tenant_id, employee_id):
                 'priority': data.get('priority', 'Medium'),
                 'status': data.get('status', 'Scheduled'),
                 'job_type': data.get('job_type'),
-                'opportunity_id': data.get('opportunity_id')
+                'opportunity_id': data.get('opportunity_id'),
+                'work_stage': data.get('work_stage', 'Survey')
             })
             
-            task_id = result.fetchone().task_id
+            returned_task_id = result.fetchone().task_id
             session.commit()
             
-            current_app.logger.info(f"✅ Task created: {task_id}")
+            current_app.logger.info(f"✅ Task created: {returned_task_id}")
             
-            # Fetch created task with creator name
+            # ✅ FIXED: Use Tasks_Master table
             select_query = text("""
                 SELECT t.*, e.employee_name as created_by_name
-                FROM "StreemLyne_MT"."Tasks" t
+                FROM "StreemLyne_MT"."Tasks_Master" t
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" e 
                     ON t.created_by_employee_id = e.employee_id
                 WHERE t.task_id = :task_id
             """)
-            task = session.execute(select_query, {'task_id': task_id}).fetchone()
+            task = session.execute(select_query, {'task_id': returned_task_id}).fetchone()
             
-            return jsonify({
-                'message': 'Task created successfully',
-                'assignment': serialize_task(task)  # Keep 'assignment' key for backward compatibility
-            }), 201
+            # ✅ FIXED: Return task directly without wrapper
+            return jsonify(serialize_task(task)), 201
             
         except Exception as e:
             session.rollback()
@@ -228,18 +242,19 @@ def handle_tasks(tenant_id, employee_id):
         try:
             current_app.logger.info(f"📋 Fetching tasks for tenant: {tenant_id}")
             
+            # ✅ FIXED: Use Tasks_Master table
             query = text("""
                 SELECT 
                     t.*,
                     creator.employee_name as created_by_name,
                     updater.employee_name as updated_by_name
-                FROM "StreemLyne_MT"."Tasks" t
+                FROM "StreemLyne_MT"."Tasks_Master" t
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" creator 
                     ON t.created_by_employee_id = creator.employee_id
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" updater 
                     ON t.updated_by_employee_id = updater.employee_id
                 WHERE t.tenant_id = :tenant_id
-                ORDER BY t.start_date DESC
+                ORDER BY t.created_at DESC
             """)
             
             tasks = session.execute(query, {'tenant_id': str(tenant_id)}).fetchall()
@@ -262,9 +277,9 @@ def handle_tasks(tenant_id, employee_id):
 def handle_single_task(task_id, tenant_id, employee_id):
     session = SessionLocal()
     try:
-        # Check if task exists
+        # ✅ FIXED: Use Tasks_Master table
         check_query = text("""
-            SELECT task_id FROM "StreemLyne_MT"."Tasks"
+            SELECT task_id FROM "StreemLyne_MT"."Tasks_Master"
             WHERE task_id = :task_id AND tenant_id = :tenant_id
         """)
         task_exists = session.execute(check_query, {
@@ -277,12 +292,13 @@ def handle_single_task(task_id, tenant_id, employee_id):
         
         # GET
         if request.method == 'GET':
+            # ✅ FIXED: Use Tasks_Master table
             query = text("""
                 SELECT 
                     t.*,
                     creator.employee_name as created_by_name,
                     updater.employee_name as updated_by_name
-                FROM "StreemLyne_MT"."Tasks" t
+                FROM "StreemLyne_MT"."Tasks_Master" t
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" creator 
                     ON t.created_by_employee_id = creator.employee_id
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" updater 
@@ -370,6 +386,10 @@ def handle_single_task(task_id, tenant_id, employee_id):
                 update_fields.append("job_type = :job_type")
                 params['job_type'] = data['job_type']
             
+            if 'work_stage' in data:
+                update_fields.append("work_stage = :work_stage")
+                params['work_stage'] = data['work_stage']
+            
             if 'project_id' in data:
                 update_fields.append("project_id = :project_id")
                 params['project_id'] = data['project_id']
@@ -424,8 +444,9 @@ def handle_single_task(task_id, tenant_id, employee_id):
             # Add updated_by
             update_fields.append("updated_by_employee_id = :updated_by")
             
+            # ✅ FIXED: Use Tasks_Master table
             update_query = text(f"""
-                UPDATE "StreemLyne_MT"."Tasks"
+                UPDATE "StreemLyne_MT"."Tasks_Master"
                 SET {', '.join(update_fields)}
                 WHERE task_id = :task_id AND tenant_id = :tenant_id
                 RETURNING task_id
@@ -440,13 +461,13 @@ def handle_single_task(task_id, tenant_id, employee_id):
             
             current_app.logger.info(f"✅ Task {task_id} updated successfully")
             
-            # Fetch updated task
+            # ✅ FIXED: Use Tasks_Master table
             select_query = text("""
                 SELECT 
                     t.*,
                     creator.employee_name as created_by_name,
                     updater.employee_name as updated_by_name
-                FROM "StreemLyne_MT"."Tasks" t
+                FROM "StreemLyne_MT"."Tasks_Master" t
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" creator 
                     ON t.created_by_employee_id = creator.employee_id
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" updater 
@@ -455,17 +476,16 @@ def handle_single_task(task_id, tenant_id, employee_id):
             """)
             task = session.execute(select_query, {'task_id': task_id}).fetchone()
             
-            return jsonify({
-                'message': 'Task updated successfully',
-                'assignment': serialize_task(task)
-            })
+            # ✅ FIXED: Return task directly without wrapper
+            return jsonify(serialize_task(task)), 200
         
         # DELETE
         elif request.method == 'DELETE':
             current_app.logger.info(f"🗑️ Deleting task {task_id}")
             
+            # ✅ FIXED: Use Tasks_Master table
             delete_query = text("""
-                DELETE FROM "StreemLyne_MT"."Tasks"
+                DELETE FROM "StreemLyne_MT"."Tasks_Master"
                 WHERE task_id = :task_id AND tenant_id = :tenant_id
                 RETURNING task_id
             """)
@@ -514,12 +534,13 @@ def get_tasks_by_date_range(tenant_id, employee_id):
         
         current_app.logger.info(f"📅 Fetching tasks from {start} to {end}")
         
+        # ✅ FIXED: Use Tasks_Master table
         query = text("""
             SELECT 
                 t.*,
                 creator.employee_name as created_by_name,
                 updater.employee_name as updated_by_name
-            FROM "StreemLyne_MT"."Tasks" t
+            FROM "StreemLyne_MT"."Tasks_Master" t
             LEFT JOIN "StreemLyne_MT"."Employee_Master" creator 
                 ON t.created_by_employee_id = creator.employee_id
             LEFT JOIN "StreemLyne_MT"."Employee_Master" updater 
@@ -569,6 +590,7 @@ def get_available_jobs(tenant_id, employee_id):
             FROM "StreemLyne_MT"."Project_Details" p
             LEFT JOIN "StreemLyne_MT"."Client_Master" c 
                 ON p.client_id = c.client_id
+                AND p.tenant_id = c.tenant_id
             WHERE p.tenant_id = :tenant_id
                 AND p.status IN ('Survey', 'Delivery', 'Installation', 'Active', 'In Progress')
             ORDER BY p.created_at DESC
@@ -581,10 +603,10 @@ def get_available_jobs(tenant_id, employee_id):
         result = []
         for p in projects:
             result.append({
-                'id': p.project_id,
+                'id': str(p.project_id),
                 'job_reference': f"PRJ-{p.display_id}" if p.display_id else f"PRJ-{p.project_id}",
                 'customer_name': p.client_company_name or 'Unknown',
-                'customer_id': p.client_id,
+                'customer_id': str(p.client_id) if p.client_id else None,
                 'job_type': 'Project',
                 'stage': 'Active',
                 'work_stage': p.status or 'Survey'
@@ -629,7 +651,7 @@ def get_active_customers(tenant_id, employee_id):
         result = []
         for c in clients:
             result.append({
-                'id': c.client_id,
+                'id': str(c.client_id),
                 'name': c.client_company_name,
                 'address': c.address or '',
                 'phone': c.client_phone or '',
@@ -680,28 +702,3 @@ def get_job_work_stages(tenant_id, employee_id):
     ]
     
     return jsonify(work_stages), 200
-
-
-# Backward compatibility routes (redirect old /assignments paths to /tasks)
-@tasks_bp.route('/assignments', methods=['GET', 'POST'])
-@token_required
-@require_tenant
-def handle_assignments_compat(tenant_id, employee_id):
-    """Backward compatibility for /assignments endpoint"""
-    return handle_tasks(tenant_id, employee_id)
-
-
-@tasks_bp.route('/assignments/<string:task_id>', methods=['GET', 'PUT', 'DELETE'])
-@token_required
-@require_tenant
-def handle_single_assignment_compat(task_id, tenant_id, employee_id):
-    """Backward compatibility for /assignments/<id> endpoint"""
-    return handle_single_task(task_id, tenant_id, employee_id)
-
-
-@tasks_bp.route('/assignments/by-date-range', methods=['GET'])
-@token_required
-@require_tenant
-def get_assignments_by_date_range_compat(tenant_id, employee_id):
-    """Backward compatibility for /assignments/by-date-range endpoint"""
-    return get_tasks_by_date_range(tenant_id, employee_id)

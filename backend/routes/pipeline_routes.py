@@ -23,9 +23,9 @@ def get_pipeline_data(tenant_id, employee_id):
     """Get all pipeline items (clients with their projects/opportunities)
     
     Returns pipeline cards for:
-    - Clients with projects (shows project stage)
-    - Clients with opportunities (shows opportunity stage)
-    - Pure lead clients (no projects/opportunities)
+    - Clients with projects (shows project details + client stage)
+    - Clients with opportunities (shows opportunity details + client stage)
+    - Pure lead clients (no projects/opportunities, just client stage)
     """
     session = SessionLocal()
     try:
@@ -41,7 +41,9 @@ def get_pipeline_data(tenant_id, employee_id):
                 c.client_email,
                 c.stage as client_stage,
                 c.is_allocated,
-                c.is_cleansed
+                c.is_cleansed,
+                c.created_at,
+                c.project_types
             FROM "StreemLyne_MT"."Client_Master" c
             WHERE c.tenant_id = :tenant_id AND c.is_deleted = false
             ORDER BY c.created_at DESC
@@ -63,16 +65,21 @@ def get_pipeline_data(tenant_id, employee_id):
                     project_id,
                     project_title,
                     project_description,
+                    project_type,
+                    date_of_measure,
                     start_date,
                     end_date,
-                    status
+                    status,
+                    notes,
+                    created_at
                 FROM "StreemLyne_MT"."Project_Details"
-                WHERE client_id = :client_id
+                WHERE client_id = :client_id AND tenant_id = :tenant_id
                 ORDER BY created_at DESC
             """)
             
             projects = session.execute(projects_query, {
-                'client_id': client.client_id
+                'client_id': client.client_id,
+                'tenant_id': str(tenant_id)
             }).fetchall()
             
             # Get opportunities for this client
@@ -84,7 +91,8 @@ def get_pipeline_data(tenant_id, employee_id):
                     process_stage,
                     opportunity_value,
                     start_date,
-                    end_date
+                    end_date,
+                    created_at
                 FROM "StreemLyne_MT"."Opportunity_Details"
                 WHERE client_id = :client_id 
                     AND tenant_id = :tenant_id
@@ -100,47 +108,53 @@ def get_pipeline_data(tenant_id, employee_id):
             has_projects = len(projects) > 0
             has_opportunities = len(opportunities) > 0
             
+            # ✅ USE CLIENT STAGE FOR ALL ITEMS (not project status)
+            client_stage = client.client_stage or 'Lead'
+            
             # Create cards for each project
             for project in projects:
                 total_projects += 1
-                project_stage = project.status or 'Lead'
                 
                 pipeline_items.append({
                     'id': f'project-{project.project_id}',
                     'type': 'project',
-                    'stage': project_stage,
-                    'client': {
+                    'stage': client_stage,  # ✅ Use client stage, not project status
+                    'customer': {
                         'id': client.client_id,
                         'name': client.client_company_name,
                         'contact_name': client.client_contact_name,
                         'phone': client.client_phone,
-                        'email': client.client_email
+                        'email': client.client_email,
+                        'created_at': client.created_at.isoformat() if client.created_at else None
                     },
                     'project': {
                         'id': project.project_id,
                         'title': project.project_title,
                         'description': project.project_description,
+                        'project_type': project.project_type,  # ✅ Include project type for colors
+                        'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
                         'start_date': project.start_date.isoformat() if project.start_date else None,
                         'end_date': project.end_date.isoformat() if project.end_date else None,
-                        'status': project_stage
+                        'status': project.status,
+                        'notes': project.notes
                     }
                 })
             
             # Create cards for each opportunity
             for opp in opportunities:
                 total_opportunities += 1
-                opp_stage = opp.process_stage or 'Not Started'
                 
                 pipeline_items.append({
                     'id': f'opportunity-{opp.opportunity_id}',
                     'type': 'opportunity',
-                    'stage': opp_stage,
-                    'client': {
+                    'stage': client_stage,  # ✅ Use client stage
+                    'customer': {
                         'id': client.client_id,
                         'name': client.client_company_name,
                         'contact_name': client.client_contact_name,
                         'phone': client.client_phone,
-                        'email': client.client_email
+                        'email': client.client_email,
+                        'created_at': client.created_at.isoformat() if client.created_at else None
                     },
                     'opportunity': {
                         'id': opp.opportunity_id,
@@ -149,27 +163,28 @@ def get_pipeline_data(tenant_id, employee_id):
                         'value': float(opp.opportunity_value) if opp.opportunity_value else None,
                         'start_date': opp.start_date.isoformat() if opp.start_date else None,
                         'end_date': opp.end_date.isoformat() if opp.end_date else None,
-                        'stage': opp_stage
+                        'stage': opp.process_stage
                     }
                 })
             
             # Create card for pure lead (no projects or opportunities)
             if not has_projects and not has_opportunities:
                 clients_without_either += 1
-                client_stage = client.client_stage or 'Lead'
                 
                 pipeline_items.append({
                     'id': f'client-{client.client_id}',
                     'type': 'client',
                     'stage': client_stage,
-                    'client': {
+                    'customer': {
                         'id': client.client_id,
                         'name': client.client_company_name,
                         'contact_name': client.client_contact_name,
                         'phone': client.client_phone,
                         'email': client.client_email,
                         'is_allocated': bool(client.is_allocated),
-                        'is_cleansed': bool(client.is_cleansed)
+                        'is_cleansed': bool(client.is_cleansed),
+                        'created_at': client.created_at.isoformat() if client.created_at else None,
+                        'project_types': client.project_types if client.project_types else []  # ✅ Add this
                     }
                 })
             else:
@@ -212,3 +227,173 @@ def get_pipeline_stages(tenant_id, employee_id):
     return jsonify({
         'stages': PIPELINE_STAGE_ORDER
     }), 200
+
+
+# ==========================================
+# STAGE UPDATE ENDPOINTS
+# ==========================================
+
+@pipeline_bp.route('/clients/<int:client_id>/stage', methods=['PATCH'])
+@token_required
+@require_tenant
+def update_client_stage(tenant_id, employee_id, client_id):
+    """Update client stage"""
+    session = SessionLocal()
+    try:
+        data = request.get_json()
+        new_stage = data.get('stage')
+        
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+        
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Client_Master"
+            SET stage = :stage
+            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
+            RETURNING stage
+        """)
+        
+        result = session.execute(update_query, {
+            'stage': new_stage,
+            'client_id': client_id,
+            'tenant_id': str(tenant_id)
+        })
+        
+        if not result.fetchone():
+            return jsonify({'error': 'Client not found'}), 404
+        
+        session.commit()
+        
+        current_app.logger.info(f"✅ Client {client_id} stage updated to {new_stage}")
+        
+        return jsonify({
+            'success': True,
+            'new_stage': new_stage
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating client stage: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@pipeline_bp.route('/projects/<int:project_id>/stage', methods=['PATCH'])
+@token_required
+@require_tenant
+def update_project_stage(tenant_id, employee_id, project_id):
+    """Update project's CLIENT stage (projects don't have their own stage)"""
+    session = SessionLocal()
+    try:
+        data = request.get_json()
+        new_stage = data.get('stage')
+        
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+        
+        # Get the client_id for this project
+        get_client_query = text("""
+            SELECT client_id FROM "StreemLyne_MT"."Project_Details"
+            WHERE project_id = :project_id AND tenant_id = :tenant_id
+        """)
+        
+        result = session.execute(get_client_query, {
+            'project_id': project_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not result:
+            return jsonify({'error': 'Project not found'}), 404
+        
+        client_id = result.client_id
+        
+        # Update the CLIENT's stage
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Client_Master"
+            SET stage = :stage
+            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            RETURNING stage
+        """)
+        
+        session.execute(update_query, {
+            'stage': new_stage,
+            'client_id': client_id,
+            'tenant_id': str(tenant_id)
+        })
+        
+        session.commit()
+        
+        current_app.logger.info(f"✅ Project {project_id}'s client stage updated to {new_stage}")
+        
+        return jsonify({
+            'success': True,
+            'new_stage': new_stage
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating project stage: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@pipeline_bp.route('/opportunities/<int:opportunity_id>/stage', methods=['PATCH'])
+@token_required
+@require_tenant
+def update_opportunity_stage(tenant_id, employee_id, opportunity_id):
+    """Update opportunity's CLIENT stage"""
+    session = SessionLocal()
+    try:
+        data = request.get_json()
+        new_stage = data.get('stage')
+        
+        if not new_stage:
+            return jsonify({'error': 'Stage is required'}), 400
+        
+        # Get the client_id for this opportunity
+        get_client_query = text("""
+            SELECT client_id FROM "StreemLyne_MT"."Opportunity_Details"
+            WHERE opportunity_id = :opportunity_id AND tenant_id = :tenant_id
+        """)
+        
+        result = session.execute(get_client_query, {
+            'opportunity_id': opportunity_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not result:
+            return jsonify({'error': 'Opportunity not found'}), 404
+        
+        client_id = result.client_id
+        
+        # Update the CLIENT's stage
+        update_query = text("""
+            UPDATE "StreemLyne_MT"."Client_Master"
+            SET stage = :stage
+            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            RETURNING stage
+        """)
+        
+        session.execute(update_query, {
+            'stage': new_stage,
+            'client_id': client_id,
+            'tenant_id': str(tenant_id)
+        })
+        
+        session.commit()
+        
+        current_app.logger.info(f"✅ Opportunity {opportunity_id}'s client stage updated to {new_stage}")
+        
+        return jsonify({
+            'success': True,
+            'new_stage': new_stage
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"❌ Error updating opportunity stage: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
