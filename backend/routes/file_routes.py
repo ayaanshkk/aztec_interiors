@@ -5,10 +5,6 @@ from sqlalchemy import text, or_
 import os
 import uuid 
 import requests
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
-
 from ..utils.file_utils import allowed_file
 from .auth_helpers import token_required, require_tenant
 from ..db import SessionLocal
@@ -16,149 +12,40 @@ from ..db import SessionLocal
 file_bp = Blueprint('file_routes', __name__)
 
 # ==========================================
-# Cloudinary Configuration
+# VERCEL BLOB / FILE HANDLING
 # ==========================================
 
-def get_cloudinary_config():
-    """Get Cloudinary configuration from environment variables"""
-    cloud_name = os.environ.get('CLOUDINARY_CLOUD_NAME') or os.getenv('CLOUDINARY_CLOUD_NAME')
-    api_key = os.environ.get('CLOUDINARY_API_KEY') or os.getenv('CLOUDINARY_API_KEY')
-    api_secret = os.environ.get('CLOUDINARY_API_SECRET') or os.getenv('CLOUDINARY_API_SECRET')
-    
-    if not all([cloud_name, api_key, api_secret]):
-        return None
-    
-    return {
-        'cloud_name': cloud_name,
-        'api_key': api_key,
-        'api_secret': api_secret
-    }
-
-
-def ensure_cloudinary_configured():
-    """Ensure Cloudinary is configured before upload operations"""
-    config = get_cloudinary_config()
-    
-    if not config:
-        error_msg = "Cloudinary configuration is missing. Please set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET environment variables."
-        if hasattr(current_app, 'logger'):
-            current_app.logger.error(error_msg)
-        raise ValueError(error_msg)
-    
-    cloudinary.config(
-        cloud_name=config['cloud_name'],
-        api_key=config['api_key'],
-        api_secret=config['api_secret'],
-        secure=True
-    )
-    
-    if hasattr(current_app, 'logger'):
-        current_app.logger.info(f"Cloudinary configured with cloud_name: {config['cloud_name']}")
-    
-    return True
-
-
-def upload_file_to_cloudinary(file, filename, client_id, document_category='drawing'):
-    """Upload file to Cloudinary and return the URL and public_id"""
+def upload_to_vercel_blob(file, filename):
+    """Upload file to Vercel Blob via Next.js API"""
     try:
-        ensure_cloudinary_configured()
+        NEXTJS_URL = os.getenv('NEXT_PUBLIC_FRONTEND_URL', 'http://localhost:3000')
         
-        # Create folder structure in Cloudinary
-        folder = f"streemlyne/{document_category}/{client_id}"
+        # Prepare file for upload
+        files = {'file': (filename, file.stream, file.content_type)}
         
-        # Reset file pointer to beginning
-        file.seek(0)
+        # Upload to Vercel Blob via Next.js API
+        upload_response = requests.post(
+            f'{NEXTJS_URL}/api/upload',
+            files=files,
+            timeout=30
+        )
         
-        # Determine resource type
-        file_extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-        mime_type = file.mimetype if hasattr(file, 'mimetype') else ''
+        if upload_response.status_code != 200:
+            error_data = upload_response.json() if upload_response.text else {}
+            raise Exception(f"Vercel Blob upload failed: {error_data.get('error', 'Unknown error')}")
         
-        current_app.logger.info(f"Uploading: {filename}, extension: {file_extension}, mime: {mime_type}")
+        blob_data = upload_response.json()
+        return blob_data['url']  # Full Vercel Blob URL
         
-        # Determine resource type
-        if file_extension in ['pdf', 'xlsx', 'xls', 'csv', 'doc', 'docx', 'txt', 'zip'] or \
-           'pdf' in mime_type.lower() or 'spreadsheet' in mime_type.lower() or \
-           'excel' in mime_type.lower() or 'document' in mime_type.lower():
-            resource_type = 'raw'
-        elif file_extension in ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'] or \
-             'image' in mime_type.lower():
-            resource_type = 'image'
-        else:
-            resource_type = 'raw'
-        
-        current_app.logger.info(f"Uploading {filename} as resource_type='{resource_type}'")
-        
-        # Upload to Cloudinary
-        upload_params = {
-            'folder': folder,
-            'public_id': filename.rsplit('.', 1)[0],
-            'resource_type': resource_type,
-            'overwrite': False,
-            'unique_filename': True
-        }
-        
-        upload_result = cloudinary.uploader.upload(file, **upload_params)
-        
-        cloudinary_url = upload_result['secure_url']
-        public_id = upload_result['public_id']
-        
-        current_app.logger.info(f"File uploaded to Cloudinary: {public_id}")
-        
-        return cloudinary_url, public_id
-        
-    except ValueError as ve:
-        current_app.logger.error(f"Cloudinary configuration error: {ve}")
+    except requests.exceptions.Timeout:
+        current_app.logger.error("Timeout uploading to Vercel Blob")
+        raise Exception("Upload timeout - please try again")
+    except requests.exceptions.RequestException as e:
+        current_app.logger.error(f"Request error uploading to Vercel Blob: {e}")
+        raise Exception(f"Upload failed: {str(e)}")
+    except Exception as e:
+        current_app.logger.error(f"Error uploading to Vercel Blob: {e}")
         raise
-    except Exception as e:
-        current_app.logger.error(f"Error uploading to Cloudinary: {e}", exc_info=True)
-        raise Exception(f"Failed to upload file to Cloudinary: {str(e)}")
-
-
-def delete_file_from_cloudinary(storage_path):
-    """Delete a file from Cloudinary"""
-    try:
-        ensure_cloudinary_configured()
-        
-        public_id = storage_path
-        
-        if storage_path and 'cloudinary.com' in storage_path:
-            # Extract public_id from URL
-            parts = storage_path.split('/upload/')
-            if len(parts) > 1:
-                path_after_upload = parts[1]
-                if path_after_upload.startswith('v') and '/' in path_after_upload:
-                    path_after_upload = '/'.join(path_after_upload.split('/')[1:])
-                if 'fl_' in path_after_upload:
-                    path_parts = path_after_upload.split('/')
-                    path_after_upload = '/'.join([p for p in path_parts if not p.startswith('fl_')])
-                public_id = path_after_upload.rsplit('.', 1)[0] if '.' in path_after_upload else path_after_upload
-        
-        current_app.logger.info(f"Deleting from Cloudinary: {public_id}")
-        
-        # Try different resource types
-        result = cloudinary.uploader.destroy(public_id, resource_type='raw')
-        
-        if result.get('result') not in ['ok', 'not found']:
-            result = cloudinary.uploader.destroy(public_id, resource_type='image')
-        
-        if result.get('result') not in ['ok', 'not found']:
-            result = cloudinary.uploader.destroy(public_id, resource_type='video')
-        
-        success = result.get('result') in ['ok', 'not found']
-        
-        if success:
-            current_app.logger.info(f"File deleted from Cloudinary: {public_id}")
-        else:
-            current_app.logger.warning(f"Could not delete from Cloudinary: {public_id}")
-        
-        return success
-        
-    except ValueError as ve:
-        current_app.logger.error(f"Cloudinary configuration error: {ve}")
-        return False
-    except Exception as e:
-        current_app.logger.error(f"Error deleting from Cloudinary: {e}", exc_info=True)
-        return False
 
 
 # ==========================================
@@ -225,11 +112,9 @@ def handle_customer_documents(tenant_id, employee_id):
                     'property_id': doc.property_id,
                     'file_name': doc.file_name,
                     'file_url': doc.file_url,
-                    'storage_path': doc.storage_path,
                     'document_category': doc.document_category,
                     'category': doc.document_category,  # Backward compatibility
-                    'mime_type': doc.mime_type,
-                    'uploaded_by': doc.uploaded_by,
+                    'mime_type': doc.mime_type if hasattr(doc, 'mime_type') else None,
                     'uploaded_at': doc.uploaded_at.isoformat() if doc.uploaded_at else None
                 })
             
@@ -265,18 +150,10 @@ def handle_customer_documents(tenant_id, employee_id):
             filename = secure_filename(file.filename)
             unique_filename = f"{client_id}_{str(uuid.uuid4())}_{filename}"
             
-            # Upload to Cloudinary
-            cloudinary_url, public_id = upload_file_to_cloudinary(
-                file, unique_filename, client_id, document_category
-            )
-            
-            # Get uploaded_by
-            uploaded_by = 'System'
-            if hasattr(request, 'current_user') and request.current_user:
-                if hasattr(request.current_user, 'full_name'):
-                    uploaded_by = request.current_user.full_name
-                elif hasattr(request.current_user, 'username'):
-                    uploaded_by = request.current_user.username
+            # Upload to Vercel Blob
+            current_app.logger.info(f"Uploading {filename} to Vercel Blob...")
+            file_url = upload_to_vercel_blob(file, unique_filename)
+            current_app.logger.info(f"File uploaded: {file_url}")
             
             # Determine MIME type
             mime_type = file.mimetype if hasattr(file, 'mimetype') else 'application/octet-stream'
@@ -285,11 +162,9 @@ def handle_customer_documents(tenant_id, employee_id):
             insert_query = text("""
                 INSERT INTO "StreemLyne_MT"."Customer_Documents"
                 (client_id, project_id, opportunity_id, property_id,
-                 file_name, file_url, storage_path, document_category,
-                 mime_type, uploaded_by)
+                 file_name, file_url, document_category, mime_type)
                 VALUES (:client_id, :project_id, :opportunity_id, :property_id,
-                        :file_name, :file_url, :storage_path, :category,
-                        :mime_type, :uploaded_by)
+                        :file_name, :file_url, :category, :mime_type)
                 RETURNING id
             """)
             
@@ -299,11 +174,9 @@ def handle_customer_documents(tenant_id, employee_id):
                 'opportunity_id': int(opportunity_id) if opportunity_id else None,
                 'property_id': int(property_id) if property_id else None,
                 'file_name': filename,
-                'file_url': cloudinary_url,
-                'storage_path': cloudinary_url,
+                'file_url': file_url,
                 'category': document_category,
-                'mime_type': mime_type,
-                'uploaded_by': uploaded_by
+                'mime_type': mime_type
             })
             
             doc_id = result.fetchone().id
@@ -317,7 +190,7 @@ def handle_customer_documents(tenant_id, employee_id):
                 'document': {
                     'id': doc_id,
                     'file_name': filename,
-                    'file_url': cloudinary_url,
+                    'file_url': file_url,
                     'document_category': document_category
                 }
             }), 201
@@ -359,8 +232,7 @@ def handle_single_document(document_id, tenant_id, employee_id):
                 'file_name': document.file_name,
                 'file_url': document.file_url,
                 'document_category': document.document_category,
-                'mime_type': document.mime_type,
-                'uploaded_by': document.uploaded_by,
+                'mime_type': document.mime_type if hasattr(document, 'mime_type') else None,
                 'uploaded_at': document.uploaded_at.isoformat() if document.uploaded_at else None
             }), 200
         
@@ -402,11 +274,7 @@ def handle_single_document(document_id, tenant_id, employee_id):
         
         # DELETE
         elif request.method == 'DELETE':
-            # Delete from Cloudinary
-            if document.storage_path:
-                delete_file_from_cloudinary(document.storage_path)
-            
-            # Delete from database
+            # Delete from database (Vercel Blob files persist, managed separately if needed)
             delete_query = text("""
                 DELETE FROM "StreemLyne_MT"."Customer_Documents"
                 WHERE id = :doc_id
@@ -414,6 +282,8 @@ def handle_single_document(document_id, tenant_id, employee_id):
             
             session.execute(delete_query, {'doc_id': document_id})
             session.commit()
+            
+            current_app.logger.info(f"Document {document_id} deleted from database")
             
             return jsonify({
                 'success': True,
@@ -430,7 +300,7 @@ def handle_single_document(document_id, tenant_id, employee_id):
 
 @file_bp.route('/files/documents/view/<path:filename>', methods=['GET'])
 def view_document(filename):
-    """Serve document from Cloudinary"""
+    """Serve document - redirect to Vercel Blob URL"""
     session = SessionLocal()
     try:
         # Look up document by filename
@@ -438,7 +308,6 @@ def view_document(filename):
             SELECT * FROM "StreemLyne_MT"."Customer_Documents"
             WHERE file_name LIKE :filename
                OR file_url LIKE :filename
-               OR storage_path LIKE :filename
             LIMIT 1
         """)
         
@@ -447,32 +316,23 @@ def view_document(filename):
         }).fetchone()
         
         if not document:
-            return jsonify({'error': 'File not found'}), 404
+            current_app.logger.error(f"Document not found: {filename}")
+            return jsonify({'error': 'Document not found'}), 404
         
-        cloudinary_url = document.file_url or document.storage_path
+        file_url = document.file_url
         
-        # Check if it's a PDF
-        is_pdf = '.pdf' in cloudinary_url.lower() or document.mime_type == 'application/pdf'
+        # Check if it's a valid URL
+        if not file_url or not file_url.startswith('https://'):
+            current_app.logger.error(f"Invalid file URL: {file_url}")
+            return jsonify({
+                'error': 'Invalid file URL',
+                'message': 'The document URL is not properly configured. Please re-upload the file.'
+            }), 500
         
-        if is_pdf:
-            # Fetch PDF and serve with inline disposition
-            response = requests.get(cloudinary_url, timeout=30)
-            
-            if response.status_code == 200:
-                return Response(
-                    response.content,
-                    mimetype='application/pdf',
-                    headers={
-                        'Content-Disposition': f'inline; filename="{document.file_name}"',
-                        'Content-Type': 'application/pdf',
-                        'Cache-Control': 'public, max-age=3600'
-                    }
-                )
-            else:
-                return jsonify({'error': 'Failed to fetch PDF'}), 500
-        else:
-            # Redirect to Cloudinary for other files
-            return redirect(cloudinary_url)
+        current_app.logger.info(f"Redirecting to: {file_url}")
+        
+        # Redirect to Vercel Blob URL
+        return redirect(file_url, code=302)
         
     except Exception as e:
         current_app.logger.error(f"Error serving document: {e}", exc_info=True)
@@ -491,15 +351,15 @@ def view_document(filename):
 def handle_drawings_compat(tenant_id, employee_id):
     """Get customer drawing documents"""
     customer_id = request.args.get('customer_id')
-    project_id = request.args.get('project_id')  # ✅ ADD THIS
+    project_id = request.args.get('project_id')
     
     session = SessionLocal()
     try:
-        # ✅ Build WHERE conditions properly
+        # Build WHERE conditions properly
         where_conditions = [
             "(document_category IN ('pdf', 'image', 'drawing') OR document_category IS NULL)"
         ]
-        params = {}
+        params = {'tenant_id': str(tenant_id)}
         
         if customer_id:
             where_conditions.append("cd.client_id = :customer_id")
@@ -513,9 +373,8 @@ def handle_drawings_compat(tenant_id, employee_id):
                 )
             """)
             params['project_id'] = int(project_id)
-            params['tenant_id'] = str(tenant_id)
         else:
-            # ✅ CRITICAL: If no filter, return empty instead of everything
+            # If no filter, return empty instead of everything
             return jsonify([]), 200
         
         where_clause = " AND ".join(where_conditions)
@@ -535,8 +394,6 @@ def handle_drawings_compat(tenant_id, employee_id):
             WHERE {where_clause}
             ORDER BY cd.uploaded_at DESC
         """)
-        
-        params['tenant_id'] = str(tenant_id)
         
         docs = session.execute(query, params).fetchall()
         
@@ -559,12 +416,66 @@ def handle_drawings_compat(tenant_id, employee_id):
     finally:
         session.close()
 
-@file_bp.route('/files/drawings/<int:drawing_id>', methods=['GET', 'PATCH', 'DELETE'])
+
+@file_bp.route('/files/drawings/<int:drawing_id>', methods=['GET', 'DELETE'])
 @token_required
 @require_tenant
-def handle_single_drawing_compat(drawing_id, tenant_id, employee_id):
-    """Backward compatibility for single drawing operations"""
-    return handle_single_document(drawing_id, tenant_id, employee_id)
+def handle_single_drawing_compat(tenant_id, employee_id, drawing_id):
+    """Legacy endpoint for /files/drawings/<id> - routes to handle_single_document"""
+    session = SessionLocal()
+    try:
+        # Get document
+        query = text("""
+            SELECT * FROM "StreemLyne_MT"."Customer_Documents"
+            WHERE id = :doc_id
+        """)
+        
+        document = session.execute(query, {'doc_id': drawing_id}).fetchone()
+        
+        if not document:
+            return jsonify({'error': 'Document not found'}), 404
+        
+        # GET
+        if request.method == 'GET':
+            return jsonify({
+                'id': document.id,
+                'client_id': document.client_id,
+                'project_id': document.project_id,
+                'file_name': document.file_name,
+                'file_url': document.file_url,
+                'document_category': document.document_category,
+                'uploaded_at': document.uploaded_at.isoformat() if document.uploaded_at else None
+            }), 200
+        
+        # DELETE
+        elif request.method == 'DELETE':
+            delete_query = text("""
+                DELETE FROM "StreemLyne_MT"."Customer_Documents"
+                WHERE id = :doc_id
+                RETURNING id
+            """)
+            
+            result = session.execute(delete_query, {'doc_id': drawing_id})
+            deleted = result.fetchone()
+            
+            if not deleted:
+                return jsonify({'error': 'Document not found'}), 404
+            
+            session.commit()
+            
+            current_app.logger.info(f"Drawing {drawing_id} deleted successfully")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Drawing deleted successfully'
+            }), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error handling drawing {drawing_id}: {e}", exc_info=True)
+        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+    finally:
+        session.close()
 
 
 @file_bp.route('/files/drawings/view/<path:filename>', methods=['GET'])
@@ -619,13 +530,63 @@ def handle_forms_compat(tenant_id, employee_id):
     finally:
         session.close()
 
+
 @file_bp.route('/files/forms/<int:form_id>', methods=['GET', 'PATCH', 'DELETE'])
 @token_required
 @require_tenant
-def handle_single_form_compat(form_id, tenant_id, employee_id):
+def handle_single_form_compat(tenant_id, employee_id, form_id):
     """Backward compatibility for single form operations"""
-    return handle_single_document(form_id, tenant_id, employee_id)
+    session = SessionLocal()
+    try:
+        # Get document
+        query = text("""
+            SELECT * FROM "StreemLyne_MT"."Customer_Documents"
+            WHERE id = :doc_id
+        """)
+        
+        document = session.execute(query, {'doc_id': form_id}).fetchone()
+        
+        if not document:
+            return jsonify({'error': 'Document not found'}), 404
+        
+        # GET
+        if request.method == 'GET':
+            return jsonify({
+                'id': document.id,
+                'client_id': document.client_id,
+                'file_name': document.file_name,
+                'file_url': document.file_url,
+                'document_category': document.document_category,
+                'uploaded_at': document.uploaded_at.isoformat() if document.uploaded_at else None
+            }), 200
+        
+        # DELETE
+        elif request.method == 'DELETE':
+            delete_query = text("""
+                DELETE FROM "StreemLyne_MT"."Customer_Documents"
+                WHERE id = :doc_id
+                RETURNING id
+            """)
+            
+            result = session.execute(delete_query, {'doc_id': form_id})
+            deleted = result.fetchone()
+            
+            if not deleted:
+                return jsonify({'error': 'Document not found'}), 404
+            
+            session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Form document deleted successfully'
+            }), 200
 
+    except Exception as e:
+        session.rollback()
+        current_app.logger.error(f"Error handling form document {form_id}: {e}", exc_info=True)
+        return jsonify({'error': f'Operation failed: {str(e)}'}), 500
+    finally:
+        session.close()
 
 @file_bp.route('/files/forms/view/<path:filename>', methods=['GET'])
 def view_form_compat(filename):

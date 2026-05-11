@@ -3,12 +3,12 @@ from sqlalchemy import text
 from datetime import datetime
 import json
 import uuid
-
+ 
 from ..db import SessionLocal
 from .auth_helpers import token_required, require_tenant
-
+ 
 customer_bp = Blueprint('customers', __name__)
-
+ 
 # Define stage hierarchy
 STAGE_HIERARCHY = {
     "Lead": 0,
@@ -28,7 +28,7 @@ STAGE_HIERARCHY = {
     "Remedial": 14,
     "Cancelled": 15
 }
-
+ 
 def get_most_advanced_stage(stages):
     """Given a list of stage strings, return the most advanced one"""
     if not stages:
@@ -37,20 +37,20 @@ def get_most_advanced_stage(stages):
     if not valid_stages:
         return "Lead"
     return max(valid_stages, key=lambda s: STAGE_HIERARCHY.get(s, 0))
-
-
+ 
+ 
 def get_client_ip():
     """Get client IP address"""
     if request.environ.get('HTTP_X_FORWARDED_FOR') is None:
         return request.environ['REMOTE_ADDR']
     else:
         return request.environ['HTTP_X_FORWARDED_FOR']
-
-
+ 
+ 
 # ==========================================
 # CLIENT/CUSTOMER ENDPOINTS
 # ==========================================
-
+ 
 @customer_bp.route('/customers', methods=['GET'])
 @token_required
 @require_tenant
@@ -58,6 +58,7 @@ def get_customers(tenant_id, employee_id):
     """Get all clients with their project counts and document counts"""
     session = SessionLocal()
     try:
+        # ✅ UPDATED: Include display_id and get salesperson names
         query = text("""
             SELECT 
                 c.client_id,
@@ -67,7 +68,7 @@ def get_customers(tenant_id, employee_id):
                 c.client_email as email,
                 c.address,
                 c.post_code as postcode,
-                c.stage,
+                c.stage as client_stage,
                 c.assigned_employee_id,
                 c.is_allocated,
                 c.is_cleansed,
@@ -78,7 +79,13 @@ def get_customers(tenant_id, employee_id):
                 COUNT(DISTINCT p.project_id) as project_count,
                 COUNT(DISTINCT doc.id) as document_count,
                 COUNT(DISTINCT f.form_submission_id) as form_count,
-                c.project_types
+                json_agg(DISTINCT p.project_type) FILTER (WHERE p.project_type IS NOT NULL) as project_types,
+                (SELECT s.stage_name 
+                 FROM "StreemLyne_MT"."Project_Details" p2
+                 LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p2.stage_id = s.stage_id
+                 WHERE p2.client_id = c.client_id AND p2.tenant_id = c.tenant_id
+                 ORDER BY p2.created_at DESC
+                 LIMIT 1) as latest_project_stage
             FROM "StreemLyne_MT"."Client_Master" c
             LEFT JOIN "StreemLyne_MT"."Employee_Master" e
                 ON c.assigned_employee_id = e.employee_id AND e.tenant_id = c.tenant_id
@@ -100,6 +107,8 @@ def get_customers(tenant_id, employee_id):
         
         result = []
         for client in clients:
+            display_stage = client.latest_project_stage or client.client_stage or 'Lead'
+            
             result.append({
                 'id': client.client_id,
                 'name': client.client_name,
@@ -108,13 +117,14 @@ def get_customers(tenant_id, employee_id):
                 'email': client.email or '',
                 'address': client.address or '',
                 'postcode': client.postcode or '',
-                'stage': client.stage or 'Lead',
+                'stage': display_stage,
                 'assigned_employee_id': client.assigned_employee_id,
                 'salesperson': client.salesperson_name or '',
                 'project_types': client.project_types if client.project_types else [],
                 'is_allocated': bool(client.is_allocated),
                 'is_cleansed': bool(client.is_cleansed),
                 'created_at': client.created_at.isoformat() if client.created_at else None,
+                'updated_at': client.created_at.isoformat() if client.created_at else None,  # Use created_at as fallback
                 'project_count': client.project_count or 0,
                 'document_count': client.document_count or 0,
                 'form_count': client.form_count or 0,
@@ -126,10 +136,12 @@ def get_customers(tenant_id, employee_id):
         
     except Exception as e:
         current_app.logger.error(f"Error fetching customers: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
+ 
 @customer_bp.route('/customers', methods=['POST'])
 @token_required
 @require_tenant
@@ -145,16 +157,18 @@ def create_customer(tenant_id, employee_id):
         if not data.get('phone'):
             return jsonify({'error': 'Phone is required'}), 400
         
+        # REMOVED: display_id generation - let database auto-increment handle it
+        
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Client_Master"
             (tenant_id, client_company_name, client_contact_name, client_phone, 
-             client_email, address, post_code, assigned_employee_id, stage,
-             is_allocated, is_cleansed, is_deleted, is_archived)
+            client_email, address, post_code, assigned_employee_id, stage,
+            is_allocated, is_cleansed, is_deleted, is_archived)
             VALUES (:tenant_id, :name, :contact_name, :phone, :email, :address, 
                     :postcode, :assigned_to, 'Lead', false, false, false, false)
             RETURNING client_id
         """)
-        
+
         result = session.execute(insert_query, {
             'tenant_id': str(tenant_id),
             'name': data['name'],
@@ -165,16 +179,16 @@ def create_customer(tenant_id, employee_id):
             'postcode': data.get('postcode', ''),
             'assigned_to': data.get('assigned_employee_id', employee_id)
         })
-        
+
         client_id = result.fetchone().client_id
         session.commit()
-        
+
         current_app.logger.info(f"Client {client_id} created by employee {employee_id}")
-        
+
         return jsonify({
             'success': True,
             'message': 'Customer created successfully',
-            'customer': {'id': client_id}
+            'customer': {'id': client_id}  # ✅ REMOVED: display_id
         }), 201
         
     except Exception as e:
@@ -183,19 +197,36 @@ def create_customer(tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
-
+ 
 @customer_bp.route('/customers/<int:customer_id>', methods=['GET'])
 @token_required
 @require_tenant
-def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
+def get_customer(tenant_id, employee_id, customer_id):
     """Get a single client by ID with all their projects"""
     session = SessionLocal()
     try:
-        # Get client
+        # ✅ Include display_id
         client_query = text("""
-            SELECT * FROM "StreemLyne_MT"."Client_Master"
-            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
+            SELECT 
+                c.*,
+                COALESCE(
+                    (SELECT json_agg(DISTINCT project_type) 
+                     FROM "StreemLyne_MT"."Project_Details" 
+                     WHERE client_id = c.client_id 
+                       AND tenant_id = c.tenant_id
+                       AND project_type IS NOT NULL),
+                    '[]'::json
+                ) as project_types,
+                (SELECT s.stage_name 
+                 FROM "StreemLyne_MT"."Project_Details" p2
+                 LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p2.stage_id = s.stage_id
+                 WHERE p2.client_id = c.client_id AND p2.tenant_id = c.tenant_id
+                 ORDER BY p2.created_at DESC
+                 LIMIT 1) as latest_project_stage
+            FROM "StreemLyne_MT"."Client_Master" c
+            WHERE c.client_id = :client_id 
+              AND c.tenant_id = :tenant_id 
+              AND c.is_deleted = false
         """)
         
         client = session.execute(client_query, {
@@ -206,20 +237,11 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
         if not client:
             return jsonify({'error': 'Customer not found'}), 404
         
-        # Get projects with form counts (excluding customer_checklist)
+        # Fetch projects WITH stage_name
         projects_query = text("""
             SELECT 
-                pd.project_id,
-                pd.project_title,
-                pd.project_type,
-                pd.stage,
-                pd.date_of_measure,
-                pd.project_description,
-                pd.start_date,
-                pd.end_date,
-                pd.status,
-                pd.notes,
-                pd.created_at,
+                pd.*,
+                s.stage_name,
                 (
                     SELECT COUNT(*) 
                     FROM "StreemLyne_MT"."Customer_Form_Submissions" cfs
@@ -227,6 +249,8 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
                       AND cfs.form_type != 'customer_checklist'
                 ) as form_count
             FROM "StreemLyne_MT"."Project_Details" pd
+            LEFT JOIN "StreemLyne_MT"."Stage_Master" s 
+                ON pd.stage_id = s.stage_id
             WHERE pd.client_id = :client_id AND pd.tenant_id = :tenant_id
             ORDER BY pd.created_at DESC
         """)
@@ -236,7 +260,7 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
             'tenant_id': str(tenant_id)
         }).fetchall()
         
-        # Get form submissions (exclude customer_checklist - it's just metadata)
+        # Get form submissions NOT assigned to any project
         forms_query = text("""
             SELECT 
                 form_submission_id,
@@ -251,6 +275,7 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
             WHERE client_id = :client_id 
               AND tenant_id = :tenant_id
               AND form_type != 'customer_checklist'
+              AND project_id IS NULL
             ORDER BY submitted_at DESC
         """)
         
@@ -259,34 +284,51 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
             'tenant_id': str(tenant_id)
         }).fetchall()
         
+        # Parse project_types from JSON
+        project_types = []
+        if client.project_types:
+            if isinstance(client.project_types, str):
+                import json
+                project_types = json.loads(client.project_types)
+            else:
+                project_types = list(client.project_types)
+            project_types = [pt for pt in project_types if pt]
+        
+        primary_stage = client.latest_project_stage or client.stage or 'Lead'
+        
         result = {
             'id': client.client_id,
+            'display_id': client.display_id or f"C-{client.client_id}",
             'name': client.client_company_name,
             'contact_name': client.client_contact_name,
             'phone': client.client_phone,
             'email': client.client_email,
             'address': client.address,
             'postcode': client.post_code,
-            'stage': client.stage or 'Lead',
+            'stage': primary_stage,
+            'project_types': project_types,
             'assigned_employee_id': client.assigned_employee_id,
             'is_allocated': bool(client.is_allocated),
             'is_cleansed': bool(client.is_cleansed),
             'created_at': client.created_at.isoformat() if client.created_at else None,
+            'updated_at': client.created_at.isoformat() if client.created_at else None,  # Use created_at as fallback
             'projects': [{
                 'id': p.project_id,
-                'project_name': p.project_title,  # ✅ Frontend expects this
+                'project_name': p.project_title,
                 'project_title': p.project_title,
-                'project_type': p.project_type,
-                'stage': p.stage,
-                'date_of_measure': p.date_of_measure.isoformat() if p.date_of_measure else None,
-                'project_description': p.project_description,
+                'project_type': p.project_type if p.project_type else None, 
+                'stage': p.stage_name if hasattr(p, 'stage_name') and p.stage_name else None,  
+                'stage_id': p.stage_id,
+                'date_of_measure': p.date_of_measure.isoformat() if hasattr(p, 'date_of_measure') and p.date_of_measure else None,
+                'project_description': p.project_description or '',
                 'start_date': p.start_date.isoformat() if p.start_date else None,
                 'end_date': p.end_date.isoformat() if p.end_date else None,
-                'status': p.status,
-                'notes': p.notes,
+                'status': p.status or 'Active',
+                'notes': p.notes if hasattr(p, 'notes') else '',
                 'created_at': p.created_at.isoformat() if p.created_at else None,
-                'form_count': p.form_count or 0
+                'form_count': p.form_count or 0,
             } for p in projects],
+            
             'forms': [{
                 'id': f.form_submission_id,
                 'form_type': f.form_type,
@@ -294,7 +336,7 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
                 'submission_status': f.submission_status,
                 'approval_status': f.approval_status,
                 'submitted_at': f.submitted_at.isoformat() if f.submitted_at else None,
-                'project_id': f.project_id,
+                'project_id': None,
                 'opportunity_id': f.opportunity_id
             } for f in forms]
         }
@@ -303,14 +345,16 @@ def get_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter or
         
     except Exception as e:
         current_app.logger.error(f"Error fetching customer: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
+ 
 @customer_bp.route('/customers/<int:customer_id>', methods=['PUT'])
 @token_required
 @require_tenant
-def update_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
+def update_customer(tenant_id, employee_id, customer_id):
     """Update a client"""
     session = SessionLocal()
     try:
@@ -360,12 +404,12 @@ def update_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
+ 
 @customer_bp.route('/customers/<int:customer_id>/stage', methods=['PATCH'])
 @token_required
 @require_tenant
-def update_customer_stage(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
-    """Update customer stage directly"""
+def update_customer_stage(tenant_id, employee_id, customer_id):
+    """Update customer stage directly - syncs with sales pipeline"""
     session = SessionLocal()
     try:
         data = request.get_json()
@@ -374,6 +418,7 @@ def update_customer_stage(tenant_id, employee_id, customer_id):  # ✅ FIXED par
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
         
+        # Update client stage
         update_query = text("""
             UPDATE "StreemLyne_MT"."Client_Master"
             SET stage = :stage
@@ -389,6 +434,30 @@ def update_customer_stage(tenant_id, employee_id, customer_id):  # ✅ FIXED par
         
         if not result.fetchone():
             return jsonify({'error': 'Customer not found'}), 404
+        
+        # ✅ Also update the latest project's stage if exists
+        project_update_query = text("""
+            UPDATE "StreemLyne_MT"."Project_Details"
+            SET stage_id = (
+                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
+                WHERE stage_name = :stage AND stage_type = 4
+                LIMIT 1
+            )
+            WHERE client_id = :client_id 
+              AND tenant_id = :tenant_id
+              AND project_id = (
+                  SELECT project_id FROM "StreemLyne_MT"."Project_Details"
+                  WHERE client_id = :client_id AND tenant_id = :tenant_id
+                  ORDER BY created_at DESC
+                  LIMIT 1
+              )
+        """)
+        
+        session.execute(project_update_query, {
+            'stage': new_stage,
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
+        })
         
         session.commit()
         
@@ -420,11 +489,11 @@ def update_customer_stage(tenant_id, employee_id, customer_id):  # ✅ FIXED par
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
+ 
 @customer_bp.route('/customers/<int:customer_id>', methods=['DELETE'])
 @token_required
 @require_tenant
-def delete_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
+def delete_customer(tenant_id, employee_id, customer_id):
     """Delete a client (soft delete)"""
     session = SessionLocal()
     try:
@@ -466,6 +535,39 @@ def delete_customer(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error deleting customer: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+ 
+# ==========================================
+# EMPLOYEE/SALESPERSON LIST ENDPOINT
+# ==========================================
+ 
+@customer_bp.route('/salespeople', methods=['GET'])
+@token_required
+@require_tenant
+def get_salespeople(tenant_id, employee_id):
+    """Get list of all salespeople for filters"""
+    session = SessionLocal()
+    try:
+        query = text("""
+            SELECT DISTINCT employee_id, employee_name
+            FROM "StreemLyne_MT"."Employee_Master"
+            WHERE tenant_id = :tenant_id
+            ORDER BY employee_name
+        """)
+        
+        salespeople = session.execute(query, {'tenant_id': str(tenant_id)}).fetchall()
+        
+        result = [
+            {'id': sp.employee_id, 'name': sp.employee_name}
+            for sp in salespeople
+        ]
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error fetching salespeople: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -526,52 +628,95 @@ def get_customer_projects(tenant_id, employee_id, customer_id):  # ✅ FIXED par
 @customer_bp.route('/customers/<int:customer_id>/projects', methods=['POST'])
 @token_required
 @require_tenant
-def create_project(tenant_id, employee_id, customer_id):  # ✅ FIXED parameter order
+def create_project(tenant_id, employee_id, customer_id):
     """Create a new project for a customer"""
     session = SessionLocal()
     try:
         data = request.get_json()
         
         if not data.get('project_title'):
-            return jsonify({'error': 'Project title is required'}), 400
-        if not data.get('start_date'):
-            return jsonify({'error': 'Start date is required'}), 400
+            return jsonify({'error': 'project_title is required'}), 400
+        
+        # Verify client exists
+        client_query = text("""
+            SELECT client_id, client_company_name, address 
+            FROM "StreemLyne_MT"."Client_Master"
+            WHERE client_id = :client_id AND tenant_id = :tenant_id
+        """)
+        client = session.execute(client_query, {
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not client:
+            return jsonify({'error': 'Client not found'}), 404
+        
+        # Generate display ID
+        from .project_routes import generate_project_reference
+        display_id = generate_project_reference(session, tenant_id)
+        
+        # ✅ Get stage_id from request (frontend now sends this)
+        stage_id = data.get('stage_id')
+        
+        # ✅ Validate stage_id if provided
+        if stage_id:
+            stage_check = text("""
+                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
+                WHERE stage_id = :stage_id AND stage_type = 4
+            """)
+            stage_exists = session.execute(stage_check, {'stage_id': int(stage_id)}).fetchone()
+            if not stage_exists:
+                return jsonify({'error': f'Invalid stage_id: {stage_id}'}), 400
         
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Project_Details"
-            (tenant_id, client_id, project_title, project_description, start_date, end_date, 
-             employee_id, assigned_employee_id, status)
-            VALUES (:tenant_id, :client_id, :title, :description, :start_date, :end_date, 
-                    :employee_id, :assigned_to, :status)
+            (tenant_id, client_id, display_id, project_title, project_type, 
+             project_description, status, stage_id, date_of_measure,
+             assigned_employee_id, employee_id, notes)
+            VALUES (:tenant_id, :client_id, :display_id, :title, :project_type,
+                    :description, :status, :stage_id, :date_of_measure,
+                    :assigned_to, :employee_id, :notes)
             RETURNING project_id
         """)
         
         result = session.execute(insert_query, {
             'tenant_id': str(tenant_id),
             'client_id': customer_id,
+            'display_id': display_id,
             'title': data['project_title'],
+            'project_type': data.get('project_type'),  # ✅ Kitchen, Bedroom, etc.
             'description': data.get('project_description', ''),
-            'start_date': data['start_date'],
-            'end_date': data.get('end_date'),
+            'status': 'Active',
+            'stage_id': stage_id,  # ✅ Integer stage_id
+            'date_of_measure': data.get('date_of_measure'),
+            'assigned_to': employee_id,
             'employee_id': employee_id,
-            'assigned_to': data.get('assigned_employee_id', employee_id),
-            'status': data.get('status', 'active')
+            'notes': data.get('notes', '')
         })
         
         project_id = result.fetchone().project_id
         session.commit()
         
-        current_app.logger.info(f"Project {project_id} created for client {customer_id}")
+        current_app.logger.info(
+            f"✅ Project created: {display_id} | "
+            f"Type: {data.get('project_type')} | "
+            f"Stage ID: {stage_id}"
+        )
         
         return jsonify({
             'success': True,
             'message': 'Project created successfully',
-            'project': {'id': project_id}
+            'project': {
+                'id': project_id,
+                'display_id': display_id
+            }
         }), 201
         
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error creating project: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -1022,48 +1167,5 @@ def delete_document(document_id, tenant_id, employee_id):
         session.rollback()
         current_app.logger.error(f"Error deleting document: {e}")
         return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
-
-@customer_bp.route('/api/customers', methods=['GET'])
-@token_required
-@require_tenant
-def get_customers_list(tenant_id, employee_id):
-    """Get all customers for the current tenant"""
-    session = SessionLocal()
-    try:
-        query = text("""
-            SELECT 
-                client_id as id,
-                client_company_name as name,
-                address as address,
-                client_phone as phone,
-                client_email as email,
-                client_postcode as postcode
-            FROM "StreemLyne_MT"."Client_Master"
-            WHERE tenant_id = :tenant_id
-            ORDER BY client_company_name ASC
-        """)
-        
-        customers = session.execute(query, {
-            'tenant_id': str(tenant_id)
-        }).fetchall()
-        
-        customers_list = []
-        for customer in customers:
-            customers_list.append({
-                'id': str(customer.id),
-                'name': customer.name or 'N/A',
-                'address': customer.address or '',
-                'phone': customer.phone or '',
-                'email': customer.email or '',
-                'postcode': customer.postcode or ''
-            })
-        
-        return jsonify(customers_list), 200
-
-    except Exception as e:
-        current_app.logger.exception(f"Failed to fetch customers: {e}")
-        return jsonify({'error': f'Failed to fetch customers: {str(e)}'}), 500
     finally:
         session.close()

@@ -39,82 +39,167 @@ def generate_project_reference(session, tenant_id):
     
     return project_reference
 
-@project_bp.route('/projects', methods=['GET'])
+
+@project_bp.route('/projects/<int:project_id>', methods=['GET'])
 @token_required
 @require_tenant
-def get_projects(tenant_id, employee_id):
-    """Get all projects with optional filtering"""
+def get_project(tenant_id, employee_id, project_id):
+    """Get a specific project with all details including forms and documents"""
     session = SessionLocal()
     try:
-        client_id = request.args.get('client_id')
-        status = request.args.get('status')
-        stage_id = request.args.get('stage_id')
-        
-        # Build WHERE conditions
-        where_conditions = ["p.tenant_id = :tenant_id"]
-        params = {'tenant_id': str(tenant_id)}
-        
-        if client_id:
-            where_conditions.append("p.client_id = :client_id")
-            params['client_id'] = int(client_id)
-        
-        if status:
-            where_conditions.append("p.status = :status")
-            params['status'] = status
-        
-        if stage_id:
-            where_conditions.append("p.stage_id = :stage_id")
-            params['stage_id'] = int(stage_id)
-        
-        where_clause = " AND ".join(where_conditions)
-        
-        query = text(f"""
+        # ✅ UPDATED: Added project_type to SELECT
+        query = text("""
             SELECT 
-                p.*,
+                p.project_id,
+                p.display_id,
+                p.project_title,
+                p.project_type,                    -- ✅ ADDED
+                p.project_description,
+                p.status,
+                p.stage_id,
+                p.priority,
+                p.start_date,
+                p.end_date,
+                p.date_of_measure,
+                p.assigned_employee_id,
+                p.notes,
+                p.created_at,
+                p.updated_at,
+                p.client_id,
                 c.client_company_name,
+                c.client_contact_name,
                 c.client_phone,
                 c.client_email,
+                c.post_code as client_postcode,
                 c.address as client_address,
-                s.stage_name,
+                s.stage_name,                      
                 s.stage_description
             FROM "StreemLyne_MT"."Project_Details" p
-            INNER JOIN "StreemLyne_MT"."Client_Master" c ON p.client_id = c.client_id
-            LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p.stage_id = s.stage_id
-            WHERE {where_clause}
-            ORDER BY p.created_at DESC
+            INNER JOIN "StreemLyne_MT"."Client_Master" c 
+                ON p.client_id = c.client_id AND p.tenant_id = c.tenant_id
+            LEFT JOIN "StreemLyne_MT"."Stage_Master" s 
+                ON p.stage_id = s.stage_id
+            WHERE p.project_id = :project_id AND p.tenant_id = :tenant_id
         """)
         
-        projects = session.execute(query, params).fetchall()
+        project = session.execute(query, {
+            'project_id': project_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
         
-        result = []
-        for p in projects:
-            result.append({
-                'id': p.project_id,
-                'display_id': p.display_id,
-                'project_title': p.project_title,
-                'project_description': p.project_description,
-                'client_id': p.client_id,
-                'client_name': p.client_company_name,
-                'status': p.status,
-                'stage_id': p.stage_id,
-                'stage_name': p.stage_name,
-                'priority': p.priority if hasattr(p, 'priority') else None,
-                'start_date': p.start_date.isoformat() if p.start_date else None,
-                'end_date': p.end_date.isoformat() if p.end_date else None,
-                'installation_address': p.client_address,  # Use client's address
-                'assigned_employee_id': p.assigned_employee_id,
-                'notes': p.notes if hasattr(p, 'notes') else None,
-                'created_at': p.created_at.isoformat() if p.created_at else None,
-                'updated_at': p.updated_at.isoformat() if p.updated_at else None
-            })
+        if not project:
+            return jsonify({'error': 'Project not found'}), 404
+        
+        # ✅ STEP 2: Get form submissions for THIS PROJECT ONLY
+        forms_query = text("""
+            SELECT 
+                form_submission_id,
+                form_type,
+                form_name,
+                submission_status,
+                approval_status,
+                submitted_at,
+                form_data,
+                token_used
+            FROM "StreemLyne_MT"."Customer_Form_Submissions"
+            WHERE project_id = :project_id 
+              AND tenant_id = :tenant_id
+              AND form_type != 'customer_checklist'
+            ORDER BY submitted_at DESC
+        """)
+        
+        forms = session.execute(forms_query, {
+            'project_id': project_id,
+            'tenant_id': str(tenant_id)
+        }).fetchall()
+        
+        # ✅ STEP 3: Get documents for THIS PROJECT ONLY
+        docs_query = text("""
+            SELECT 
+                id,
+                file_name,
+                file_url,
+                document_category,
+                uploaded_at
+            FROM "StreemLyne_MT"."Customer_Documents"
+            WHERE project_id = :project_id
+            ORDER BY uploaded_at DESC
+        """)
+
+        docs = session.execute(docs_query, {
+            'project_id': project_id
+        }).fetchall()
+        
+        # ✅ STEP 4: Build COMPLETE response with ALL fields
+        result = {
+            'id': project.project_id,
+            'display_id': project.display_id,
+            'project_name': project.project_title,
+            'project_title': project.project_title,
+            'project_type': project.project_type,  
+            'project_description': project.project_description or '',
+            'client_id': project.client_id,
+            'status': project.status or 'Active',
+            'stage_id': project.stage_id,
+            'stage_name': project.stage_name,  
+            'stage': project.stage_name,  
+            'priority': project.priority or 'Medium',
+            'start_date': project.start_date.isoformat() if project.start_date else None,
+            'end_date': project.end_date.isoformat() if project.end_date else None,
+            'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
+            'assigned_employee_id': project.assigned_employee_id,
+            'notes': project.notes or '',
+            'created_at': project.created_at.isoformat() if project.created_at else None,
+            'updated_at': project.updated_at.isoformat() if project.updated_at else None,
+            
+            # ✅ CUSTOMER OBJECT
+            'customer': {
+                'id': project.client_id,
+                'name': project.client_company_name,
+                'contact_name': project.client_contact_name or '',
+                'phone': project.client_phone or '',
+                'email': project.client_email or '',
+                'address': project.client_address or '',  
+                'postcode': project.client_postcode or ''
+            },
+            
+            # ✅ Forms array
+            'forms': [{
+                'id': f.form_submission_id,
+                'form_type': f.form_type,
+                'form_name': f.form_name,
+                'submission_status': f.submission_status,
+                'approval_status': f.approval_status,
+                'submitted_at': f.submitted_at.isoformat() if f.submitted_at else None,
+                'form_data': f.form_data,
+                'token_used': f.token_used,
+                'project_id': project_id
+            } for f in forms],
+            
+            # ✅ Drawings/Documents array
+            'drawings': [{
+                'id': str(d.id),
+                'filename': d.file_name,
+                'url': d.file_url,
+                'type': d.document_category or 'other',
+                'created_at': d.uploaded_at.isoformat() if d.uploaded_at else None,
+                'project_id': project_id
+            } for d in docs]
+        }
+        
+        # ✅ DIAGNOSTIC: Log what we're sending
+        current_app.logger.info(f"✅ Returning project {project_id} with type={result['project_type']}, stage={result['stage']}")
         
         return jsonify(result), 200
         
     except Exception as e:
-        current_app.logger.error(f"Error fetching projects: {e}")
+        current_app.logger.error(f"❌ Error fetching project {project_id}: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
+
 
 @project_bp.route('/projects', methods=['POST'])
 @token_required
@@ -149,15 +234,25 @@ def create_project(tenant_id, employee_id):
         # Generate display ID
         display_id = generate_project_reference(session, tenant_id)
         
-        # Default stage_id to 100 (Survey) if not provided
-        stage_id = data.get('stage_id', 100)
+        # ✅ CHANGED: Don't default to stage_id 100, use what's provided or NULL
+        stage_id = data.get('stage_id')  # Remove the default
+        
+        # ✅ ADDED: Validate stage_id if provided
+        if stage_id:
+            stage_check = text("""
+                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
+                WHERE stage_id = :stage_id AND stage_type = 4
+            """)
+            stage_exists = session.execute(stage_check, {'stage_id': int(stage_id)}).fetchone()
+            if not stage_exists:
+                return jsonify({'error': f'Invalid stage_id: {stage_id}'}), 400
         
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Project_Details"
-            (tenant_id, client_id, display_id, project_title, project_description,
+            (tenant_id, client_id, display_id, project_title, project_type, project_description,
              status, stage_id, priority, start_date, end_date,
              assigned_employee_id, employee_id, notes)
-            VALUES (:tenant_id, :client_id, :display_id, :title, :description,
+            VALUES (:tenant_id, :client_id, :display_id, :title, :project_type, :description,
                     :status, :stage_id, :priority, :start_date, :end_date,
                     :assigned_to, :employee_id, :notes)
             RETURNING project_id
@@ -168,9 +263,10 @@ def create_project(tenant_id, employee_id):
             'client_id': int(data['client_id']),
             'display_id': display_id,
             'title': data['project_title'],
+            'project_type': data.get('project_type'),  # ✅ ADDED: Accept project_type from request
             'description': data.get('project_description', ''),
             'status': data.get('status', 'Active'),
-            'stage_id': stage_id,
+            'stage_id': stage_id,  # ✅ CHANGED: Can be NULL now
             'priority': data.get('priority', 'Medium'),
             'start_date': data.get('start_date'),
             'end_date': data.get('end_date'),
@@ -182,7 +278,7 @@ def create_project(tenant_id, employee_id):
         project_id = result.fetchone().project_id
         session.commit()
         
-        current_app.logger.info(f"Project {display_id} created by employee {employee_id}")
+        current_app.logger.info(f"✅ Project {display_id} created with stage_id={stage_id}, project_type={data.get('project_type')}")
         
         return jsonify({
             'success': True,
@@ -196,6 +292,8 @@ def create_project(tenant_id, employee_id):
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error creating project: {e}")
+        import traceback
+        current_app.logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
@@ -204,7 +302,7 @@ def create_project(tenant_id, employee_id):
 @project_bp.route('/projects/<int:project_id>', methods=['PUT'])
 @token_required
 @require_tenant
-def update_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
+def update_project(tenant_id, employee_id, project_id):
     """Update a project"""
     session = SessionLocal()
     try:
@@ -266,10 +364,11 @@ def update_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
     finally:
         session.close()
 
+
 @project_bp.route('/projects/<int:project_id>', methods=['DELETE'])
 @token_required
 @require_tenant
-def delete_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
+def delete_project(tenant_id, employee_id, project_id):
     """Delete a project"""
     session = SessionLocal()
     try:
@@ -298,10 +397,11 @@ def delete_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
     finally:
         session.close()
 
+
 @project_bp.route('/projects/<int:project_id>/stage', methods=['PATCH'])
 @token_required
 @require_tenant
-def update_project_stage(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
+def update_project_stage(tenant_id, employee_id, project_id):
     """Update project stage"""
     session = SessionLocal()
     try:
@@ -353,65 +453,6 @@ def update_project_stage(project_id, tenant_id, employee_id):  # ✅ CHANGED ORD
     finally:
         session.close()
 
-@project_bp.route('/projects/<int:project_id>', methods=['GET'])
-@token_required
-@require_tenant
-def get_project(project_id, tenant_id, employee_id):  # ✅ CHANGED ORDER
-    """Get a specific project with all details"""
-    session = SessionLocal()
-    try:
-        query = text("""
-            SELECT 
-                p.*,
-                c.client_company_name,
-                c.client_phone,
-                c.client_email,
-                c.address as client_address,
-                s.stage_name,
-                s.stage_description
-            FROM "StreemLyne_MT"."Project_Details" p
-            INNER JOIN "StreemLyne_MT"."Client_Master" c ON p.client_id = c.client_id
-            LEFT JOIN "StreemLyne_MT"."Stage_Master" s ON p.stage_id = s.stage_id
-            WHERE p.project_id = :project_id AND p.tenant_id = :tenant_id
-        """)
-        
-        project = session.execute(query, {
-            'project_id': project_id,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
-        if not project:
-            return jsonify({'error': 'Project not found'}), 404
-        
-        result = {
-            'id': project.project_id,
-            'display_id': project.display_id,
-            'project_title': project.project_title,
-            'project_description': project.project_description,
-            'client_id': project.client_id,
-            'client_name': project.client_company_name,
-            'client_phone': project.client_phone,
-            'client_email': project.client_email,
-            'status': project.status,
-            'stage_id': project.stage_id,
-            'stage_name': project.stage_name,
-            'priority': project.priority if hasattr(project, 'priority') else None,
-            'start_date': project.start_date.isoformat() if project.start_date else None,
-            'end_date': project.end_date.isoformat() if project.end_date else None,
-            'installation_address': project.client_address,
-            'assigned_employee_id': project.assigned_employee_id,
-            'notes': project.notes if hasattr(project, 'notes') else None,
-            'created_at': project.created_at.isoformat() if project.created_at else None,
-            'updated_at': project.updated_at.isoformat() if project.updated_at else None
-        }
-        
-        return jsonify(result), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Error fetching project: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        session.close()
 
 @project_bp.route('/projects/stages', methods=['GET'])
 @token_required

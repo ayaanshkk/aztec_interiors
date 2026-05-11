@@ -33,6 +33,8 @@ def serialize_task(task_row):
         'id': str(task_row.task_id),
         'type': task_row.type,
         'title': task_row.title,
+        'job_reference': task_row.task_id,  # Add job_reference field
+        'job_name': task_row.title,  # Add job_name field
         'date': task_row.date.isoformat() if task_row.date else None,
         'start_date': task_row.start_date.isoformat() if task_row.start_date else None,
         'end_date': task_row.end_date.isoformat() if task_row.end_date else None,
@@ -42,12 +44,14 @@ def serialize_task(task_row):
         'assigned_to_employee_id': task_row.assigned_to_employee_id,
         'user_id': task_row.assigned_to_employee_id,  # Backward compatibility
         'team_member': task_row.team_member,
+        'salesperson_name': task_row.team_member,  # Add salesperson_name
         'client_id': task_row.client_id,
         'customer_id': task_row.client_id,  # Backward compatibility
         'customer_name': task_row.customer_name,
         'project_id': task_row.project_id,
         'opportunity_id': task_row.opportunity_id,
         'job_type': task_row.job_type,
+        'stage': task_row.work_stage if hasattr(task_row, 'work_stage') and task_row.work_stage else 'Survey',  # Map work_stage to stage
         'work_stage': task_row.work_stage if hasattr(task_row, 'work_stage') else None,
         'notes': task_row.notes,
         'priority': task_row.priority,
@@ -57,7 +61,12 @@ def serialize_task(task_row):
         'created_at': task_row.created_at.isoformat() if task_row.created_at else None,
         'updated_by': task_row.updated_by_employee_id,
         'updated_by_name': task_row.updated_by_name if hasattr(task_row, 'updated_by_name') else None,
-        'updated_at': task_row.updated_at.isoformat() if task_row.updated_at else None
+        'updated_at': task_row.updated_at.isoformat() if task_row.updated_at else None,
+        # Add missing fields for details page
+        'measure_date': None,  # Not in Tasks_Master, can be added if needed
+        'delivery_date': task_row.end_date.isoformat() if task_row.end_date else None,
+        'completion_date': None,  # Not in Tasks_Master, can be added if needed
+        'installation_address': None  # Not in Tasks_Master, will come from customer
     }
 
 @tasks_bp.route('/tasks', methods=['GET', 'POST'])
@@ -102,7 +111,7 @@ def handle_tasks(tenant_id, employee_id):
             else:
                 end_date_value = start_date_value
             
-            # Get customer name
+            # Get customer name and client_id
             customer_name = data.get('customer_name')
             client_id = data.get('client_id')
             
@@ -292,22 +301,124 @@ def handle_single_task(task_id, tenant_id, employee_id):
         
         # GET
         if request.method == 'GET':
-            # ✅ FIXED: Use Tasks_Master table
+            # ✅ FIXED: Join with customer data to get complete information
             query = text("""
                 SELECT 
                     t.*,
                     creator.employee_name as created_by_name,
-                    updater.employee_name as updated_by_name
+                    updater.employee_name as updated_by_name,
+                    c.client_company_name,
+                    c.client_contact_name,
+                    c.client_phone,
+                    c.client_email,
+                    c.address as customer_address,
+                    c.post_code as customer_postcode,
+                    assigned_emp.employee_name as assigned_employee_name
                 FROM "StreemLyne_MT"."Tasks_Master" t
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" creator 
-                    ON t.created_by_employee_id = creator.employee_id
+                    ON t.created_by_employee_id = creator.employee_id 
+                    AND creator.tenant_id = t.tenant_id
                 LEFT JOIN "StreemLyne_MT"."Employee_Master" updater 
                     ON t.updated_by_employee_id = updater.employee_id
-                WHERE t.task_id = :task_id
+                    AND updater.tenant_id = t.tenant_id
+                LEFT JOIN "StreemLyne_MT"."Employee_Master" assigned_emp
+                    ON t.assigned_to_employee_id = assigned_emp.employee_id
+                    AND assigned_emp.tenant_id = t.tenant_id
+                LEFT JOIN "StreemLyne_MT"."Client_Master" c
+                    ON t.client_id = c.client_id
+                    AND c.tenant_id = t.tenant_id
+                WHERE t.task_id = :task_id AND t.tenant_id = :tenant_id
             """)
             
-            task = session.execute(query, {'task_id': task_id}).fetchone()
-            return jsonify(serialize_task(task))
+            task = session.execute(query, {
+                'task_id': task_id,
+                'tenant_id': str(tenant_id)
+            }).fetchone()
+            
+            # Serialize with customer data
+            result = serialize_task(task)
+            
+            # Add customer details if available
+            if task.client_id:
+                result['customer'] = {
+                    'id': task.client_id,
+                    'name': task.client_company_name or task.customer_name or 'Unknown',
+                    'contact_name': task.client_contact_name or '',
+                    'phone': task.client_phone or '',
+                    'email': task.client_email or '',
+                    'address': task.customer_address or '',
+                    'postcode': task.customer_postcode or ''
+                }
+                
+                # Update installation_address in result
+                result['installation_address'] = task.customer_address
+                
+                # Get customer documents (drawings & layouts)
+                docs_query = text("""
+                    SELECT 
+                        id,
+                        file_name,
+                        file_url,
+                        document_category,
+                        uploaded_at
+                    FROM "StreemLyne_MT"."Customer_Documents"
+                    WHERE client_id = :client_id
+                    ORDER BY uploaded_at DESC
+                """)
+                
+                docs = session.execute(docs_query, {'client_id': task.client_id}).fetchall()
+                result['documents'] = [{
+                    'id': doc.id,
+                    'filename': doc.file_name,
+                    'url': doc.file_url,
+                    'type': doc.document_category or 'other',
+                    'category': doc.document_category or 'other',
+                    'created_at': doc.uploaded_at.isoformat() if doc.uploaded_at else None
+                } for doc in docs]
+                
+                # Get form submissions (checklists) - exclude customer_checklist metadata
+                forms_query = text("""
+                    SELECT 
+                        form_submission_id,
+                        form_type,
+                        form_name,
+                        form_data,
+                        submission_status,
+                        approval_status,
+                        submitted_at,
+                        submitted_by,
+                        project_id,
+                        opportunity_id
+                    FROM "StreemLyne_MT"."Customer_Form_Submissions"
+                    WHERE client_id = :client_id
+                      AND tenant_id = :tenant_id
+                      AND form_type != 'customer_checklist'
+                    ORDER BY submitted_at DESC
+                """)
+                
+                forms = session.execute(forms_query, {
+                    'client_id': task.client_id,
+                    'tenant_id': str(tenant_id)
+                }).fetchall()
+                
+                result['form_submissions'] = [{
+                    'id': form.form_submission_id,
+                    'form_type': form.form_type,
+                    'form_name': form.form_name,
+                    'form_data': form.form_data,
+                    'submission_status': form.submission_status,
+                    'approval_status': form.approval_status,
+                    'submitted_at': form.submitted_at.isoformat() if form.submitted_at else None,
+                    'submitted_by': form.submitted_by,
+                    'project_id': form.project_id,
+                    'opportunity_id': form.opportunity_id
+                } for form in forms]
+            else:
+                result['customer'] = None
+                result['documents'] = []
+                result['form_submissions'] = []
+            
+            return jsonify(result)
         
         # PUT
         elif request.method == 'PUT':
