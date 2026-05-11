@@ -20,193 +20,143 @@ PIPELINE_STAGE_ORDER = [
 @token_required
 @require_tenant
 def get_pipeline_data(tenant_id, employee_id):
-    """Get all pipeline items (clients with their projects/opportunities)
-    
-    Returns pipeline cards for:
-    - Clients with projects (shows project details + client stage)
-    - Clients with opportunities (shows opportunity details + client stage)
-    - Pure lead clients (no projects/opportunities, just client stage)
-    """
     session = SessionLocal()
     try:
-        current_app.logger.info(f"📊 Fetching pipeline data for tenant {tenant_id}...")
-        
-        # Get all clients with their projects and opportunities
-        clients_query = text("""
-            SELECT 
-                c.client_id,
-                c.client_company_name,
-                c.client_contact_name,
-                c.client_phone,
-                c.client_email,
-                c.stage as client_stage,
-                c.is_allocated,
-                c.is_cleansed,
-                c.created_at,
-                c.project_types
-            FROM "StreemLyne_MT"."Client_Master" c
-            WHERE c.tenant_id = :tenant_id AND c.is_deleted = false
-            ORDER BY c.created_at DESC
+        # Single query with JOINs
+        pipeline_query = text("""
+            WITH client_data AS (
+                SELECT 
+                    c.client_id,
+                    c.client_company_name,
+                    c.client_contact_name,
+                    c.client_phone,
+                    c.client_email,
+                    c.stage as client_stage,
+                    c.is_allocated,
+                    c.is_cleansed,
+                    c.created_at,
+                    c.project_types,
+                    -- Aggregate project data
+                    json_agg(DISTINCT jsonb_build_object(
+                        'project_id', p.project_id,
+                        'project_title', p.project_title,
+                        'project_description', p.project_description,
+                        'project_type', p.project_type,
+                        'date_of_measure', p.date_of_measure,
+                        'start_date', p.start_date,
+                        'end_date', p.end_date,
+                        'status', p.status,
+                        'notes', p.notes,
+                        'created_at', p.created_at
+                    )) FILTER (WHERE p.project_id IS NOT NULL) as projects,
+                    -- Aggregate opportunity data
+                    json_agg(DISTINCT jsonb_build_object(
+                        'opportunity_id', o.opportunity_id,
+                        'opportunity_title', o.opportunity_title,
+                        'opportunity_description', o.opportunity_description,
+                        'process_stage', o.process_stage,
+                        'opportunity_value', o.opportunity_value,
+                        'start_date', o.start_date,
+                        'end_date', o.end_date,
+                        'created_at', o.created_at
+                    )) FILTER (WHERE o.opportunity_id IS NOT NULL) as opportunities
+                FROM "StreemLyne_MT"."Client_Master" c
+                LEFT JOIN "StreemLyne_MT"."Project_Details" p 
+                    ON p.client_id = c.client_id AND p.tenant_id = :tenant_id
+                LEFT JOIN "StreemLyne_MT"."Opportunity_Details" o 
+                    ON o.client_id = c.client_id 
+                    AND o.tenant_id = :tenant_id 
+                    AND o.deleted_at IS NULL
+                WHERE c.tenant_id = :tenant_id AND c.is_deleted = false
+                GROUP BY c.client_id
+                ORDER BY c.created_at DESC
+            )
+            SELECT * FROM client_data
         """)
         
-        clients = session.execute(clients_query, {'tenant_id': str(tenant_id)}).fetchall()
+        results = session.execute(pipeline_query, {'tenant_id': str(tenant_id)}).fetchall()
         
         pipeline_items = []
-        clients_with_projects = 0
-        clients_with_opportunities = 0
-        clients_without_either = 0
-        total_projects = 0
-        total_opportunities = 0
         
-        for client in clients:
-            # Get projects for this client
-            projects_query = text("""
-                SELECT 
-                    project_id,
-                    project_title,
-                    project_description,
-                    project_type,
-                    date_of_measure,
-                    start_date,
-                    end_date,
-                    status,
-                    notes,
-                    created_at
-                FROM "StreemLyne_MT"."Project_Details"
-                WHERE client_id = :client_id AND tenant_id = :tenant_id
-                ORDER BY created_at DESC
-            """)
+        for row in results:
+            # Parse JSON arrays
+            projects = row.projects if row.projects else []
+            opportunities = row.opportunities if row.opportunities else []
             
-            projects = session.execute(projects_query, {
-                'client_id': client.client_id,
-                'tenant_id': str(tenant_id)
-            }).fetchall()
+            client_stage = row.client_stage or 'Lead'
             
-            # Get opportunities for this client
-            opportunities_query = text("""
-                SELECT 
-                    opportunity_id,
-                    opportunity_title,
-                    opportunity_description,
-                    process_stage,
-                    opportunity_value,
-                    start_date,
-                    end_date,
-                    created_at
-                FROM "StreemLyne_MT"."Opportunity_Details"
-                WHERE client_id = :client_id 
-                    AND tenant_id = :tenant_id
-                    AND deleted_at IS NULL
-                ORDER BY created_at DESC
-            """)
-            
-            opportunities = session.execute(opportunities_query, {
-                'client_id': client.client_id,
-                'tenant_id': str(tenant_id)
-            }).fetchall()
-            
-            has_projects = len(projects) > 0
-            has_opportunities = len(opportunities) > 0
-            
-            # ✅ USE CLIENT STAGE FOR ALL ITEMS (not project status)
-            client_stage = client.client_stage or 'Lead'
-            
-            # Create cards for each project
+            # Create project items
             for project in projects:
-                total_projects += 1
-                
-                pipeline_items.append({
-                    'id': f'project-{project.project_id}',
-                    'type': 'project',
-                    'stage': client_stage,  # ✅ Use client stage, not project status
-                    'customer': {
-                        'id': client.client_id,
-                        'name': client.client_company_name,
-                        'contact_name': client.client_contact_name,
-                        'phone': client.client_phone,
-                        'email': client.client_email,
-                        'created_at': client.created_at.isoformat() if client.created_at else None
-                    },
-                    'project': {
-                        'id': project.project_id,
-                        'title': project.project_title,
-                        'description': project.project_description,
-                        'project_type': project.project_type,  # ✅ Include project type for colors
-                        'date_of_measure': project.date_of_measure.isoformat() if project.date_of_measure else None,
-                        'start_date': project.start_date.isoformat() if project.start_date else None,
-                        'end_date': project.end_date.isoformat() if project.end_date else None,
-                        'status': project.status,
-                        'notes': project.notes
-                    }
-                })
+                if project:  # Check not null
+                    pipeline_items.append({
+                        'id': f'project-{project["project_id"]}',
+                        'type': 'project',
+                        'stage': client_stage,
+                        'customer': {
+                            'id': row.client_id,
+                            'name': row.client_company_name,
+                            'contact_name': row.client_contact_name,
+                            'phone': row.client_phone,
+                            'email': row.client_email,
+                            'created_at': row.created_at.isoformat() if row.created_at else None
+                        },
+                        'project': {
+                            'id': project['project_id'],
+                            'title': project['project_title'],
+                            'description': project['project_description'],
+                            'project_type': project['project_type'],
+                            'date_of_measure': project['date_of_measure'],
+                            'start_date': project['start_date'],
+                            'end_date': project['end_date'],
+                            'status': project['status'],
+                            'notes': project['notes']
+                        }
+                    })
             
-            # Create cards for each opportunity
+            # Create opportunity items
             for opp in opportunities:
-                total_opportunities += 1
-                
-                pipeline_items.append({
-                    'id': f'opportunity-{opp.opportunity_id}',
-                    'type': 'opportunity',
-                    'stage': client_stage,  # ✅ Use client stage
-                    'customer': {
-                        'id': client.client_id,
-                        'name': client.client_company_name,
-                        'contact_name': client.client_contact_name,
-                        'phone': client.client_phone,
-                        'email': client.client_email,
-                        'created_at': client.created_at.isoformat() if client.created_at else None
-                    },
-                    'opportunity': {
-                        'id': opp.opportunity_id,
-                        'title': opp.opportunity_title,
-                        'description': opp.opportunity_description,
-                        'value': float(opp.opportunity_value) if opp.opportunity_value else None,
-                        'start_date': opp.start_date.isoformat() if opp.start_date else None,
-                        'end_date': opp.end_date.isoformat() if opp.end_date else None,
-                        'stage': opp.process_stage
-                    }
-                })
+                if opp:
+                    pipeline_items.append({
+                        'id': f'opportunity-{opp["opportunity_id"]}',
+                        'type': 'opportunity',
+                        'stage': client_stage,
+                        'customer': {
+                            'id': row.client_id,
+                            'name': row.client_company_name,
+                            'contact_name': row.client_contact_name,
+                            'phone': row.client_phone,
+                            'email': row.client_email,
+                            'created_at': row.created_at.isoformat() if row.created_at else None
+                        },
+                        'opportunity': {
+                            'id': opp['opportunity_id'],
+                            'title': opp['opportunity_title'],
+                            'description': opp['opportunity_description'],
+                            'value': float(opp['opportunity_value']) if opp['opportunity_value'] else None,
+                            'start_date': opp['start_date'],
+                            'end_date': opp['end_date'],
+                            'stage': opp['process_stage']
+                        }
+                    })
             
-            # Create card for pure lead (no projects or opportunities)
-            if not has_projects and not has_opportunities:
-                clients_without_either += 1
-                
+            # Pure lead clients
+            if not projects and not opportunities:
                 pipeline_items.append({
-                    'id': f'client-{client.client_id}',
+                    'id': f'client-{row.client_id}',
                     'type': 'client',
                     'stage': client_stage,
                     'customer': {
-                        'id': client.client_id,
-                        'name': client.client_company_name,
-                        'contact_name': client.client_contact_name,
-                        'phone': client.client_phone,
-                        'email': client.client_email,
-                        'is_allocated': bool(client.is_allocated),
-                        'is_cleansed': bool(client.is_cleansed),
-                        'created_at': client.created_at.isoformat() if client.created_at else None,
-                        'project_types': client.project_types if client.project_types else []  # ✅ Add this
+                        'id': row.client_id,
+                        'name': row.client_company_name,
+                        'contact_name': row.client_contact_name,
+                        'phone': row.client_phone,
+                        'email': row.client_email,
+                        'is_allocated': bool(row.is_allocated),
+                        'is_cleansed': bool(row.is_cleansed),
+                        'created_at': row.created_at.isoformat() if row.created_at else None,
+                        'project_types': row.project_types if row.project_types else []
                     }
                 })
-            else:
-                if has_projects:
-                    clients_with_projects += 1
-                if has_opportunities:
-                    clients_with_opportunities += 1
-        
-        # Log statistics
-        current_app.logger.info(f"✅ Pipeline data fetched: {len(pipeline_items)} items")
-        current_app.logger.info(
-            f"   📊 Breakdown: {clients_with_projects} clients with {total_projects} projects, "
-            f"{clients_with_opportunities} clients with {total_opportunities} opportunities, "
-            f"{clients_without_either} pure leads"
-        )
-        
-        # Log stage distribution
-        stage_counts = {}
-        for item in pipeline_items:
-            stage = item.get('stage', 'Unknown')
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
-        current_app.logger.info(f"📊 Stage distribution: {stage_counts}")
         
         return jsonify(pipeline_items), 200
         
@@ -217,7 +167,6 @@ def get_pipeline_data(tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @pipeline_bp.route('/pipeline/stages', methods=['GET'])
 @token_required

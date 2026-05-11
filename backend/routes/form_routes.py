@@ -893,12 +893,63 @@ def submit_customer_form():
         
         form_id = result.fetchone().form_submission_id
         session.commit()
- 
+
         current_app.logger.info(f"✅ Form submitted successfully: form_id={form_id}")
- 
+
+        # ✅ CREATE NOTIFICATION FOR FORM SUBMISSION
+        try:
+            # Get customer details
+            customer_query = text("""
+                SELECT client_company_name FROM "StreemLyne_MT"."Client_Master"
+                WHERE client_id = :client_id AND tenant_id = :tenant_id
+            """)
+            customer_result = session.execute(customer_query, {
+                'client_id': client_id,
+                'tenant_id': str(tenant_id)
+            }).fetchone()
+            
+            customer_name = customer_result.client_company_name if customer_result else 'Unknown Customer'
+            
+            # Extract key form details
+            room = form_data.get('room', 'general')
+            customer_phone = form_data.get('customer_phone', '')
+            customer_address = form_data.get('customer_address', '')
+            
+            # Create clean notification message
+            message = f"📋 New {room} {form_type} submitted"
+            message += f"\n👤 Customer: {customer_name}"
+            
+            if customer_phone:
+                message += f"\n📞 Phone: {customer_phone}"
+            
+            if customer_address:
+                # Shorten address if too long
+                short_address = customer_address[:50] + '...' if len(customer_address) > 50 else customer_address
+                message += f"\n📍 Address: {short_address}"
+            
+            if is_walkin_mode:
+                message += f"\n✍️ Submitted by: Walk-in Customer"
+            
+            notification_query = text("""
+                INSERT INTO "StreemLyne_MT"."Notification_Master"
+                (tenant_id, client_id, notification_type, priority, message, read, dismissed)
+                VALUES (:tenant_id, :client_id, 'form_submission', 'high', :message, false, false)
+            """)
+            
+            session.execute(notification_query, {
+                'tenant_id': str(tenant_id),
+                'client_id': int(client_id),
+                'message': message
+            })
+            session.commit()
+            
+            current_app.logger.info(f"✅ Form submission notification created")
+        except Exception as notif_error:
+            current_app.logger.warning(f"Failed to create form notification: {notif_error}")
+
         return jsonify({
             'success': True,
-            'customer_id': client_id,  # Return customer_id for frontend redirect
+            'customer_id': client_id,
             'client_id': client_id,
             'project_id': project_id,
             'form_submission_id': form_id,

@@ -95,9 +95,9 @@ def login():
         
         print(f"👥 User roles: {role_ids}")
         
-        # Determine primary role (use first role or role_id 1 if Platform Admin)
+        # Determine primary role (use first role or role_id 2 if Platform Admin)
         primary_role_id = role_ids[0] if role_ids else None
-        is_platform_admin = 1 in role_ids
+        is_platform_admin = 2 in role_ids
         
         # Get role name
         if primary_role_id:
@@ -188,7 +188,7 @@ def get_current_user():
                 'tenant_id': user.tenant_id,
                 'role': user.role,
                 'role_id': user.role_id,
-                'is_platform_admin': user.role_id == 1 or (hasattr(user, 'roles') and 1 in user.roles)
+                'is_platform_admin': user.role_id == 2 or (hasattr(user, 'roles') and 2 in user.roles)  
             }
         }), 200
     

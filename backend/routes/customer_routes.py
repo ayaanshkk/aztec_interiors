@@ -58,8 +58,35 @@ def get_customers(tenant_id, employee_id):
     """Get all clients with their project counts and document counts"""
     session = SessionLocal()
     try:
-        # ✅ UPDATED: Include display_id and get salesperson names
-        query = text("""
+        # ✅ Get user role using User_Role_Mapping table
+        user_role_query = text("""
+            SELECT r.role_name
+            FROM "StreemLyne_MT"."User_Master" u
+            INNER JOIN "StreemLyne_MT"."User_Role_Mapping" urm ON u.user_id = urm.user_id
+            INNER JOIN "StreemLyne_MT"."Role_Master" r ON urm.role_id = r.role_id
+            WHERE u.employee_id = :employee_id
+            LIMIT 1
+        """)
+        
+        user_role_result = session.execute(user_role_query, {'employee_id': employee_id}).fetchone()
+        user_role = user_role_result.role_name if user_role_result else None
+        
+        print(f"🔍 User role for employee_id {employee_id}: {user_role}")
+        
+        # ✅ Build WHERE clause with Production Team filter
+        where_conditions = ["c.tenant_id = :tenant_id", "c.is_deleted = false"]
+        
+        # ✅ Production Team can only see customers from "Accepted" stage onwards
+        if user_role == "Production Team":
+            where_conditions.append("""
+                c.stage IN ('Accepted', 'Ordered', 'Production', 'Delivery', 'Installation', 'Complete', 'Remedial', 'Rejected')
+            """)
+            print(f"✅ Applied Production Team filter: stages from Accepted onwards")
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        # ✅ Use dynamic WHERE clause
+        query = text(f"""
             SELECT 
                 c.client_id,
                 c.client_company_name as client_name,
@@ -95,7 +122,7 @@ def get_customers(tenant_id, employee_id):
                 ON c.client_id = doc.client_id
             LEFT JOIN "StreemLyne_MT"."Customer_Form_Submissions" f
                 ON c.client_id = f.client_id AND f.tenant_id = c.tenant_id
-            WHERE c.tenant_id = :tenant_id AND c.is_deleted = false
+            WHERE {where_clause}
             GROUP BY c.client_id, c.client_company_name, c.client_contact_name,
                      c.client_phone, c.client_email, c.address, c.post_code, 
                      c.stage, c.assigned_employee_id, c.is_allocated, c.is_cleansed,
@@ -104,6 +131,8 @@ def get_customers(tenant_id, employee_id):
         """)
         
         clients = session.execute(query, {'tenant_id': str(tenant_id)}).fetchall()
+        
+        print(f"📊 Found {len(clients)} customers for user role: {user_role}")
         
         result = []
         for client in clients:
@@ -124,7 +153,7 @@ def get_customers(tenant_id, employee_id):
                 'is_allocated': bool(client.is_allocated),
                 'is_cleansed': bool(client.is_cleansed),
                 'created_at': client.created_at.isoformat() if client.created_at else None,
-                'updated_at': client.created_at.isoformat() if client.created_at else None,  # Use created_at as fallback
+                'updated_at': client.created_at.isoformat() if client.created_at else None,
                 'project_count': client.project_count or 0,
                 'document_count': client.document_count or 0,
                 'form_count': client.form_count or 0,
@@ -418,22 +447,48 @@ def update_customer_stage(tenant_id, employee_id, customer_id):
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
         
+        # ✅ GET CUSTOMER INFO FIRST (before updating)
+        customer_query = text("""
+            SELECT client_company_name, stage FROM "StreemLyne_MT"."Client_Master"
+            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
+        """)
+        
+        customer_result = session.execute(customer_query, {
+            'client_id': customer_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        if not customer_result:
+            return jsonify({'error': 'Customer not found'}), 404
+        
+        customer_name = customer_result.client_company_name or f'Customer {customer_id}'
+        old_stage = customer_result.stage or 'Lead'
+        
+        # ✅ GET EMPLOYEE NAME
+        employee_query = text("""
+            SELECT employee_name FROM "StreemLyne_MT"."Employee_Master"
+            WHERE employee_id = :employee_id AND tenant_id = :tenant_id
+        """)
+        
+        employee_result = session.execute(employee_query, {
+            'employee_id': employee_id,
+            'tenant_id': str(tenant_id)
+        }).fetchone()
+        
+        employee_name = employee_result.employee_name if employee_result else 'Team Member'
+        
         # Update client stage
         update_query = text("""
             UPDATE "StreemLyne_MT"."Client_Master"
             SET stage = :stage
             WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
-            RETURNING stage
         """)
         
-        result = session.execute(update_query, {
+        session.execute(update_query, {
             'stage': new_stage,
             'client_id': customer_id,
             'tenant_id': str(tenant_id)
         })
-        
-        if not result.fetchone():
-            return jsonify({'error': 'Customer not found'}), 404
         
         # ✅ Also update the latest project's stage if exists
         project_update_query = text("""
@@ -461,8 +516,11 @@ def update_customer_stage(tenant_id, employee_id, customer_id):
         
         session.commit()
         
-        # Create notification for stage change
+        # ✅ CREATE CLEAN NOTIFICATION with all context
         try:
+            message = f"🔄 {customer_name} moved from {old_stage} to {new_stage}"
+            message += f"\n👤 Updated by: {employee_name}"
+            
             notification_query = text("""
                 INSERT INTO "StreemLyne_MT"."Notification_Master"
                 (tenant_id, client_id, notification_type, priority, message, read, dismissed)
@@ -472,9 +530,11 @@ def update_customer_stage(tenant_id, employee_id, customer_id):
             session.execute(notification_query, {
                 'tenant_id': str(tenant_id),
                 'client_id': customer_id,
-                'message': f"Customer stage updated to {new_stage}"
+                'message': message
             })
             session.commit()
+            
+            current_app.logger.info(f"✅ Stage notification: {message}")
         except Exception as notif_error:
             current_app.logger.warning(f"Failed to create notification: {notif_error}")
         

@@ -1,5 +1,6 @@
 # backend/routes/auth_helpers.py
 from functools import wraps
+from unittest import result
 from flask import request, jsonify, current_app
 import jwt
 from sqlalchemy import text
@@ -103,15 +104,15 @@ def get_current_user():
 
 def verify_platform_admin():
     """
-    Check if current user is a Platform Admin (role_id = 1).
+    Check if current user is a Platform Admin (role_id = 2).
     Returns True if Platform Admin, False otherwise.
     """
     user = get_current_user()
     if not user:
         return False
     
-    # Check if role_id is 1 OR if 1 is in the roles array
-    return user.role_id == 1 or (hasattr(user, 'roles') and 1 in user.roles)
+    # ✅ Check if role_id is 2 OR if 2 is in the roles array
+    return user.role_id == 2 or (hasattr(user, 'roles') and 2 in user.roles)
 
 
 def require_platform_admin(f):
@@ -171,7 +172,7 @@ def get_user_from_db(user_id, session=None):
         
         # Create a simple user object
         role_ids = result.role_ids if result.role_ids and result.role_ids[0] is not None else []
-        is_platform_admin = 1 in role_ids
+        is_platform_admin = 2 in role_ids
         
         return type('User', (), {
             'id': result.user_id,
