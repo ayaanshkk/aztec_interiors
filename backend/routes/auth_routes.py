@@ -152,7 +152,8 @@ def login():
                 'tenant_id': result.tenant_id,
                 'role': role_name,
                 'role_id': primary_role_id,
-                'is_platform_admin': is_platform_admin
+                'is_platform_admin': is_platform_admin,
+                'can_access_dashboard': True  # ✅ Add this - all authenticated users can access
             }
         }), 200
         

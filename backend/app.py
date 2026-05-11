@@ -119,7 +119,7 @@ def create_app():
     app.register_blueprint(pipeline_bp, url_prefix='/api')
     app.register_blueprint(tasks_bp, url_prefix='/api')
     app.register_blueprint(calendar_bp, url_prefix='/api')
-    app.register_blueprint(action_items_bp)
+    app.register_blueprint(action_items_bp, url_prefix='/api')
     app.register_blueprint(quotation_bp)
     app.register_blueprint(pricelist_bp, url_prefix='/api')
 

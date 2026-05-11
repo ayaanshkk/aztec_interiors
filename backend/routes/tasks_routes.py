@@ -168,10 +168,10 @@ def handle_tasks(tenant_id, employee_id):
             
             # ✅ Generate sequential task number (Task-001, Task-002, etc.)
             max_task_query = text("""
-                SELECT COALESCE(MAX(CAST(SUBSTRING(task_id FROM 6) AS INTEGER)), 0) as max_num
+                SELECT COALESCE(MAX(CAST(SUBSTRING(task_id::TEXT FROM 6) AS INTEGER)), 0) as max_num
                 FROM "StreemLyne_MT"."Tasks_Master"
                 WHERE tenant_id = :tenant_id
-                AND task_id ~ '^Task-[0-9]+$'
+                AND task_id::TEXT ~ '^Task-[0-9]+$'
             """)
             max_result = session.execute(max_task_query, {'tenant_id': str(tenant_id)}).fetchone()
             next_task_num = (max_result.max_num if max_result and max_result.max_num else 0) + 1
@@ -192,6 +192,19 @@ def handle_tasks(tenant_id, employee_id):
                         :notes, :priority, :status, :job_type, :opportunity_id, :work_stage)
                 RETURNING task_id
             """)
+
+            STATUS_MAPPING = {
+                'Accepted': 'Scheduled',
+                'Pending': 'Scheduled',
+                'In Progress': 'In Progress',
+                'Completed': 'Completed',
+                'Cancelled': 'Cancelled',
+                'Postponed': 'Postponed'
+            }
+
+            # Get status and map it
+            requested_status = data.get('status', 'Scheduled')
+            valid_status = STATUS_MAPPING.get(requested_status, 'Scheduled')
             
             result = session.execute(insert_query, {
                 'task_id': task_id,
@@ -212,7 +225,7 @@ def handle_tasks(tenant_id, employee_id):
                 'estimated_hours': estimated_hours,
                 'notes': data.get('notes', ''),
                 'priority': data.get('priority', 'Medium'),
-                'status': data.get('status', 'Scheduled'),
+                'status': valid_status,
                 'job_type': data.get('job_type'),
                 'opportunity_id': data.get('opportunity_id'),
                 'work_stage': data.get('work_stage', 'Survey')
