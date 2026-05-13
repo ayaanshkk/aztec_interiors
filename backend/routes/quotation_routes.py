@@ -1339,21 +1339,22 @@ def auto_price_lookup(tenant_id, employee_id):
         
         import re
 
+        # ✅ IMPROVED: Detect appliances by model code pattern
         appliance_keywords = [
             'hob', 'oven', 'hood', 'microwave', 'fridge', 'freezer', 
             'dishwasher', 'washing', 'washer', 'dryer', 'extractor',
             'combi', 'warming drawer'
         ]
-        
+
         description_lower = description.lower()
         is_appliance = any(keyword in description_lower for keyword in appliance_keywords)
-        
-        # Also check for model number pattern (e.g., PCR9A5I90, BFL523MB0B)
-        model_pattern = r'\b[A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,}\b'
-        has_model_number = bool(re.search(model_pattern, description, re.IGNORECASE))
-        
-        if is_appliance or has_model_number:
-            print(f"   🔥 DETECTED: APPLIANCE")
+
+        # ✅ NEW: Also check if it matches appliance model code pattern (e.g., PCR9A5I90, BFL523MB0B)
+        model_pattern = r'^[A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,}$'
+        is_appliance_code = bool(re.match(model_pattern, description, re.IGNORECASE))
+
+        if is_appliance or is_appliance_code:
+            print(f"   🔥 DETECTED: APPLIANCE (keyword match: {is_appliance}, code pattern: {is_appliance_code})")
             return lookup_appliance(db_session, tenant_id, description, brand)
         
         # ==================================================================
@@ -1691,182 +1692,90 @@ def auto_price_lookup(tenant_id, employee_id):
 
 def lookup_appliance(session, tenant_id, description, brand=None):
     """
-    Lookup appliance from PriceList_Master
+    Lookup appliance from PriceList_Master by model code
     
     Strategy:
-    1. Extract model number from description
-    2. Search by model number (item_code)
-    3. If brand provided, filter by brand
-    4. Fallback: Search by product name (item_name)
+    1. Extract model code from description
+    2. Search by exact model code match (item_code field)
+    3. Return price, brand, series level, and series info
     """
     import re
     
     print(f"\n🔥 APPLIANCE LOOKUP")
     print(f"   Description: {description}")
-    print(f"   Brand: {brand}")
+    print(f"   Brand filter: {brand}")
     
     # ====================================================================
-    # STRATEGY 1: Extract model number from description
+    # STRATEGY 1: Extract model code from description
     # ====================================================================
-    # Model numbers like: PCR9A5I90, BFL523MB0B, KIR81NSE0G
+    # Model codes like: PCR9A5I90, BFL523MB0B, KIR81NSE0G
     model_pattern = r'\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,})\b'
     model_match = re.search(model_pattern, description, re.IGNORECASE)
     
-    model_number = None
+    model_code = None
     if model_match:
-        model_number = model_match.group(1).upper()
-        print(f"   ✅ Extracted model number: {model_number}")
+        model_code = model_match.group(1).upper()
+        print(f"   ✅ Extracted model code: {model_code}")
+    else:
+        # If no code pattern found, use the entire description as search term
+        model_code = description.strip().upper()
+        print(f"   🔍 Using full description as code: {model_code}")
     
     # ====================================================================
-    # STRATEGY 2: Search by model number (item_code)
+    # STRATEGY 2: Search by exact model code (item_code field)
     # ====================================================================
-    if model_number:
-        if brand:
-            # Search with brand filter
-            query = text("""
-                SELECT pricelist_id, item_code, item_name, description,
-                       base_price, width, height, depth, door_type, brand
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                  AND category = 'Appliances'
-                  AND UPPER(item_code) = :model_number
-                  AND UPPER(brand) = UPPER(:brand)
-                LIMIT 1
-            """)
-            
-            result = session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'model_number': model_number,
-                'brand': brand
-            }).fetchone()
-        else:
-            # Search without brand filter
-            query = text("""
-                SELECT pricelist_id, item_code, item_name, description,
-                       base_price, width, height, depth, door_type, brand
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                  AND category = 'Appliances'
-                  AND UPPER(item_code) = :model_number
-                LIMIT 1
-            """)
-            
-            result = session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'model_number': model_number
-            }).fetchone()
+    query = text("""
+        SELECT 
+            pricelist_id, 
+            item_code, 
+            item_name, 
+            description,
+            base_price, 
+            brand,
+            door_type,
+            category
+        FROM "StreemLyne_MT"."PriceList_Master"
+        WHERE tenant_id = :tenant_id
+          AND category = 'Appliances'
+          AND UPPER(item_code) = :model_code
+        LIMIT 1
+    """)
+    
+    result = session.execute(query, {
+        'tenant_id': str(tenant_id),
+        'model_code': model_code
+    }).fetchone()
+    
+    if result:
+        print(f"   ✅ FOUND: {result.item_name} - £{result.base_price}")
+        print(f"   Brand: {result.brand}")
+        print(f"   Series Level: {result.door_type}")  # door_type stores Low/Mid/High
         
-        if result:
-            print(f"   ✅ FOUND by model: {result.item_name} - £{result.base_price}")
-            
-            # Extract series from description (e.g., "S6", "S4", "S2")
-            series = None
-            series_match = re.search(r'\(([^)]+)\)', result.description or '')
+        # Extract series info from description (e.g., "S6", "iQ700", "N90")
+        series_info = ''
+        if result.description:
+            series_match = re.search(r'\(([^)]+)\)', result.description)
             if series_match:
-                series = series_match.group(1)
-            
-            return jsonify({
-                'found': True,
-                'price': float(result.base_price),
-                'item_code': result.item_code,
-                'item_name': result.item_name,
-                'description': result.description,
-                'pricelist_id': result.pricelist_id,
-                'brand': result.brand,
-                'series': series,
-                'door_type': result.door_type  # This is "Low"/"Mid"/"High" for appliances
-            }), 200
-    
-    # ====================================================================
-    # STRATEGY 3: Fallback - Search by product name (fuzzy match)
-    # ====================================================================
-    # Extract product type from description (e.g., "HOB", "Oven", "Fridge")
-    product_keywords = {
-        'HOB': ['hob'],
-        'Oven': ['oven'],
-        'Hood': ['hood', 'extractor'],
-        'Microwave': ['microwave'],
-        'Fridge': ['fridge'],
-        'Freezer': ['freezer'],
-        'Dishwasher': ['dishwasher'],
-        'Washing Machine': ['washing machine', 'washing'],
-        'Washer Dryer': ['washer dryer', 'washer/dryer']
-    }
-    
-    product_name = None
-    description_lower = description.lower()
-    
-    for product, keywords in product_keywords.items():
-        for keyword in keywords:
-            if keyword in description_lower:
-                product_name = product
-                break
-        if product_name:
-            break
-    
-    if product_name:
-        print(f"   🔍 Searching by product name: {product_name}")
+                series_info = series_match.group(1)
+                print(f"   Series Info: {series_info}")
         
-        if brand:
-            query = text("""
-                SELECT pricelist_id, item_code, item_name, description,
-                       base_price, width, height, depth, door_type, brand
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                  AND category = 'Appliances'
-                  AND LOWER(item_name) LIKE LOWER(:product_pattern)
-                  AND UPPER(brand) = UPPER(:brand)
-                ORDER BY base_price ASC
-                LIMIT 1
-            """)
-            
-            result = session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'product_pattern': f'%{product_name}%',
-                'brand': brand
-            }).fetchone()
-        else:
-            query = text("""
-                SELECT pricelist_id, item_code, item_name, description,
-                       base_price, width, height, depth, door_type, brand
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                  AND category = 'Appliances'
-                  AND LOWER(item_name) LIKE LOWER(:product_pattern)
-                ORDER BY base_price ASC
-                LIMIT 1
-            """)
-            
-            result = session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'product_pattern': f'%{product_name}%'
-            }).fetchone()
-        
-        if result:
-            print(f"   ✅ FOUND by product name: {result.item_name} - £{result.base_price}")
-            
-            series = None
-            series_match = re.search(r'\(([^)]+)\)', result.description or '')
-            if series_match:
-                series = series_match.group(1)
-            
-            return jsonify({
-                'found': True,
-                'price': float(result.base_price),
-                'item_code': result.item_code,
-                'item_name': result.item_name,
-                'description': result.description,
-                'pricelist_id': result.pricelist_id,
-                'brand': result.brand,
-                'series': series,
-                'door_type': result.door_type
-            }), 200
+        return jsonify({
+            'found': True,
+            'price': float(result.base_price),
+            'item_code': result.item_code,
+            'item_name': result.item_name,
+            'description': result.description,
+            'pricelist_id': result.pricelist_id,
+            'brand': result.brand,
+            'series_level': result.door_type,  # Low/Mid/High
+            'series_info': series_info,  # S6, iQ700, etc.
+        }), 200
     
     # ====================================================================
     # NOT FOUND
     # ====================================================================
-    print(f"   ❌ NO MATCH for appliance: {description}")
+    print(f"   ❌ NO MATCH for model code: {model_code}")
     return jsonify({
         'found': False,
-        'error': f'No appliance found matching: {description}'
+        'error': f'No appliance found with model code: {model_code}'
     }), 404
