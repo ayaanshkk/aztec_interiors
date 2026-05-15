@@ -228,9 +228,11 @@ def create_quotation(tenant_id, employee_id):
             item_insert = text("""
                 INSERT INTO "StreemLyne_MT"."Quotation_Items"
                 (quotation_id, item_name, description, color, quantity, amount,
-                 width, height, depth, needs_manual_pricing, pricelist_id)
+                width, height, depth, needs_manual_pricing, pricelist_id,
+                discount_percent, discounted_amount)
                 VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
-                        :width, :height, :depth, :needs_manual, :pricelist_id)
+                        :width, :height, :depth, :needs_manual, :pricelist_id,
+                        :discount_percent, :discounted_amount)
             """)
             
             session.execute(item_insert, {
@@ -244,7 +246,9 @@ def create_quotation(tenant_id, employee_id):
                 'height': item.get('height'),
                 'depth': item.get('depth'),
                 'needs_manual': item.get('needs_manual_pricing', False),
-                'pricelist_id': item.get('price_list_item_id')
+                'pricelist_id': item.get('price_list_item_id'),
+                'discount_percent': item.get('discount_percent', 0),
+                'discounted_amount': item.get('discounted_amount', item.get('amount', 0))
             })
         
         session.commit()
@@ -1038,6 +1042,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     'color': i.color,
                     'quantity': i.quantity,
                     'amount': float(i.amount) if i.amount else 0,
+                    'discount_type': getattr(i, 'discount_type', 'none'),
+                    'discount_value': float(i.discount_value) if hasattr(i, 'discount_value') and i.discount_value else 0,
+                    'discounted_total': float(i.discounted_amount) if hasattr(i, 'discounted_amount') and i.discounted_amount else float(i.amount),
                     'width': i.width,
                     'height': i.height,
                     'depth': i.depth,
@@ -1116,7 +1123,10 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         'height': item.get('height'),
                         'depth': item.get('depth'),
                         'needs_manual': item.get('needs_manual_pricing', False),
-                        'pricelist_id': item.get('price_list_item_id')
+                        'pricelist_id': item.get('price_list_item_id'),
+                        'discount_type': item.get('discount_type', 'none'),
+                        'discount_value': item.get('discount_value', 0),
+                        'discounted_amount': item.get('discounted_amount', item.get('amount', 0))
                     })
                     
                     total += item_amount * item_qty
