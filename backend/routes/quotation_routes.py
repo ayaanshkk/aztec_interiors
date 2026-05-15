@@ -3,8 +3,11 @@ from sqlalchemy import text
 from datetime import datetime
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
 from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 import json
 
@@ -1314,373 +1317,350 @@ def update_quotation_item(quotation_id, item_id, tenant_id, employee_id):
 @require_tenant
 def auto_price_lookup(tenant_id, employee_id):
     """
-    SMART auto-lookup price with BEDROOM category detection
+    ENHANCED - Supports ALL categories with suffix system
     
-    Priority:
-    1. Detect category from description (robe, wardrobe, linen press, etc.)
-    2. Exact item_code match in detected category
-    3. Width-based code generation with bedroom suffixes
-    4. Fallback to Kitchen if no category detected
+    Quoting System:
+    KITCHEN/BEDROOM:
+    - 50B          = Carcass ONLY (£99.86) - UNLESS dropdown specifies door type
+    - 50B + "Basic Slab" dropdown = £99.86 + £34.48 = £132.08 (complete unit)
+    - 50B-BS       = Basic Slab door component ONLY (£34.48)
+    
+    FILLERS & END PANELS:
+    - PL-BS        = Plinth Basic Slab (£41.02)
+    - PL-AG        = Plinth Acrylic Gloss (£61.53)
+    - CF-BS        = Ceiling Filler Basic Slab (£41.02)
+    
+    ACCESSORIES:
+    - 542.35.163   = 500mm Pull Out Waste Bin (£278.21)
+    - TANDEM600    = 600mm Saucepan Tandembox Drawer (£104.24)
+    
+    HANDLES:
+    - GRAF256      = Graf 2 bar handle (£8.79)
+    - GOLAB+H      = Gola System b+ profile (£83.00)
     """
     db_session = SessionLocal()
     try:
         data = request.get_json()
-        description = data.get('description', '').strip()
+        description = data.get('description', '').strip().upper()  # Auto-uppercase
         door_type = data.get('door_type', '').strip()
+        room_type = data.get('room_type', 'Kitchen').strip()
         brand = data.get('brand', '').strip()
         
-        print(f"🔍 Smart lookup: description='{description}', door_type='{door_type}'")
-        print(f"   Description: '{description}'")
-        print(f"   Door Type: '{door_type}'")
-        print(f"   Brand: '{brand}'")
+        print(f"🔍 Smart lookup: description='{description}', door_type='{door_type}', room_type='{room_type}'")
         
         if not description:
             return jsonify({'found': False, 'error': 'description is required'}), 400
         
         import re
-
-        # ✅ IMPROVED: Detect appliances by model code pattern
-        appliance_keywords = [
-            'hob', 'oven', 'hood', 'microwave', 'fridge', 'freezer', 
-            'dishwasher', 'washing', 'washer', 'dryer', 'extractor',
-            'combi', 'warming drawer'
-        ]
-
-        description_lower = description.lower()
-        is_appliance = any(keyword in description_lower for keyword in appliance_keywords)
-
-        # ✅ NEW: Also check if it matches appliance model code pattern (e.g., PCR9A5I90, BFL523MB0B)
-        model_pattern = r'^[A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,}$'
-        is_appliance_code = bool(re.match(model_pattern, description, re.IGNORECASE))
-
-        if is_appliance or is_appliance_code:
-            print(f"   🔥 DETECTED: APPLIANCE (keyword match: {is_appliance}, code pattern: {is_appliance_code})")
+ 
+        # ========================================================================
+        # SUFFIX DETECTION - Suffix means COMPONENT ONLY
+        # ========================================================================
+        
+        # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
+        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG)$'
+        suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
+        
+        door_component_only = False
+        base_code = None
+        component_door_type = None
+        
+        if suffix_match:
+            base_code = suffix_match.group(1).upper()  # e.g., "50B", "PL", "CF"
+            suffix = suffix_match.group(2).upper()      # e.g., "BS", "AG"
+            
+            # Map suffix to door type in database
+            suffix_to_door_type = {
+                'BS': 'Basic Slab',
+                'AG': 'Acrylic Gloss/Matt',
+                'VD': 'Vinyl Doors',
+                'BG': 'Black Glass'
+            }
+            
+            component_door_type = suffix_to_door_type.get(suffix)
+            door_component_only = True
+            
+            print(f"🎯 SUFFIX DETECTED: '{description}' → Base: '{base_code}', Component: '{component_door_type}'")
+        
+        # ========================================================================
+        # CATEGORY-SPECIFIC HANDLING
+        # ========================================================================
+        
+        # Try direct item_code lookup first (works for all categories)
+        search_code = base_code if base_code else description
+        
+        # Query for exact item_code match
+        direct_query = text("""
+            SELECT 
+                item_code, 
+                item_name, 
+                door_type,
+                base_price,
+                width, 
+                height, 
+                depth, 
+                category,
+                pricelist_id,
+                description as item_description
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+                AND UPPER(item_code) = UPPER(:item_code)
+        """)
+        
+        results = db_session.execute(direct_query, {
+            'tenant_id': str(tenant_id),
+            'item_code': search_code
+        }).fetchall()
+        
+        if not results:
+            print(f"❌ No items found for code: {search_code}")
+            return jsonify({
+                'found': False,
+                'error': f'No item found for code: {search_code}'
+            }), 404
+        
+        # Get first result to determine category
+        first_result = results[0]
+        category = first_result.category
+        item_code = first_result.item_code
+        item_name = first_result.item_name
+        
+        print(f"✅ Found {len(results)} rows for '{item_code}' in category '{category}'")
+        
+        # ========================================================================
+        # ACCESSORIES & HANDLES - Single price, no door types
+        # ========================================================================
+        
+        if category in ['Accessories', 'Handles']:
+            print(f"   📦 {category} category - single price lookup")
+            
+            # These categories only have one price (door_type = 'Standard')
+            price_row = next((r for r in results if r.door_type == 'Standard'), None)
+            
+            if not price_row or not price_row.base_price:
+                return jsonify({
+                    'found': False,
+                    'error': f'No price found for {item_code} in {category}'
+                }), 404
+            
+            price = float(price_row.base_price)
+            
+            print(f"   💰 {category} Price: £{price:.2f}")
+            
+            return jsonify({
+                'found': True,
+                'price': price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': price_row.item_description or item_name,
+                'door_type': 'Standard',
+                'category': category,
+                'width': price_row.width,
+                'height': price_row.height,
+                'depth': price_row.depth,
+                'pricelist_id': price_row.pricelist_id
+            }), 200
+        
+        # ========================================================================
+        # FILLERS & END PANELS - 2 prices (Basic Slab, Acrylic Gloss)
+        # ========================================================================
+        
+        if category == 'Fillers & End Panels':
+            print(f"   🏗️ Fillers & End Panels - component pricing")
+            
+            # If suffix specified, use that door type
+            if component_door_type:
+                target_door_type = component_door_type
+            elif door_type:
+                # Map dropdown door type
+                DOOR_TYPE_MAP = {
+                    'basic slab': 'Basic Slab',
+                    'acrylic gloss/matt': 'Acrylic Gloss/Matt',
+                    'acrylic gloss': 'Acrylic Gloss/Matt',
+                    'acrylic matt': 'Acrylic Gloss/Matt',
+                }
+                target_door_type = DOOR_TYPE_MAP.get(door_type.lower(), door_type)
+            else:
+                # Default to Basic Slab if nothing specified
+                target_door_type = 'Basic Slab'
+            
+            price_row = next((r for r in results if r.door_type == target_door_type), None)
+            
+            if not price_row or not price_row.base_price:
+                return jsonify({
+                    'found': False,
+                    'error': f'No {target_door_type} price found for {item_code}'
+                }), 404
+            
+            price = float(price_row.base_price)
+            
+            print(f"   💰 {target_door_type}: £{price:.2f}")
+            
+            return jsonify({
+                'found': True,
+                'price': price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': f"{item_name} - {target_door_type}",
+                'door_type': target_door_type,
+                'category': category,
+                'width': price_row.width,
+                'height': price_row.height,
+                'depth': price_row.depth,
+                'pricelist_id': price_row.pricelist_id
+            }), 200
+        
+        # ========================================================================
+        # APPLIANCES - Brand-based pricing
+        # ========================================================================
+        
+        if category == 'Appliances':
+            print(f"   🔥 Appliance lookup")
             return lookup_appliance(db_session, tenant_id, description, brand)
         
-        # ==================================================================
-        # NEW: CATEGORY DETECTION
-        # ==================================================================
-        category_keywords = {
-            'Wardrobes': ['robe', 'wardrobe', 'corner robe', 'diagonal corner'],
-            'Linen Press': ['linen press', 'linen', 'press'],
-            'Wall Units': ['bridging', 'wall unit'],
-            'Chest of drawers': ['drawer', 'chest', 'bdrw'],
-        }
+        # ========================================================================
+        # KITCHEN/BEDROOM - Carcass + Door component system
+        # ========================================================================
         
-        detected_category = None
-        description_lower = description.lower()
+        # At this point, category is Kitchen/Bedroom (Base Units, Wardrobes, etc.)
         
-        for category, keywords in category_keywords.items():
-            for keyword in keywords:
-                if keyword in description_lower:
-                    detected_category = category
-                    print(f"🏷️ Detected category: {detected_category}")
-                    break
-            if detected_category:
-                break
-        
-        # ==================================================================
-        # STRATEGY 1: Direct code match
-        # ==================================================================
-        code_patterns = [
-            r'\b(\d+R)\b',        # 40R, 50R, 60R (bedroom robes)
-            r'\b(\d+RC)\b',       # 80RC, 90RC (corner robes)
-            r'\b(\d+RDCNR)\b',    # 90RDCNR (diagonal corner)
-            r'\b(\d+RLP)\b',      # 40RLP, 50RLP (linen press)
-            r'\b(\d+BRS)\b',      # 40BRS, 50BRS (bridging)
-            r'\b(\d+BDRW)\b',     # 403BDRW, 402BDRW (chest)
-            r'\b(\d+BPO)\b',      # 15BPO, 30BPO (kitchen pull-out)
-            r'\b(\d+BDL)\b',      # Drawerline
-            r'\b(\d+BC)\b',       # Corner bases
-            r'\b(\d+BDD)\b',      # Dummy drawer
-            r'\b(\d+BA)\b',       # Angled base
-            r'\b(\d+B)\b',        # 15B, 30B, 40B (generic base)
-        ]
-        
-        found_code = None
-        for pattern in code_patterns:
-            match = re.search(pattern, description, re.IGNORECASE)
-            if match:
-                found_code = match.group(1).upper()
-                print(f"✅ Found code '{found_code}' in description")
-                break
-        
-        # ==================================================================
-        # STRATEGY 2: Width parsing
-        # ==================================================================
-        width_mm = None
-        mm_match = re.search(r'(\d+)\s*mm', description, re.IGNORECASE)
-        if mm_match:
-            width_mm = int(mm_match.group(1))
-            print(f"✅ Parsed width {width_mm}mm")
-        
-        # Detect kitchen unit type suffix
-        unit_type_suffix = ""
-        if re.search(r'\bdrawerline\b', description, re.IGNORECASE):
-            unit_type_suffix = "DL"
-        elif re.search(r'\bdummy\b', description, re.IGNORECASE):
-            unit_type_suffix = "DD"
-        elif re.search(r'\bangled?\b', description, re.IGNORECASE):
-            unit_type_suffix = "A"
-        
-        # ==================================================================
-        # STRATEGY 3: Build search candidates WITH BEDROOM CODES
-        # ==================================================================
-        search_candidates = []
-        
-        if found_code:
-            search_candidates.append(found_code)
-        
-        if width_mm:
-            width_code = width_mm // 10
-            
-            # ==== BEDROOM-SPECIFIC CODE GENERATION ====
-            if 'linen press' in description_lower or ('linen' in description_lower and 'press' in description_lower):
-                # Linen press codes: 40RLP, 50RLP, etc.
-                search_candidates.extend([
-                    f"{width_code}RLP",
-                    f"{width_mm}RLP",
-                ])
-                print(f"🛏️ Generated linen press codes: {width_code}RLP")
-            
-            elif 'bridging' in description_lower:
-                # Bridging codes: 40BRS, 50BRS, etc.
-                search_candidates.extend([
-                    f"{width_code}BRS",
-                    f"{width_mm}BRS",
-                ])
-                print(f"🛏️ Generated bridging codes: {width_code}BRS")
-            
-            elif 'corner robe' in description_lower or ('corner' in description_lower and 'robe' in description_lower):
-                # Corner robe codes: 80RC, 90RC, etc.
-                search_candidates.extend([
-                    f"{width_code}RC",
-                    f"{width_mm}RC",
-                ])
-                print(f"🛏️ Generated corner robe codes: {width_code}RC")
-            
-            elif 'diagonal' in description_lower:
-                # Diagonal corner: 90RDCNR
-                search_candidates.append(f"{width_code}RDCNR")
-                print(f"🛏️ Generated diagonal corner code: {width_code}RDCNR")
-            
-            elif 'robe' in description_lower or 'wardrobe' in description_lower:
-                # Standard robe codes: 40R, 50R, etc.
-                search_candidates.extend([
-                    f"{width_code}R",
-                    f"{width_mm}R",
-                ])
-                print(f"🛏️ Generated robe codes: {width_code}R")
-            
-            elif 'drawer' in description_lower or 'chest' in description_lower:
-                # Chest of drawers codes: 403BDRW, 402BDRW, 405BDRW
-                # Try to detect drawer count from description
-                drawer_count = None
-                if '3 x' in description_lower or 'three' in description_lower or '3x' in description_lower or '3 drawer' in description_lower:
-                    drawer_count = 3
-                elif '2 x' in description_lower or 'two' in description_lower or '2x' in description_lower or '2 drawer' in description_lower:
-                    drawer_count = 2
-                elif '5 x' in description_lower or 'five' in description_lower or '5x' in description_lower or '5 drawer' in description_lower:
-                    drawer_count = 5
-                
-                if drawer_count:
-                    search_candidates.extend([
-                        f"{width_code}{drawer_count}BDRW",
-                        f"{width_mm}{drawer_count}BDRW",
-                    ])
-                    print(f"🛏️ Generated chest codes: {width_code}{drawer_count}BDRW")
-                else:
-                    # Try all variants if count not specified
-                    for count in [2, 3, 5]:
-                        search_candidates.extend([
-                            f"{width_code}{count}BDRW",
-                        ])
-                    print(f"🛏️ Generated multiple chest codes for width {width_code}")
-            
-            # ==== KITCHEN CODE GENERATION (FALLBACK) ====
-            if unit_type_suffix:
-                search_candidates.extend([
-                    f"{width_code}B{unit_type_suffix}",
-                    f"{width_mm}B{unit_type_suffix}",
-                ])
-            
-            # Generic kitchen codes
-            search_candidates.extend([
-                f"{width_code}BPO",
-                f"{width_code}B",
-                f"{width_mm}B",
-            ])
-        
-        print(f"🔍 Search candidates: {search_candidates}")
-        
-        # ==================================================================
         # Door type mapping
-        # ==================================================================
         DOOR_TYPE_MAP = {
+            'carcass only': 'Carcass Only',
             'basic slab': 'Basic Slab',
             'acrylic gloss/matt': 'Acrylic Gloss/Matt',
             'acrylic gloss': 'Acrylic Gloss/Matt',
             'acrylic matt': 'Acrylic Gloss/Matt',
-            'vinyl': 'Vinyl',
+            'vinyl': 'Vinyl Doors',
+            'vinyl doors': 'Vinyl Doors',
             'black glass': 'Black Glass',
+            'base cabinet only': 'Base Cabinet Only',
         }
         
         db_door_type = DOOR_TYPE_MAP.get(door_type.lower(), door_type) if door_type else None
         
-        result = None
+        # ========================================================================
+        # SUFFIX MODE - Return door component ONLY
+        # ========================================================================
         
-        # ==================================================================
-        # STRATEGY 4A: Category-specific code match (BEDROOM FIRST!)
-        # ==================================================================
-        if detected_category and search_candidates and db_door_type:
-            for code in search_candidates:
-                query = text("""
-                    SELECT 
-                        pricelist_id, item_code, item_name, description,
-                        base_price, door_type, width, height, depth, category
-                    FROM "StreemLyne_MT"."PriceList_Master"
-                    WHERE tenant_id = :tenant_id
-                        AND category = :category
-                        AND UPPER(item_code) = UPPER(:item_code)
-                        AND door_type = :door_type
-                    LIMIT 1
-                """)
-                
-                result = db_session.execute(query, {
-                    'tenant_id': str(tenant_id),
-                    'category': detected_category,
-                    'item_code': code,
-                    'door_type': db_door_type
-                }).fetchone()
-                
-                if result:
-                    print(f"✅ Category match: {code} in {detected_category}")
-                    break
-        
-        # ==================================================================
-        # STRATEGY 4B: Try exact code + door type (Kitchen priority)
-        # ==================================================================
-        if not result and search_candidates and db_door_type:
-            for code in search_candidates:
-                query = text("""
-                    SELECT 
-                        pricelist_id, item_code, item_name, description,
-                        base_price, door_type, width, height, depth, category
-                    FROM "StreemLyne_MT"."PriceList_Master"
-                    WHERE tenant_id = :tenant_id
-                        AND UPPER(item_code) = UPPER(:item_code)
-                        AND door_type = :door_type
-                    ORDER BY 
-                        CASE 
-                            WHEN category = 'Kitchen' THEN 1
-                            WHEN category = 'Base Units' THEN 2
-                            ELSE 3
-                        END
-                    LIMIT 1
-                """)
-                
-                result = db_session.execute(query, {
-                    'tenant_id': str(tenant_id),
-                    'item_code': code,
-                    'door_type': db_door_type
-                }).fetchone()
-                
-                if result:
-                    print(f"✅ Code match: {code} + {db_door_type}")
-                    break
-        
-        # ==================================================================
-        # STRATEGY 5A: Width match in detected category
-        # ==================================================================
-        if not result and detected_category and width_mm:
-            query = text("""
-                SELECT 
-                    pricelist_id, item_code, item_name, description,
-                    base_price, door_type, width, height, depth, category
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                    AND category = :category
-                    AND width = :width
-                ORDER BY 
-                    CASE 
-                        WHEN door_type = :door_type THEN 1
-                        ELSE 2
-                    END,
-                    base_price DESC
-                LIMIT 1
-            """)
+        if door_component_only and component_door_type:
+            print(f"   🚪 MODE: {component_door_type} door component ONLY for {item_code}")
             
-            result = db_session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'category': detected_category,
-                'width': width_mm,
-                'door_type': db_door_type or 'Basic Slab'
-            }).fetchone()
+            door_row = next((r for r in results if r.door_type == component_door_type), None)
             
-            if result:
-                print(f"✅ Category width match: {width_mm}mm in {detected_category}")
-        
-        # ==================================================================
-        # STRATEGY 5B: Width match (Kitchen priority fallback)
-        # ==================================================================
-        if not result and width_mm:
-            query = text("""
-                SELECT 
-                    pricelist_id, item_code, item_name, description,
-                    base_price, door_type, width, height, depth, category
-                FROM "StreemLyne_MT"."PriceList_Master"
-                WHERE tenant_id = :tenant_id
-                    AND width = :width
-                ORDER BY 
-                    CASE 
-                        WHEN category = 'Kitchen' THEN 1
-                        WHEN category = 'Base Units' THEN 2
-                        ELSE 3
-                    END,
-                    CASE 
-                        WHEN door_type = :door_type THEN 1
-                        ELSE 2
-                    END,
-                    base_price DESC
-                LIMIT 1
-            """)
+            if not door_row or not door_row.base_price:
+                return jsonify({
+                    'found': False,
+                    'error': f'No {component_door_type} door component found for {item_code}'
+                }), 404
             
-            result = db_session.execute(query, {
-                'tenant_id': str(tenant_id),
-                'width': width_mm,
-                'door_type': db_door_type or 'Basic Slab'
-            }).fetchone()
+            door_price = float(door_row.base_price)
             
-            if result:
-                print(f"✅ Width fallback match: {width_mm}mm")
-        
-        # ==================================================================
-        # RETURN RESULT
-        # ==================================================================
-        if result:
-            print(
-                f"✅ FOUND: {result.item_name} ({result.door_type or 'No door'}) - £{result.base_price}"
-            )
+            print(f"   💰 {component_door_type} Door ONLY: £{door_price:.2f}")
+            
             return jsonify({
                 'found': True,
-                'price': float(result.base_price),
-                'width': result.width,
-                'height': result.height,
-                'depth': result.depth,
-                'item_code': result.item_code,
-                'item_name': result.item_name,
-                'door_type': result.door_type or 'Basic Slab',
-                'pricelist_id': result.pricelist_id,
-                'description': result.description
+                'price': door_price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': f"{component_door_type} Door for {item_name}",
+                'door_type': component_door_type,
+                'category': category,
+                'width': first_result.width,
+                'height': first_result.height,
+                'depth': first_result.depth,
+                'pricelist_id': door_row.pricelist_id,
+                'component_only': True,
+                'breakdown': {
+                    'carcass': 0.0,
+                    'door_component': door_price
+                }
             }), 200
-        else:
-            print(
-                f"⚠️ NO MATCH for: '{description}' (door: {door_type})"
-            )
+        
+        # ========================================================================
+        # STANDARD MODE - Carcass or Carcass + Door
+        # ========================================================================
+        
+        # Get carcass price
+        carcass_row = next((r for r in results if r.door_type == 'Carcass Only'), None)
+        
+        if not carcass_row or not carcass_row.base_price:
+            return jsonify({'found': False, 'error': f'No carcass price found for {item_code}'}), 404
+        
+        carcass_price = float(carcass_row.base_price)
+        
+        # CASE 1: No door type specified OR "Carcass Only" selected
+        if not db_door_type or db_door_type == 'Carcass Only':
+            print(f"   🏗️ MODE: Carcass ONLY for {item_code}")
+            print(f"   💰 Price: £{carcass_price:.2f}")
+            
             return jsonify({
-                'found': False,
-                'error': f'No pricing found. Tried codes: {search_candidates}, width: {width_mm}mm, category: {detected_category}'
-            }), 404
+                'found': True,
+                'price': carcass_price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': f"{item_name} - Carcass Only",
+                'door_type': 'Carcass Only',
+                'category': category,
+                'width': first_result.width,
+                'height': first_result.height,
+                'depth': first_result.depth,
+                'pricelist_id': carcass_row.pricelist_id,
+                'breakdown': {
+                    'carcass': carcass_price,
+                    'door_component': 0.0
+                }
+            }), 200
+        
+        # CASE 2: Door type specified → Return carcass + door
+        print(f"   🏗️ MODE: Complete unit - {item_code} + {db_door_type}")
+        
+        door_row = next((r for r in results if r.door_type == db_door_type), None)
+        
+        if not door_row or not door_row.base_price:
+            print(f"   ⚠️ No door price found for {item_code} + {db_door_type}, returning carcass only")
+            
+            return jsonify({
+                'found': True,
+                'price': carcass_price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': f"{item_name} - {db_door_type} (door price not found)",
+                'door_type': db_door_type,
+                'category': category,
+                'width': first_result.width,
+                'height': first_result.height,
+                'depth': first_result.depth,
+                'pricelist_id': carcass_row.pricelist_id,
+                'warning': f'No door component price found for {db_door_type}',
+                'breakdown': {
+                    'carcass': carcass_price,
+                    'door_component': 0.0
+                }
+            }), 200
+        
+        door_component_price = float(door_row.base_price)
+        final_price = carcass_price + door_component_price
+        
+        print(f"   💰 Complete: Carcass £{carcass_price:.2f} + Door £{door_component_price:.2f} = £{final_price:.2f}")
+        
+        return jsonify({
+            'found': True,
+            'price': final_price,
+            'item_code': item_code,
+            'item_name': item_name,
+            'description': f"{item_name} - {db_door_type}",
+            'door_type': db_door_type,
+            'category': category,
+            'width': first_result.width,
+            'height': first_result.height,
+            'depth': first_result.depth,
+            'pricelist_id': door_row.pricelist_id,
+            'breakdown': {
+                'carcass': carcass_price,
+                'door_component': door_component_price
+            }
+        }), 200
         
     except Exception as e:
         print(f"❌ Error in smart lookup: {e}")
@@ -1690,50 +1670,23 @@ def auto_price_lookup(tenant_id, employee_id):
     finally:
         db_session.close()
 
+
 def lookup_appliance(session, tenant_id, description, brand=None):
-    """
-    Lookup appliance from PriceList_Master by model code
-    
-    Strategy:
-    1. Extract model code from description
-    2. Search by exact model code match (item_code field)
-    3. Return price, brand, series level, and series info
-    """
+    """Appliance lookup - unchanged"""
     import re
     
     print(f"\n🔥 APPLIANCE LOOKUP")
     print(f"   Description: {description}")
-    print(f"   Brand filter: {brand}")
     
-    # ====================================================================
-    # STRATEGY 1: Extract model code from description
-    # ====================================================================
-    # Model codes like: PCR9A5I90, BFL523MB0B, KIR81NSE0G
     model_pattern = r'\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,})\b'
     model_match = re.search(model_pattern, description, re.IGNORECASE)
     
-    model_code = None
-    if model_match:
-        model_code = model_match.group(1).upper()
-        print(f"   ✅ Extracted model code: {model_code}")
-    else:
-        # If no code pattern found, use the entire description as search term
-        model_code = description.strip().upper()
-        print(f"   🔍 Using full description as code: {model_code}")
+    model_code = model_match.group(1).upper() if model_match else description.strip().upper()
     
-    # ====================================================================
-    # STRATEGY 2: Search by exact model code (item_code field)
-    # ====================================================================
     query = text("""
         SELECT 
-            pricelist_id, 
-            item_code, 
-            item_name, 
-            description,
-            base_price, 
-            brand,
-            door_type,
-            category
+            pricelist_id, item_code, item_name, description,
+            base_price, brand, door_type, category
         FROM "StreemLyne_MT"."PriceList_Master"
         WHERE tenant_id = :tenant_id
           AND category = 'Appliances'
@@ -1747,17 +1700,11 @@ def lookup_appliance(session, tenant_id, description, brand=None):
     }).fetchone()
     
     if result:
-        print(f"   ✅ FOUND: {result.item_name} - £{result.base_price}")
-        print(f"   Brand: {result.brand}")
-        print(f"   Series Level: {result.door_type}")  # door_type stores Low/Mid/High
-        
-        # Extract series info from description (e.g., "S6", "iQ700", "N90")
         series_info = ''
         if result.description:
             series_match = re.search(r'\(([^)]+)\)', result.description)
             if series_match:
                 series_info = series_match.group(1)
-                print(f"   Series Info: {series_info}")
         
         return jsonify({
             'found': True,
@@ -1767,15 +1714,302 @@ def lookup_appliance(session, tenant_id, description, brand=None):
             'description': result.description,
             'pricelist_id': result.pricelist_id,
             'brand': result.brand,
-            'series_level': result.door_type,  # Low/Mid/High
-            'series_info': series_info,  # S6, iQ700, etc.
+            'series_level': result.door_type,
+            'series_info': series_info,
         }), 200
     
-    # ====================================================================
-    # NOT FOUND
-    # ====================================================================
-    print(f"   ❌ NO MATCH for model code: {model_code}")
     return jsonify({
         'found': False,
         'error': f'No appliance found with model code: {model_code}'
     }), 404
+
+@quotation_bp.route('/quotations/<int:quotation_id>/pdf', methods=['GET'])
+@token_required
+@require_tenant
+def download_quotation_pdf(quotation_id, tenant_id, employee_id):
+    """
+    Generate and return quotation as PDF
+    
+    Returns:
+        PDF file with quotation details matching Aztec Interiors design
+    """
+    db_session = SessionLocal()
+    
+    try:
+        # Fetch quotation data
+        from sqlalchemy import text
+        
+        query = text("""
+            SELECT 
+                q.quotation_id,
+                q.customer_name,
+                q.customer_address,
+                q.customer_phone,
+                q.customer_email,
+                q.date,
+                q.subtotal,
+                q.vat,
+                q.total,
+                q.vat_percentage
+            FROM "StreemLyne_MT"."Quotation_Master" q
+            WHERE q.tenant_id = :tenant_id
+                AND q.quotation_id = :quotation_id
+        """)
+        
+        quotation = db_session.execute(query, {
+            'tenant_id': str(tenant_id),
+            'quotation_id': quotation_id
+        }).fetchone()
+        
+        if not quotation:
+            return jsonify({'error': 'Quotation not found'}), 404
+        
+        # Fetch quotation items
+        items_query = text("""
+            SELECT 
+                item,
+                description,
+                colour,
+                quantity,
+                unit_price,
+                amount,
+                width,
+                height,
+                depth
+            FROM "StreemLyne_MT"."Quotation_Items"
+            WHERE tenant_id = :tenant_id
+                AND quotation_id = :quotation_id
+            ORDER BY item_id
+        """)
+        
+        items = db_session.execute(items_query, {
+            'tenant_id': str(tenant_id),
+            'quotation_id': quotation_id
+        }).fetchall()
+        
+        # Create PDF in memory
+        buffer = io.BytesIO()
+        pdf = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        
+        # Set up measurements
+        margin = 15 * mm
+        
+        # ============================================================
+        # COMPANY HEADER
+        # ============================================================
+        
+        # Company Name
+        pdf.setFont("Helvetica-Bold", 24)
+        pdf.drawCentredString(width / 2, height - 40, "AZTEC INTERIORS")
+        
+        # Company Registration (Green background)
+        pdf.setFillColorRGB(0.565, 0.933, 0.565)  # Light green
+        pdf.rect(margin, height - 70, width - 2 * margin, 15 * mm, fill=True, stroke=False)
+        
+        pdf.setFillColorRGB(0, 0, 0)  # Black text
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(margin + 3 * mm, height - 55, "Registered to England No 5246881")
+        pdf.drawString(margin + 3 * mm, height - 62, "VAT Reg No.686 8010 72")
+        
+        # Bank Details (Yellow background)
+        pdf.setFillColorRGB(1, 1, 0.6)  # Light yellow
+        pdf.rect(margin, height - 92, width - 2 * margin, 20 * mm, fill=True, stroke=False)
+        
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.drawString(margin + 3 * mm, height - 78, "Acc name : Aztec Interiors Leicester LTD")
+        pdf.drawString(margin + 3 * mm, height - 85, "Bank : HSBC")
+        pdf.drawString(margin + 3 * mm, height - 92, "s/code: 40 28 06")
+        pdf.drawString(margin + 3 * mm, height - 99, "acc no: 43820343")
+        
+        # Reference Note (Gray background)
+        pdf.setFillColorRGB(0.94, 0.94, 0.94)  # Light gray
+        pdf.rect(margin, height - 108, width - 2 * margin, 8 * mm, fill=True, stroke=False)
+        
+        pdf.setFillColorRGB(0, 0, 0)
+        pdf.setFont("Helvetica", 9)
+        pdf.drawString(margin + 3 * mm, height - 103, "Please use your name and/or road name as reference:")
+        
+        # QUOTATION Title
+        pdf.setFont("Helvetica-Bold", 16)
+        pdf.drawCentredString(width / 2, height - 125, "QUOTATION")
+        
+        # ============================================================
+        # CUSTOMER INFORMATION TABLE
+        # ============================================================
+        
+        customer_y = height - 150
+        
+        # Customer info box
+        customer_data = [
+            ['DATE:', quotation.date or datetime.now().strftime('%Y-%m-%d')],
+            ['NAME:', quotation.customer_name or ''],
+            ['ADDRESS:', quotation.customer_address or ''],
+            ['TEL:', quotation.customer_phone or ''],
+        ]
+        
+        customer_table = Table(customer_data, colWidths=[40 * mm, (width - 2 * margin - 40 * mm)])
+        customer_table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 9),
+            ('FONT', (1, 0), (1, -1), 'Helvetica', 9),
+            ('BACKGROUND', (0, 0), (0, -1), colors.Color(0.96, 0.96, 0.96)),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3 * mm),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 3 * mm),
+            ('TOPPADDING', (0, 0), (-1, -1), 2 * mm),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2 * mm),
+        ]))
+        
+        customer_table.wrapOn(pdf, width, height)
+        customer_table.drawOn(pdf, margin, customer_y - 35 * mm)
+        
+        # ============================================================
+        # ITEMS TABLE
+        # ============================================================
+        
+        items_y = customer_y - 50 * mm
+        
+        # Table headers
+        items_data = [['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY', 'WIDTH', 'HEIGHT', 'DEPTH', 'PRICE', 'AMOUNT']]
+        
+        # Add items
+        for item in items:
+            items_data.append([
+                item.item or '',
+                item.description or '',
+                item.colour or '',
+                str(item.quantity or 1),
+                str(item.width) if item.width else '—',
+                str(item.height) if item.height else '—',
+                str(item.depth) if item.depth else '—',
+                f"£{float(item.unit_price or 0):.2f}",
+                f"£{float(item.amount or 0):.2f}"
+            ])
+        
+        items_table = Table(items_data, colWidths=[
+            25 * mm,  # ITEM
+            50 * mm,  # DESCRIPTION
+            20 * mm,  # COLOUR
+            12 * mm,  # QTY
+            15 * mm,  # WIDTH
+            15 * mm,  # HEIGHT
+            15 * mm,  # DEPTH
+            20 * mm,  # PRICE
+            25 * mm   # AMOUNT
+        ])
+        
+        items_table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold', 8),  # Header
+            ('FONT', (0, 1), (-1, -1), 'Helvetica', 8),       # Body
+            ('BACKGROUND', (0, 0), (-1, 0), colors.white),
+            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),             # Header centered
+            ('ALIGN', (3, 1), (6, -1), 'CENTER'),             # QTY, WIDTH, HEIGHT, DEPTH centered
+            ('ALIGN', (7, 1), (8, -1), 'RIGHT'),              # PRICE, AMOUNT right-aligned
+            ('FONTNAME', (8, 1), (8, -1), 'Helvetica-Bold'),  # AMOUNT bold
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 2 * mm),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 2 * mm),
+            ('TOPPADDING', (0, 0), (-1, -1), 1.5 * mm),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5 * mm),
+        ]))
+        
+        # Calculate height needed for items table
+        items_table_height = (len(items_data) * 6) * mm  # Approximate
+        
+        items_table.wrapOn(pdf, width, height)
+        items_table.drawOn(pdf, margin, items_y - items_table_height)
+        
+        # ============================================================
+        # TOTALS TABLE
+        # ============================================================
+        
+        totals_y = items_y - items_table_height - 10 * mm
+        totals_x = width - margin - 80 * mm  # Right-aligned, 80mm wide
+        
+        vat_percentage = quotation.vat_percentage or 20
+        
+        totals_data = [
+            ['SUB TOTAL', f"£{float(quotation.subtotal):.2f}"],
+            [f'VAT ({vat_percentage}%)', f"£{float(quotation.vat):.2f}"],
+            ['TOTAL', f"£{float(quotation.total):.2f}"]
+        ]
+        
+        totals_table = Table(totals_data, colWidths=[40 * mm, 40 * mm])
+        totals_table.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
+            ('FONT', (1, 0), (1, 1), 'Helvetica', 10),
+            ('FONT', (0, 2), (1, 2), 'Helvetica-Bold', 11),  # TOTAL row bold
+            ('BACKGROUND', (0, 0), (0, -1), colors.Color(0.96, 0.96, 0.96)),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 3 * mm),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 3 * mm),
+            ('TOPPADDING', (0, 0), (-1, -1), 2 * mm),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2 * mm),
+        ]))
+        
+        totals_table.wrapOn(pdf, width, height)
+        totals_table.drawOn(pdf, totals_x, totals_y - 30 * mm)
+        
+        # ============================================================
+        # PAYMENT TERMS
+        # ============================================================
+        
+        terms_y = totals_y - 50 * mm
+        
+        pdf.setFont("Helvetica-Bold", 9)
+        pdf.drawString(margin, terms_y, "Only Bacs or Cash will be accepted on Delivery and Completion")
+        pdf.drawString(margin, terms_y - 5 * mm, "NOTE: If you wish to proceed with this quote, you will be required to make")
+        pdf.drawString(margin, terms_y - 10 * mm, "the full payment upfront")
+        
+        pdf.setFillColorRGB(1, 0, 0)  # Red text
+        pdf.drawString(margin, terms_y - 18 * mm, "Please sign here to confirm.")
+        pdf.setFillColorRGB(0, 0, 0)  # Reset to black
+        
+        # ============================================================
+        # SIGNATURE SECTION
+        # ============================================================
+        
+        signature_y = terms_y - 30 * mm
+        
+        pdf.setFont("Helvetica", 9)
+        
+        # Signature lines
+        pdf.drawString(margin, signature_y, "Customer Signature:")
+        pdf.line(margin + 45 * mm, signature_y, width - margin, signature_y)
+        
+        pdf.drawString(margin, signature_y - 8 * mm, "Customer Name:")
+        pdf.line(margin + 45 * mm, signature_y - 8 * mm, width - margin, signature_y - 8 * mm)
+        
+        pdf.drawString(margin, signature_y - 16 * mm, "Date:")
+        pdf.line(margin + 45 * mm, signature_y - 16 * mm, width - margin, signature_y - 16 * mm)
+        
+        # ============================================================
+        # FINALIZE PDF
+        # ============================================================
+        
+        pdf.showPage()
+        pdf.save()
+        
+        buffer.seek(0)
+        
+        # Return PDF
+        filename = f'Quotation_{quotation_id}_{quotation.customer_name.replace(" ", "_")}.pdf'
+        
+        return send_file(
+            buffer,
+            mimetype='application/pdf',
+            as_attachment=False,  # Display in browser, not force download
+            download_name=filename
+        )
+        
+    except Exception as e:
+        print(f"❌ Error generating PDF: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+    finally:
+        db_session.close()

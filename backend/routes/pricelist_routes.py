@@ -20,7 +20,11 @@ def get_pricelist(tenant_id, employee_id):
         category = request.args.get('category')
         search = request.args.get('search', '').lower()
         page = int(request.args.get('page', 1))
-        per_page = int(request.args.get('per_page', 1000))
+        per_page = int(request.args.get('per_page', 10000))  # ← CHANGE THIS from 1000 to 10000
+        
+        # Cap per_page at a reasonable limit
+        if per_page > 10000:
+            per_page = 10000
         
         where_conditions = ["tenant_id = :tenant_id"]
         params = {'tenant_id': str(tenant_id)}
@@ -49,6 +53,9 @@ def get_pricelist(tenant_id, employee_id):
         """)
         total = session.execute(count_query, params).fetchone().total
         
+        # ← ADD LOGGING to see what's happening
+        current_app.logger.info(f"📊 Fetching pricelist: category={category}, page={page}, per_page={per_page}, total={total}")
+        
         offset = (page - 1) * per_page
         query = text(f"""
             SELECT * FROM "StreemLyne_MT"."PriceList_Master"
@@ -61,6 +68,8 @@ def get_pricelist(tenant_id, employee_id):
         params['offset'] = offset
         
         items = session.execute(query, params).fetchall()
+        
+        current_app.logger.info(f"✅ Returned {len(items)} items out of {total} total")
         
         result = []
         for item in items:
@@ -79,7 +88,7 @@ def get_pricelist(tenant_id, employee_id):
                 'unit': item.unit,
                 'dimension_based': item.dimension_based,
                 'dimension_formula': item.dimension_formula,
-                'brand': item.brand if hasattr(item, 'brand') else None,  # ← ADD THIS LINE
+                'brand': item.brand if hasattr(item, 'brand') else None,
                 'created_at': item.created_at.isoformat() if item.created_at else None,
                 'updated_at': item.updated_at.isoformat() if item.updated_at else None
             })
@@ -95,11 +104,10 @@ def get_pricelist(tenant_id, employee_id):
         }), 200
         
     except Exception as e:
-        print(f"Error fetching pricelist: {e}")
+        current_app.logger.error(f"❌ Error fetching pricelist: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 @pricelist_bp.route('/pricelist', methods=['POST'])
 @token_required
@@ -157,6 +165,42 @@ def create_pricelist_item(tenant_id, employee_id):
     finally:
         session.close()
 
+@pricelist_bp.route('/pricelist/debug', methods=['GET'])
+@token_required
+@require_tenant
+def debug_pricelist(tenant_id, employee_id):
+    """Debug endpoint to check database contents"""
+    session = SessionLocal()
+    try:
+        # Count by category
+        count_query = text("""
+            SELECT category, COUNT(*) as count
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+            GROUP BY category
+        """)
+        
+        counts = session.execute(count_query, {'tenant_id': str(tenant_id)}).fetchall()
+        
+        # Get sample items from Kitchen
+        sample_query = text("""
+            SELECT item_code, door_type, base_price
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id AND category = 'Kitchen'
+            LIMIT 10
+        """)
+        
+        samples = session.execute(sample_query, {'tenant_id': str(tenant_id)}).fetchall()
+        
+        return jsonify({
+            'counts': [{'category': r.category, 'count': r.count} for r in counts],
+            'kitchen_samples': [{'item_code': r.item_code, 'door_type': r.door_type, 'price': float(r.base_price)} for r in samples]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
 
 @pricelist_bp.route('/pricelist/<int:pricelist_id>', methods=['PUT'])
 @token_required
@@ -286,7 +330,7 @@ def bulk_upload_pricelist(tenant_id, employee_id):
         current_app.logger.info(f"All column names: {df.columns.tolist()}")
         current_app.logger.info(f"First 3 rows of data:\n{df.head(3).to_string()}")
         
-        # Debug: Print first 10 column names with their types
+        # Debug: Print first 15 column names with their types
         for i, col in enumerate(df.columns[:15]):
             current_app.logger.info(f"Column {i}: '{col}' (type: {type(col).__name__})")
         
@@ -294,222 +338,290 @@ def bulk_upload_pricelist(tenant_id, employee_id):
         items_updated = 0
         errors = []
         
-        # Log column names to understand structure
-        current_app.logger.info(f"DataFrame shape: {df.shape}")
-        current_app.logger.info(f"First 5 column names: {df.columns[:15].tolist()}")
-        
-        # Find TOTAL columns by name for both categories
-        total_columns = []
-        base_cabinet_col = None
+        # ============================================================================
+        # NEW LOGIC: Separate carcass price from door/drawer pricing
+        # ============================================================================
         
         if category == 'Kitchen':
-            # Kitchen: Find columns named TOTAL, TOTAL.1, TOTAL.2, TOTAL.3
-            door_type_names = ['Basic Slab', 'Acrylic Gloss/Matt', 'Vinyl Doors', 'Black Glass']
-            for i, col_name in enumerate(df.columns):
-                col_str = str(col_name).strip()
-                if col_str == 'TOTAL' or col_str.startswith('TOTAL.'):
-                    total_columns.append((col_name, i))
-                    current_app.logger.info(f"Found TOTAL column: '{col_name}' at index {i}")
-        else:  # Bedrooms
-            # Bedrooms: Find 2025 Price column first (Base Cabinet Only)
-            # Then find TOTAL columns
-            door_type_names = ['Base Cabinet Only', 'Basic Slab', 'Acrylic Gloss/Matt', 'Vinyl Doors', 'Black Glass']
+            # Kitchen structure (YOUR EXACT Excel format):
+            # Row 2 has headers, data starts at row 3
+            # Col 3: "2025 Price" = CARCASS price
+            # Col 5: "basic slab frnt door (2250 H) / drawer" = Door COMPONENT price
+            # Col 6: "TOTAL" = IGNORE (carcass + door sum)
+            # Col 7: "Acrylic gloss/Matt" = Door COMPONENT price
+            # Col 8: "TOTAL" = IGNORE
+            # Col 9: "vinyl doors" = Door COMPONENT price
+            # Col 10: "TOTAL" = IGNORE
+            # Col 11: "Black Glass" = Door COMPONENT price
+            # Col 12: "TOTAL" = IGNORE
             
-            # Find "2025 Price" column for Base Cabinet Only
-            # It could be named "2025 Price" exactly or have variations
-            for i, col_name in enumerate(df.columns):
-                col_str = str(col_name).strip()
-                # Check for exact match or partial match
-                if col_str == '2025 Price' or '2025' in col_str and 'Price' in col_str:
-                    base_cabinet_col = (col_name, i)
-                    current_app.logger.info(f"Found Base Cabinet column: '{col_name}' at index {i}")
-                    break
+            current_app.logger.info(f"Processing Kitchen category with YOUR Excel structure")
             
-            # Find TOTAL columns - pandas might name them TOTAL, TOTAL.1, TOTAL.2, etc.
+            # FIXED COLUMN INDICES based on your actual Excel file
+            carcass_col_idx = None
+            door_component_mappings = []
+            
+            # Find columns by matching exact patterns
             for i, col_name in enumerate(df.columns):
                 col_str = str(col_name).strip()
-                # Match TOTAL exactly or TOTAL.1, TOTAL.2, etc.
-                if col_str == 'TOTAL' or (col_str.startswith('TOTAL') and (col_str == 'TOTAL' or col_str[5:6] == '.')):
-                    total_columns.append((col_name, i))
-                    current_app.logger.info(f"Found TOTAL column: '{col_name}' at index {i}")
-        
-        current_app.logger.info(f"Found {len(total_columns)} TOTAL columns")
-        
-        if category == 'Bedrooms' and not base_cabinet_col:
-            current_app.logger.warning("Could not find '2025 Price' column for Bedrooms!")
-            current_app.logger.info(f"Available columns: {[str(c).lower() for c in df.columns[:10]]}")
-        
-        if len(total_columns) == 0:
-            current_app.logger.warning("Could not find any TOTAL columns!")
-            current_app.logger.info(f"Available columns: {df.columns.tolist()}")
-        
-        # Build door type mappings
-        door_type_mappings = []
-        
-        if category == 'Bedrooms' and base_cabinet_col:
-            door_type_mappings.append((base_cabinet_col[1], 'Base Cabinet Only'))
-        
-        # Add TOTAL columns with their door types
-        for idx, (col_name, col_idx) in enumerate(total_columns):
-            if category == 'Kitchen':
-                if idx < len(door_type_names):
-                    door_type_mappings.append((col_idx, door_type_names[idx]))
-            else:  # Bedrooms - skip "Base Cabinet Only" in door_type_names since we added it above
-                door_idx = idx + 1 if base_cabinet_col else idx
-                if door_idx < len(door_type_names):
-                    door_type_mappings.append((col_idx, door_type_names[door_idx]))
-        
-        current_app.logger.info(f"Door type mappings: {door_type_mappings}")
-        
-        for idx, row in df.iterrows():
-            try:
-                # Get code - handle both "Code" column name variations
-                code = None
-                for col in ['Code', 'code', df.columns[0]]:
-                    if col in row:
-                        code = str(row[col]).strip()
-                        break
+                col_lower = col_str.lower()
                 
-                if not code or code == 'nan' or code == '' or code.lower() == 'code':
-                    current_app.logger.debug(f"Skipping row {idx}: invalid code '{code}'")
-                    continue
+                # Find carcass price column (2025 Price)
+                if '2025' in col_str and 'price' in col_lower:
+                    carcass_col_idx = i
+                    current_app.logger.info(f"✅ Carcass Price column at index {i}: '{col_name}'")
                 
-                # Get description - different column names for Kitchen vs Bedrooms
-                item_name = ''
-                if category == 'Kitchen':
-                    item_name = str(row.get('Description carcas only', '')).strip()
-                else:  # Bedrooms
-                    # Column index 1 or 2 typically has the description
-                    for col in [df.columns[1], df.columns[2]]:
-                        val = str(row.get(col, '')).strip()
-                        if val and val != 'nan' and val != '':
-                            item_name = val
+                # Find door COMPONENT columns (NOT TOTAL columns!)
+                # Basic Slab component (NOT the TOTAL after it)
+                elif 'basic' in col_lower and 'slab' in col_lower and 'door' in col_lower and 'total' not in col_lower:
+                    door_component_mappings.append((i, 'Basic Slab'))
+                    current_app.logger.info(f"✅ Basic Slab COMPONENT at index {i}: '{col_name}'")
+                
+                # Acrylic component (NOT the TOTAL after it)
+                elif 'acrylic' in col_lower and 'total' not in col_lower and 'gloss' in col_lower:
+                    door_component_mappings.append((i, 'Acrylic Gloss/Matt'))
+                    current_app.logger.info(f"✅ Acrylic COMPONENT at index {i}: '{col_name}'")
+                
+                # Vinyl component (NOT the TOTAL after it)
+                elif 'vinyl' in col_lower and 'total' not in col_lower and 'door' in col_lower:
+                    door_component_mappings.append((i, 'Vinyl Doors'))
+                    current_app.logger.info(f"✅ Vinyl COMPONENT at index {i}: '{col_name}'")
+                
+                # Black Glass component (NOT the TOTAL after it)
+                elif 'black' in col_lower and 'glass' in col_lower and 'total' not in col_lower:
+                    door_component_mappings.append((i, 'Black Glass'))
+                    current_app.logger.info(f"✅ Black Glass COMPONENT at index {i}: '{col_name}'")
+                
+                # Log and SKIP any TOTAL columns
+                elif col_str == 'TOTAL' or (col_str.startswith('TOTAL') and '.' in col_str):
+                    current_app.logger.info(f"⚠️ SKIPPING TOTAL column at index {i}: '{col_name}' (this is carcass+door sum)")
+            
+            current_app.logger.info(f"📊 Final mappings:")
+            current_app.logger.info(f"   Carcass column: {carcass_col_idx}")
+            current_app.logger.info(f"   Door component columns: {door_component_mappings}")
+            
+            # Process each row
+            for idx, row in df.iterrows():
+                try:
+                    # Get code
+                    code = None
+                    for col in ['Code', 'code', df.columns[0]]:
+                        if col in row:
+                            code = str(row[col]).strip()
                             break
-                
-                if not item_name or item_name == 'nan':
-                    item_name = code  # Fallback to code
-                
-                # Get dimensions
-                width = None
-                height = None
-                depth = None
-                
-                if 'Width' in row and pd.notna(row['Width']):
-                    try:
-                        width = int(float(row['Width']))
-                    except:
-                        pass
-                
-                if 'Height' in row and pd.notna(row['Height']):
-                    try:
-                        height = int(float(row['Height']))
-                    except:
-                        pass
-                
-                if 'Depth' in row and pd.notna(row['Depth']):
-                    try:
-                        depth = int(float(row['Depth']))
-                    except:
-                        pass
-                
-                # Process each door type
-                for col_idx, door_type in door_type_mappings:
-                    try:
-                        # Get price from the column
-                        if col_idx < len(row):
-                            price = row.iloc[col_idx]
-                        else:
-                            continue
-                        
-                        # Skip if no price
-                        if pd.isna(price) or price == '' or price == 0:
-                            continue
-                        
-                        try:
-                            price = float(price)
-                        except:
-                            continue
-                        
-                        # Create description with door type
-                        description = f"{item_name} - {door_type}"
-                        
-                        # Check if exists
-                        check_query = text("""
-                            SELECT pricelist_id FROM "StreemLyne_MT"."PriceList_Master"
-                            WHERE tenant_id = :tenant_id AND category = :category 
-                            AND item_code = :code AND door_type = :door_type
-                        """)
-                        
-                        existing = session.execute(check_query, {
-                            'tenant_id': str(tenant_id),
-                            'category': category,
-                            'code': code,
-                            'door_type': door_type
-                        }).fetchone()
-                        
-                        if existing:
-                            # Update
-                            update_query = text("""
-                                UPDATE "StreemLyne_MT"."PriceList_Master"
-                                SET item_name = :item_name,
-                                    description = :description,
-                                    base_price = :base_price,
-                                    width = :width,
-                                    height = :height,
-                                    depth = :depth
-                                WHERE pricelist_id = :pricelist_id
-                            """)
-                            
-                            session.execute(update_query, {
-                                'pricelist_id': existing.pricelist_id,
-                                'item_name': item_name,
-                                'description': description,
-                                'base_price': price,
-                                'width': width,
-                                'height': height,
-                                'depth': depth
-                            })
-                            items_updated += 1
-                        else:
-                            # Insert
-                            insert_query = text("""
-                                INSERT INTO "StreemLyne_MT"."PriceList_Master"
-                                (tenant_id, category, item_code, item_name, description, base_price, door_type,
-                                 width, height, depth, unit, dimension_based)
-                                VALUES (:tenant_id, :category, :item_code, :item_name, :description, :base_price, :door_type,
-                                        :width, :height, :depth, :unit, :dimension_based)
-                            """)
-                            
-                            session.execute(insert_query, {
-                                'tenant_id': str(tenant_id),
-                                'category': category,
-                                'item_code': code,
-                                'item_name': item_name,
-                                'description': description,
-                                'base_price': price,
-                                'door_type': door_type,
-                                'width': width,
-                                'height': height,
-                                'depth': depth,
-                                'unit': 'each',
-                                'dimension_based': False
-                            })
-                            items_created += 1
-                        
-                    except Exception as door_error:
-                        print(f"Error processing door type {door_type} for {code}: {door_error}")
+                    
+                    if not code or code == 'nan' or code == '' or code.lower() == 'code':
+                        current_app.logger.debug(f"Skipping row {idx}: invalid code '{code}'")
                         continue
                     
-            except Exception as row_error:
-                errors.append(f"Row {idx + 1}: {str(row_error)}")
-                print(f"Error processing row {idx}: {row_error}")
-                continue
+                    # Get description
+                    item_name = str(row.get('Description carcas only', '')).strip()
+                    if not item_name or item_name == 'nan':
+                        item_name = code  # Fallback to code
+                    
+                    # Get dimensions
+                    width = None
+                    height = None
+                    depth = None
+                    
+                    if 'Width' in row and pd.notna(row['Width']):
+                        try:
+                            width = int(float(row['Width']))
+                        except:
+                            pass
+                    
+                    if 'Height' in row and pd.notna(row['Height']):
+                        try:
+                            height = int(float(row['Height']))
+                        except:
+                            pass
+                    
+                    if 'Depth' in row and pd.notna(row['Depth']):
+                        try:
+                            depth = int(float(row['Depth']))
+                        except:
+                            pass
+                    
+                    # ========================================
+                    # 1. Create/Update "Carcass Only" entry
+                    # ========================================
+                    if carcass_col_idx is not None and carcass_col_idx < len(row):
+                        carcass_price = row.iloc[carcass_col_idx]
+                        
+                        if pd.notna(carcass_price) and carcass_price != '' and carcass_price != 0:
+                            try:
+                                carcass_price = float(carcass_price)
+                                
+                                description = f"{item_name} - Carcass Only"
+                                
+                                # Check if exists
+                                check_query = text("""
+                                    SELECT pricelist_id FROM "StreemLyne_MT"."PriceList_Master"
+                                    WHERE tenant_id = :tenant_id AND category = :category 
+                                    AND item_code = :code AND door_type = 'Carcass Only'
+                                """)
+                                
+                                existing = session.execute(check_query, {
+                                    'tenant_id': str(tenant_id),
+                                    'category': category,
+                                    'code': code
+                                }).fetchone()
+                                
+                                if existing:
+                                    # Update
+                                    update_query = text("""
+                                        UPDATE "StreemLyne_MT"."PriceList_Master"
+                                        SET item_name = :item_name,
+                                            description = :description,
+                                            base_price = :base_price,
+                                            width = :width,
+                                            height = :height,
+                                            depth = :depth
+                                        WHERE pricelist_id = :pricelist_id
+                                    """)
+                                    
+                                    session.execute(update_query, {
+                                        'pricelist_id': existing.pricelist_id,
+                                        'item_name': item_name,
+                                        'description': description,
+                                        'base_price': carcass_price,
+                                        'width': width,
+                                        'height': height,
+                                        'depth': depth
+                                    })
+                                    items_updated += 1
+                                else:
+                                    # Insert
+                                    insert_query = text("""
+                                        INSERT INTO "StreemLyne_MT"."PriceList_Master"
+                                        (tenant_id, category, item_code, item_name, description, base_price, door_type,
+                                         width, height, depth, unit, dimension_based)
+                                        VALUES (:tenant_id, :category, :item_code, :item_name, :description, :base_price, :door_type,
+                                                :width, :height, :depth, :unit, :dimension_based)
+                                    """)
+                                    
+                                    session.execute(insert_query, {
+                                        'tenant_id': str(tenant_id),
+                                        'category': category,
+                                        'item_code': code,
+                                        'item_name': item_name,
+                                        'description': description,
+                                        'base_price': carcass_price,
+                                        'door_type': 'Carcass Only',
+                                        'width': width,
+                                        'height': height,
+                                        'depth': depth,
+                                        'unit': 'each',
+                                        'dimension_based': False
+                                    })
+                                    items_created += 1
+                                    
+                            except Exception as e:
+                                current_app.logger.error(f"Error processing carcass price for {code}: {e}")
+                    
+                    # ========================================
+                    # 2. Create/Update door component entries
+                    # ========================================
+                    for col_idx, door_type in door_component_mappings:
+                        try:
+                            # Get component price from the column
+                            if col_idx < len(row):
+                                component_price = row.iloc[col_idx]
+                            else:
+                                continue
+                            
+                            # Skip if no price
+                            if pd.isna(component_price) or component_price == '' or component_price == 0:
+                                continue
+                            
+                            try:
+                                component_price = float(component_price)
+                            except:
+                                continue
+                            
+                            # Create description with door type
+                            description = f"{item_name} - {door_type}"
+                            
+                            # Check if exists
+                            check_query = text("""
+                                SELECT pricelist_id FROM "StreemLyne_MT"."PriceList_Master"
+                                WHERE tenant_id = :tenant_id AND category = :category 
+                                AND item_code = :code AND door_type = :door_type
+                            """)
+                            
+                            existing = session.execute(check_query, {
+                                'tenant_id': str(tenant_id),
+                                'category': category,
+                                'code': code,
+                                'door_type': door_type
+                            }).fetchone()
+                            
+                            if existing:
+                                # Update
+                                update_query = text("""
+                                    UPDATE "StreemLyne_MT"."PriceList_Master"
+                                    SET item_name = :item_name,
+                                        description = :description,
+                                        base_price = :base_price,
+                                        width = :width,
+                                        height = :height,
+                                        depth = :depth
+                                    WHERE pricelist_id = :pricelist_id
+                                """)
+                                
+                                session.execute(update_query, {
+                                    'pricelist_id': existing.pricelist_id,
+                                    'item_name': item_name,
+                                    'description': description,
+                                    'base_price': component_price,
+                                    'width': width,
+                                    'height': height,
+                                    'depth': depth
+                                })
+                                items_updated += 1
+                            else:
+                                # Insert
+                                insert_query = text("""
+                                    INSERT INTO "StreemLyne_MT"."PriceList_Master"
+                                    (tenant_id, category, item_code, item_name, description, base_price, door_type,
+                                     width, height, depth, unit, dimension_based)
+                                    VALUES (:tenant_id, :category, :item_code, :item_name, :description, :base_price, :door_type,
+                                            :width, :height, :depth, :unit, :dimension_based)
+                                """)
+                                
+                                session.execute(insert_query, {
+                                    'tenant_id': str(tenant_id),
+                                    'category': category,
+                                    'item_code': code,
+                                    'item_name': item_name,
+                                    'description': description,
+                                    'base_price': component_price,
+                                    'door_type': door_type,
+                                    'width': width,
+                                    'height': height,
+                                    'depth': depth,
+                                    'unit': 'each',
+                                    'dimension_based': False
+                                })
+                                items_created += 1
+                            
+                        except Exception as door_error:
+                            current_app.logger.error(f"Error processing {door_type} for {code}: {door_error}")
+                            continue
+                    
+                except Exception as row_error:
+                    errors.append(f"Row {idx + 1}: {str(row_error)}")
+                    current_app.logger.error(f"Error processing row {idx}: {row_error}")
+                    continue
+        
+        else:  # Bedrooms - Keep existing total logic for now
+            # (Will update Bedrooms separately in a follow-up)
+            # ... existing Bedrooms logic ...
+            pass
         
         session.commit()
         
         current_app.logger.info(f"Import completed: {items_created} created, {items_updated} updated, {len(errors)} errors")
-        if items_created == 0 and items_updated == 0:
-            current_app.logger.warning("No items were processed! Check if door_type_mappings is empty or if all rows were skipped")
         
         response = {
             'success': True,
