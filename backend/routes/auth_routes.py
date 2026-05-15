@@ -1,9 +1,12 @@
 # backend/routes/auth_routes_corrected.py
+from unittest import result
+
 from flask import Blueprint, request, jsonify, current_app
 from sqlalchemy import text
 import jwt
 from datetime import datetime, timedelta
 from ..db import SessionLocal
+from werkzeug.security import check_password_hash, generate_password_hash
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -73,12 +76,13 @@ def login():
         print(f"✅ User is active")
         
         # Verify password (plain text - DEV ONLY)
-        print(f"🔐 Comparing passwords:")
-        print(f"   Provided: '{password}'")
-        print(f"   Stored:   '{result.password}'")
-        print(f"   Match: {password == result.password}")
-        
-        if password != result.password:
+        print(f"🔐 Verifying hashed password...")
+        print(f"   Password hash starts with: {result.password[:20]}...")
+
+        is_valid = check_password_hash(result.password, password)
+        print(f"   Password valid: {is_valid}")
+
+        if not is_valid:
             print(f"❌ PASSWORD MISMATCH!")
             return jsonify({'error': 'Invalid credentials'}), 401
         
@@ -263,18 +267,20 @@ def change_password():
             """)
             result = session.execute(query, {'user_id': user.id}).fetchone()
             
-            if not result or result.password != current_password:
+            if not result or not check_password_hash(result.password, current_password):
                 return jsonify({'error': 'Current password is incorrect'}), 401
-            
-            # Update password (plain text)
+
+            # Update password (hash it first)
+            new_password_hash = generate_password_hash(new_password)
+
             update_query = text("""
                 UPDATE "StreemLyne_MT"."User_Master"
-                SET password = :new_password
+                SET password = :new_password_hash
                 WHERE user_id = :user_id
             """)
-            
+
             session.execute(update_query, {
-                'new_password': new_password,
+                'new_password_hash': new_password_hash,
                 'user_id': user.id
             })
             session.commit()
