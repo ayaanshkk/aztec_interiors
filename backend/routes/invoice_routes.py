@@ -1,0 +1,584 @@
+from flask import Blueprint, request, jsonify, current_app, send_file
+from sqlalchemy import text
+from datetime import datetime, timedelta
+from io import BytesIO
+
+from ..db import SessionLocal
+from .auth_helpers import token_required, require_tenant
+from .pdf_helpers import PDF
+
+invoice_bp = Blueprint("invoice", __name__)
+
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+def generate_invoice_number(session, tenant_id):
+    count = session.execute(
+        text('SELECT COUNT(*) as c FROM "StreemLyne_MT"."Invoice_Master" WHERE tenant_id = :t'),
+        {'t': str(tenant_id)}
+    ).fetchone().c
+    return f"INV-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+
+
+def calculate_invoice_total(session, invoice_id):
+    result = session.execute(
+        text("""
+            SELECT COALESCE(SUM(amount * quantity), 0) as total
+            FROM "StreemLyne_MT"."Invoice_Details"
+            WHERE invoice_id = :invoice_id
+        """),
+        {'invoice_id': invoice_id}
+    ).fetchone()
+    return float(result.total) if result else 0.0
+
+
+# ============================================================================
+# LIST / CREATE
+# ============================================================================
+
+@invoice_bp.route('/invoices', methods=['GET'])
+@token_required
+@require_tenant
+def get_invoices(tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        client_id = (
+            request.args.get('client_id') or
+            request.args.get('customer_id') or
+            request.args.get('id')
+        )
+
+        if not client_id:
+            return jsonify([]), 200
+
+        rows = session.execute(
+            text("""
+                SELECT
+                    i.*,
+                    c.client_company_name,
+                    (SELECT COUNT(*) FROM "StreemLyne_MT"."Invoice_Details"
+                     WHERE invoice_id = i.invoice_id) AS items_count
+                FROM "StreemLyne_MT"."Invoice_Master" i
+                INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
+                WHERE i.tenant_id = :tenant_id AND i.client_id = :client_id
+                ORDER BY i.created_at DESC
+            """),
+            {'tenant_id': str(tenant_id), 'client_id': int(client_id)}
+        ).fetchall()
+
+        return jsonify([
+            {
+                'id':             r.invoice_id,
+                'invoice_id':     r.invoice_id,
+                'invoice_number': r.invoice_number,
+                'client_id':      r.client_id,
+                'customer_id':    r.client_id,
+                'customer_name':  r.customer_name or r.client_company_name,
+                'project_id':     r.project_id,
+                'total':          float(r.total_amount) if r.total_amount else 0.0,
+                'status':         r.status,
+                'notes':          r.notes,
+                'items_count':    r.items_count or 0,
+                'invoice_date':   r.invoice_date.isoformat() if r.invoice_date else None,
+                'due_date':       r.due_date.isoformat()     if r.due_date     else None,
+                'created_at':     r.created_at.isoformat()   if r.created_at   else None,
+            }
+            for r in rows
+        ]), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"Error fetching invoices: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@invoice_bp.route('/invoices', methods=['POST'])
+@token_required
+@require_tenant
+def create_invoice(tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        data      = request.get_json(silent=True) or {}
+        client_id = data.get('client_id') or data.get('customer_id') or data.get('customerId')
+
+        if not client_id:
+            return jsonify({'error': 'client_id is required'}), 400
+
+        client = session.execute(
+            text('SELECT client_id FROM "StreemLyne_MT"."Client_Master" WHERE client_id = :c AND tenant_id = :t'),
+            {'c': int(client_id), 't': str(tenant_id)}
+        ).fetchone()
+
+        if not client:
+            return jsonify({'error': 'Client not found'}), 404
+
+        invoice_number = data.get('invoice_number') or generate_invoice_number(session, tenant_id)
+        items_data     = data.get('items', [])
+        subtotal       = float(data.get('subtotal', 0))
+        vat_rate       = float(data.get('vat_percentage', data.get('vat_rate', 20)))
+        vat_amount     = subtotal * (vat_rate / 100)
+        total_amount   = subtotal + vat_amount
+
+        invoice_date = data.get('invoice_date') or datetime.utcnow().strftime('%Y-%m-%d')
+        due_date     = data.get('due_date') or (
+            datetime.strptime(invoice_date, '%Y-%m-%d') + timedelta(days=30)
+        ).strftime('%Y-%m-%d')
+
+        result = session.execute(
+            text("""
+                INSERT INTO "StreemLyne_MT"."Invoice_Master"
+                (tenant_id, client_id, project_id, invoice_number, invoice_date, due_date,
+                 status, notes, customer_name, customer_address, customer_phone, customer_email,
+                 subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
+                 sub_total, vat, description, tax_id)
+                VALUES
+                (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
+                 :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
+                 :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
+                 :subtotal, :vat_amount, :notes, :tax_id)
+                RETURNING invoice_id
+            """),
+            {
+                'tenant_id':        str(tenant_id),
+                'client_id':        int(client_id),
+                'project_id':       data.get('project_id'),
+                'invoice_number':   invoice_number,
+                'invoice_date':     invoice_date,
+                'due_date':         due_date,
+                'status':           data.get('status', 'Draft'),
+                'notes':            data.get('notes', ''),
+                'customer_name':    data.get('customer_name', ''),
+                'customer_address': data.get('customer_address', ''),
+                'customer_phone':   data.get('customer_phone', ''),
+                'customer_email':   data.get('customer_email', ''),
+                'subtotal':         subtotal,
+                'vat_rate':         vat_rate,
+                'vat_amount':       vat_amount,
+                'total_amount':     total_amount,
+                'created_by':       employee_id,
+                'tax_id':           1,  # default tax record — update if you have a specific tax_id
+            }
+        )
+        invoice_id = result.fetchone().invoice_id
+
+        # Insert items into Invoice_Details
+        for item in items_data:
+            if not item.get('item') and not item.get('description') and not item.get('amount'):
+                continue
+            amt = float(item.get('amount', item.get('line_total', 0)))
+            qty = int(item.get('quantity', 1))
+            session.execute(
+                text("""
+                    INSERT INTO "StreemLyne_MT"."Invoice_Details"
+                    (invoice_id, item_name, description, color, quantity, amount,
+                     unit_price, service_name, width, height, depth,
+                     discount_percent, discounted_amount)
+                    VALUES
+                    (:invoice_id, :item_name, :desc, :color, :qty, :amt,
+                     :unit_price, :service_name, :w, :h, :d, :dp, :da)
+                """),
+                {
+                    'invoice_id':   invoice_id,
+                    'item_name':    item.get('item', ''),
+                    'desc':         item.get('description', ''),
+                    'color':        item.get('color', item.get('colour', '')),
+                    'qty':          qty,
+                    'amt':          amt,
+                    'unit_price':   float(item.get('amount', 0)) / qty if qty else 0,
+                    'service_name': item.get('item', ''),
+                    'w':            item.get('width'),
+                    'h':            item.get('height'),
+                    'd':            item.get('depth'),
+                    'dp':           item.get('discount_percent', 0),
+                    'da':           item.get('discounted_total', amt),
+                }
+            )
+
+        session.commit()
+        current_app.logger.info(f"Invoice {invoice_number} created for client {client_id}")
+
+        return jsonify({
+            'invoice_id':     invoice_id,
+            'invoice_number': invoice_number,
+            'message':        'Invoice created successfully'
+        }), 201
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error creating invoice: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# SINGLE INVOICE — GET / PUT / DELETE
+# ============================================================================
+
+@invoice_bp.route('/invoices/<int:invoice_id>', methods=['GET', 'PUT', 'DELETE'])
+@token_required
+@require_tenant
+def handle_invoice(invoice_id, tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        if request.method == 'GET':
+            row = session.execute(
+                text("""
+                    SELECT i.*, c.client_company_name, c.address AS client_address, c.client_phone
+                    FROM "StreemLyne_MT"."Invoice_Master" i
+                    INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
+                    WHERE i.invoice_id = :id AND i.tenant_id = :t
+                """),
+                {'id': invoice_id, 't': str(tenant_id)}
+            ).fetchone()
+
+            if not row:
+                return jsonify({'error': 'Invoice not found'}), 404
+
+            items = session.execute(
+                text("""
+                    SELECT * FROM "StreemLyne_MT"."Invoice_Details"
+                    WHERE invoice_id = :id
+                    ORDER BY invoice_details_id
+                """),
+                {'id': invoice_id}
+            ).fetchall()
+
+            return jsonify({
+                'id':               row.invoice_id,
+                'invoice_id':       row.invoice_id,
+                'invoice_number':   row.invoice_number,
+                'customer_id':      str(row.client_id),
+                'customer_name':    row.customer_name    or row.client_company_name,
+                'customer_address': row.customer_address or row.client_address,
+                'customer_phone':   row.customer_phone   or row.client_phone,
+                'customer_email':   row.customer_email,
+                'client_id':        row.client_id,
+                'project_id':       row.project_id,
+                'invoice_date':     row.invoice_date.isoformat() if row.invoice_date else None,
+                'due_date':         row.due_date.isoformat()     if row.due_date     else None,
+                'subtotal':         float(row.subtotal    or row.sub_total or 0),
+                'vat_rate':         float(row.vat_rate    or 20),
+                'vat_amount':       float(row.vat_amount  or row.vat or 0),
+                'total':            float(row.total_amount or 0),
+                'status':           row.status,
+                'notes':            row.notes or row.description,
+                'created_at':       row.created_at.isoformat() if row.created_at else None,
+                'items': [
+                    {
+                        'id':               i.invoice_details_id,
+                        'item_id':          i.invoice_details_id,
+                        'item':             i.item_name or i.service_name or '',
+                        'item_name':        i.item_name or i.service_name or '',
+                        'description':      i.description or '',
+                        'color':            i.color or '',
+                        'quantity':         i.quantity or 1,
+                        'amount':           float(i.amount or 0),
+                        'width':            i.width,
+                        'height':           i.height,
+                        'depth':            i.depth,
+                        'discount_percent': float(i.discount_percent or 0),
+                        'discounted_total': float(i.discounted_amount or i.amount or 0),
+                        'line_total':       float(i.amount or 0) * int(i.quantity or 1),
+                    }
+                    for i in items
+                    if (i.item_name or i.service_name or i.description or (i.amount and float(i.amount) > 0))
+                ]
+            }), 200
+
+        elif request.method == 'PUT':
+            data          = request.get_json(silent=True) or {}
+            update_fields = []
+            params        = {'id': invoice_id, 't': str(tenant_id)}
+
+            for field in ['customer_name', 'customer_address', 'customer_phone',
+                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date']:
+                if field in data:
+                    update_fields.append(f"{field} = :{field}")
+                    params[field] = data[field]
+
+            if 'vat_rate' in data:
+                update_fields.append("vat_rate = :vat_rate")
+                params['vat_rate'] = data['vat_rate']
+
+            if 'items' in data:
+                session.execute(
+                    text('DELETE FROM "StreemLyne_MT"."Invoice_Details" WHERE invoice_id = :id'),
+                    {'id': invoice_id}
+                )
+                total = 0.0
+                for item in data['items']:
+                    if not item.get('item') and not item.get('description') and not item.get('amount'):
+                        continue
+                    amt = float(item.get('amount', item.get('line_total', 0)))
+                    qty = int(item.get('quantity', 1))
+                    session.execute(
+                        text("""
+                            INSERT INTO "StreemLyne_MT"."Invoice_Details"
+                            (invoice_id, item_name, description, color, quantity, amount,
+                             unit_price, service_name, width, height, depth,
+                             discount_percent, discounted_amount)
+                            VALUES
+                            (:invoice_id, :item_name, :desc, :color, :qty, :amt,
+                             :unit_price, :service_name, :w, :h, :d, :dp, :da)
+                        """),
+                        {
+                            'invoice_id':   invoice_id,
+                            'item_name':    item.get('item', ''),
+                            'desc':         item.get('description', ''),
+                            'color':        item.get('color', item.get('colour', '')),
+                            'qty':          qty,
+                            'amt':          amt,
+                            'unit_price':   amt / qty if qty else 0,
+                            'service_name': item.get('item', ''),
+                            'w':            item.get('width'),
+                            'h':            item.get('height'),
+                            'd':            item.get('depth'),
+                            'dp':           item.get('discount_percent', 0),
+                            'da':           item.get('discounted_total', amt),
+                        }
+                    )
+                    total += amt * qty
+
+                vat_rate   = float(data.get('vat_rate', 20))
+                vat_amount = total * (vat_rate / 100)
+                total_amt  = total + vat_amount
+
+                update_fields += [
+                    "subtotal = :subtotal", "sub_total = :subtotal",
+                    "vat_amount = :vat_amount", "vat = :vat_amount",
+                    "total_amount = :total_amount",
+                    "vat_rate = :vat_rate",
+                ]
+                params.update({
+                    'subtotal':     total,
+                    'vat_amount':   vat_amount,
+                    'total_amount': total_amt,
+                    'vat_rate':     vat_rate,
+                })
+
+            if not update_fields:
+                return jsonify({'error': 'No fields to update'}), 400
+
+            update_fields.append("updated_at = CURRENT_TIMESTAMP")
+            session.execute(
+                text(f"""
+                    UPDATE "StreemLyne_MT"."Invoice_Master"
+                    SET {', '.join(update_fields)}
+                    WHERE invoice_id = :id AND tenant_id = :t
+                """),
+                params
+            )
+            session.commit()
+            return jsonify({'success': True, 'message': 'Invoice updated successfully'}), 200
+
+        elif request.method == 'DELETE':
+            session.execute(
+                text('DELETE FROM "StreemLyne_MT"."Invoice_Details" WHERE invoice_id = :id'),
+                {'id': invoice_id}
+            )
+            session.execute(
+                text('DELETE FROM "StreemLyne_MT"."Invoice_Master" WHERE invoice_id = :id AND tenant_id = :t'),
+                {'id': invoice_id, 't': str(tenant_id)}
+            )
+            session.commit()
+            return jsonify({'success': True, 'message': 'Invoice deleted'}), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error handling invoice {invoice_id}: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# DELETE SINGLE ITEM
+# ============================================================================
+
+@invoice_bp.route('/invoices/<int:invoice_id>/items/<int:item_id>', methods=['DELETE'])
+@token_required
+@require_tenant
+def delete_invoice_item(invoice_id, item_id, tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        result = session.execute(
+            text("""
+                DELETE FROM "StreemLyne_MT"."Invoice_Details"
+                WHERE invoice_details_id = :iid AND invoice_id = :inv
+            """),
+            {'iid': item_id, 'inv': invoice_id}
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'Item not found'}), 404
+
+        new_total = calculate_invoice_total(session, invoice_id)
+        session.execute(
+            text("""
+                UPDATE "StreemLyne_MT"."Invoice_Master"
+                SET subtotal = :t, sub_total = :t, total_amount = :t,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE invoice_id = :id AND tenant_id = :tenant
+            """),
+            {'t': new_total, 'id': invoice_id, 'tenant': str(tenant_id)}
+        )
+        session.commit()
+        return jsonify({'success': True, 'new_total': new_total}), 200
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error deleting invoice item: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ============================================================================
+# PDF
+# ============================================================================
+
+@invoice_bp.route('/invoices/<int:invoice_id>/pdf', methods=['GET'])
+def download_invoice_pdf(invoice_id):
+    session = SessionLocal()
+    try:
+        row = session.execute(
+                text("""
+                    SELECT i.*, c.client_company_name, c.address AS client_address, c.client_phone
+                    FROM "StreemLyne_MT"."Invoice_Master" i
+                    INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
+                    WHERE i.invoice_id = :id
+                """),
+                {'id': invoice_id}
+            ).fetchone()
+
+        if not row:
+            return jsonify({'error': 'Invoice not found'}), 404
+
+        items = session.execute(
+            text("""
+                SELECT * FROM "StreemLyne_MT"."Invoice_Details"
+                WHERE invoice_id = :id ORDER BY invoice_details_id
+            """),
+            {'id': invoice_id}
+        ).fetchall()
+
+        FILL = (230, 230, 230)
+        col  = 95
+        pdf  = PDF('P', 'mm', 'A4')
+        pdf.doc_title = 'INVOICE'
+        pdf.alias_nb_pages()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=20)
+        lh = 6
+
+        for label, value in [
+            ('INVOICE NO:', row.invoice_number or 'N/A'),
+            ('DATE:',       row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'),
+            ('DUE DATE:',   row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'),
+        ]:
+            pdf.set_x(110)
+            pdf.set_fill_color(*FILL)
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(40, lh, label, 1, 0, 'L', 1)
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(40, lh, value, 1, 1, 'R', 0)
+        pdf.ln(5)
+
+        cust_name    = row.customer_name    or row.client_company_name or 'N/A'
+        cust_address = row.customer_address or row.client_address      or 'N/A'
+        cust_phone   = row.customer_phone   or row.client_phone        or 'N/A'
+
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell(col, lh, 'BILL TO:', 'T', 1, 'L')
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(0, lh, cust_name, 0, 1, 'L')
+        pdf.set_font('Arial', '', 10)
+        pdf.multi_cell(col, lh, cust_address, 0, 'L')
+        pdf.cell(0, lh, cust_phone, 0, 1, 'L')
+        pdf.ln(8)
+
+        headers = ['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY', 'UNIT PRICE', 'AMOUNT']
+        widths  = [22, 74, 22, 12, 30, 30]  # total = 190mm
+
+        pdf.set_fill_color(*FILL)
+        pdf.set_font('Arial', 'B', 9)
+        for h, w in zip(headers, widths):
+            pdf.cell(w, 8, h, 1, 0, 'C', 1)
+        pdf.ln()
+
+        pdf.set_font('Arial', '', 9)
+        for item in items:
+            name = item.item_name or item.service_name or ''
+            desc = item.description or ''
+            if not name and not desc and not (item.amount and float(item.amount) > 0):
+                continue
+
+            x0, y0 = pdf.get_x(), pdf.get_y()
+
+            # Draw border cells first (fixed height per row)
+            row_h = 8
+            pdf.set_xy(x0, y0)
+            pdf.cell(widths[0], row_h, name[:20],           1, 0, 'L')
+            pdf.cell(widths[1], row_h, '',                  1, 0, 'L')  # border only
+            pdf.cell(widths[2], row_h, item.color or '',    1, 0, 'C')
+            pdf.cell(widths[3], row_h, str(item.quantity or 1), 1, 0, 'C')
+            unit = float(item.unit_price or item.amount or 0)
+            pdf.cell(widths[4], row_h, f"£{unit:.2f}",     1, 0, 'R')
+            lt = float(item.amount or 0) * int(item.quantity or 1)
+            pdf.cell(widths[5], row_h, f"£{lt:.2f}",       1, 1, 'R')
+
+            # Write description text inside the border cell
+            pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            pdf.set_font('Arial', '', 8)
+            # Truncate long descriptions to fit in one row
+            desc_display = desc[:80] if len(desc) > 80 else desc
+            pdf.cell(widths[1] - 2, row_h - 2, desc_display, 0, 0, 'L')
+            pdf.set_font('Arial', '', 9)
+            pdf.set_xy(x0, y0 + row_h)
+
+        pdf.ln(5)
+        tx         = 105
+        subtotal   = float(row.subtotal   or row.sub_total  or 0)
+        vat_rate   = float(row.vat_rate   or 20)
+        vat_amount = float(row.vat_amount or row.vat        or 0)
+        total      = float(row.total_amount or 0)
+
+        for label, value in [
+            ('Subtotal:',               f"£{subtotal:.2f}"),
+            (f'VAT ({vat_rate:.0f}%):',  f"£{vat_amount:.2f}"),
+        ]:
+            pdf.set_x(tx)
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(50, lh, label, 0, 0, 'R')
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(35, lh, value, 0, 1, 'R')
+
+        pdf.set_x(tx)
+        pdf.set_fill_color(*FILL)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(50, 8, 'TOTAL DUE:', 'T', 0, 'R', 1)
+        pdf.cell(35, 8, f"£{total:.2f}", 'T', 1, 'R', 1)
+        pdf.ln(8)
+
+        pdf.set_font('Arial', 'B', 10)
+        pdf.multi_cell(col, 5, 'Payment by Bank Transfer:', 0, 'L')
+        pdf.set_font('Arial', '', 10)
+        pdf.multi_cell(col, 5,
+            'Acc Name: Aztec Interiors Leicester LTD | Bank: HSBC\n'
+            'Sort Code: 40-28-06 | Acc No: 43820343', 0, 'L')
+        pdf.set_font('Arial', 'I', 9)
+        pdf.multi_cell(0, 5, 'Please use your name and/or road name as reference.', 0, 'L')
+
+        out  = pdf.output(dest='S')
+        buf  = BytesIO(out)
+        name = f"Invoice_{row.invoice_number}_{(row.customer_name or 'Customer').replace(' ', '_')}.pdf"
+        return send_file(buf, mimetype='application/pdf', as_attachment=False, download_name=name)
+
+    except Exception as e:
+        current_app.logger.exception(f"Invoice PDF generation failed: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()

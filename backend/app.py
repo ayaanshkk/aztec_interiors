@@ -98,9 +98,14 @@ def create_app():
     from .routes.materials_routes import materials_bp
     from .routes.quotation_routes import quotation_bp
     from .routes.pricelist_routes import pricelist_bp
-    
+ 
+    # Split form routes
+    from .routes.checklist_routes import checklist_bp
+    from .routes.receipt_routes import receipt_bp
+    from .routes.invoice_routes import invoice_bp
+    from .routes.form_token_routes import form_token_bp
+ 
     # Existing routes
-    from .routes.form_routes import form_bp
     from .routes.customer_routes import customer_bp
     from .routes.appliance_routes import appliance_bp
     from .routes.file_routes import file_bp
@@ -108,10 +113,13 @@ def create_app():
     from .routes.tasks_routes import tasks_bp
     from .routes.calendar_routes import calendar_bp
     from .routes.action_items_routes import action_items_bp
-
+ 
     app.register_blueprint(auth_bp, url_prefix='/api')
     app.register_blueprint(invite_bp)
-    app.register_blueprint(form_bp, url_prefix='/api/form')
+    app.register_blueprint(checklist_bp,  url_prefix='/api/form')
+    app.register_blueprint(receipt_bp,    url_prefix='/api/form')
+    app.register_blueprint(invoice_bp,    url_prefix='/api/form')
+    app.register_blueprint(form_token_bp, url_prefix='/api/form')
     app.register_blueprint(customer_bp)
     app.register_blueprint(project_bp)
     app.register_blueprint(notification_bp, url_prefix='/api')

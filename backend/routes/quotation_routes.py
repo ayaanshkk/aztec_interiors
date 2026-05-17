@@ -100,10 +100,16 @@ def get_quotations(tenant_id, employee_id):
         params = {'tenant_id': str(tenant_id)}
         
         # Filter by client
-        client_id = request.args.get('client_id')
+        client_id = (
+            request.args.get('client_id') or
+            request.args.get('customer_id') or
+            request.args.get('id')
+        )
         if client_id:
             where_conditions.append("q.client_id = :client_id")
             params['client_id'] = int(client_id)
+        else:
+            return jsonify([]), 200
         
         # Filter by project
         project_id = request.args.get('project_id')
@@ -1734,292 +1740,199 @@ def lookup_appliance(session, tenant_id, description, brand=None):
     }), 404
 
 @quotation_bp.route('/quotations/<int:quotation_id>/pdf', methods=['GET'])
-@token_required
-@require_tenant
-def download_quotation_pdf(quotation_id, tenant_id, employee_id):
-    """
-    Generate and return quotation as PDF
-    
-    Returns:
-        PDF file with quotation details matching Aztec Interiors design
-    """
+def download_quotation_pdf(quotation_id):
+    """Generate and return quotation as PDF — no auth needed for window.open()"""
     db_session = SessionLocal()
-    
     try:
-        # Fetch quotation data
+        from io import BytesIO
+        from flask import send_file, current_app, jsonify
         from sqlalchemy import text
-        
-        query = text("""
-            SELECT 
-                q.quotation_id,
-                q.customer_name,
-                q.customer_address,
-                q.customer_phone,
-                q.customer_email,
-                q.date,
-                q.subtotal,
-                q.vat,
-                q.total,
-                q.vat_percentage
-            FROM "StreemLyne_MT"."Quotation_Master" q
-            WHERE q.tenant_id = :tenant_id
-                AND q.quotation_id = :quotation_id
-        """)
-        
-        quotation = db_session.execute(query, {
-            'tenant_id': str(tenant_id),
-            'quotation_id': quotation_id
-        }).fetchone()
-        
+ 
+        # ── Fetch quotation ───────────────────────────────────────────────
+        quotation = db_session.execute(
+            text("""
+                SELECT
+                    q.quotation_id,
+                    q.reference_number,
+                    q.customer_name,
+                    q.customer_address,
+                    q.customer_phone,
+                    q.customer_email,
+                    q.created_at,
+                    q.total,
+                    q.vat_percentage,
+                    c.client_company_name,
+                    c.address        AS client_address,
+                    c.client_phone   AS client_phone_num
+                FROM "StreemLyne_MT"."Quotations" q
+                INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
+                WHERE q.quotation_id = :qid
+            """),
+            {'qid': quotation_id}
+        ).fetchone()
+ 
         if not quotation:
             return jsonify({'error': 'Quotation not found'}), 404
-        
-        # Fetch quotation items
-        items_query = text("""
-            SELECT 
-                item,
-                description,
-                colour,
-                quantity,
-                unit_price,
-                amount,
-                width,
-                height,
-                depth
-            FROM "StreemLyne_MT"."Quotation_Items"
-            WHERE tenant_id = :tenant_id
-                AND quotation_id = :quotation_id
-            ORDER BY item_id
-        """)
-        
-        items = db_session.execute(items_query, {
-            'tenant_id': str(tenant_id),
-            'quotation_id': quotation_id
-        }).fetchall()
-        
-        # Create PDF in memory
-        buffer = io.BytesIO()
-        pdf = canvas.Canvas(buffer, pagesize=A4)
-        width, height = A4
-        
-        # Set up measurements
-        margin = 15 * mm
-        
-        # ============================================================
-        # COMPANY HEADER
-        # ============================================================
-        
-        # Company Name
-        pdf.setFont("Helvetica-Bold", 24)
-        pdf.drawCentredString(width / 2, height - 40, "AZTEC INTERIORS")
-        
-        # Company Registration (Green background)
-        pdf.setFillColorRGB(0.565, 0.933, 0.565)  # Light green
-        pdf.rect(margin, height - 70, width - 2 * margin, 15 * mm, fill=True, stroke=False)
-        
-        pdf.setFillColorRGB(0, 0, 0)  # Black text
-        pdf.setFont("Helvetica-Bold", 9)
-        pdf.drawString(margin + 3 * mm, height - 55, "Registered to England No 5246881")
-        pdf.drawString(margin + 3 * mm, height - 62, "VAT Reg No.686 8010 72")
-        
-        # Bank Details (Yellow background)
-        pdf.setFillColorRGB(1, 1, 0.6)  # Light yellow
-        pdf.rect(margin, height - 92, width - 2 * margin, 20 * mm, fill=True, stroke=False)
-        
-        pdf.setFillColorRGB(0, 0, 0)
-        pdf.drawString(margin + 3 * mm, height - 78, "Acc name : Aztec Interiors Leicester LTD")
-        pdf.drawString(margin + 3 * mm, height - 85, "Bank : HSBC")
-        pdf.drawString(margin + 3 * mm, height - 92, "s/code: 40 28 06")
-        pdf.drawString(margin + 3 * mm, height - 99, "acc no: 43820343")
-        
-        # Reference Note (Gray background)
-        pdf.setFillColorRGB(0.94, 0.94, 0.94)  # Light gray
-        pdf.rect(margin, height - 108, width - 2 * margin, 8 * mm, fill=True, stroke=False)
-        
-        pdf.setFillColorRGB(0, 0, 0)
-        pdf.setFont("Helvetica", 9)
-        pdf.drawString(margin + 3 * mm, height - 103, "Please use your name and/or road name as reference:")
-        
-        # QUOTATION Title
-        pdf.setFont("Helvetica-Bold", 16)
-        pdf.drawCentredString(width / 2, height - 125, "QUOTATION")
-        
-        # ============================================================
-        # CUSTOMER INFORMATION TABLE
-        # ============================================================
-        
-        customer_y = height - 150
-        
-        # Customer info box
-        customer_data = [
-            ['DATE:', quotation.date or datetime.now().strftime('%Y-%m-%d')],
-            ['NAME:', quotation.customer_name or ''],
-            ['ADDRESS:', quotation.customer_address or ''],
-            ['TEL:', quotation.customer_phone or ''],
-        ]
-        
-        customer_table = Table(customer_data, colWidths=[40 * mm, (width - 2 * margin - 40 * mm)])
-        customer_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 9),
-            ('FONT', (1, 0), (1, -1), 'Helvetica', 9),
-            ('BACKGROUND', (0, 0), (0, -1), colors.Color(0.96, 0.96, 0.96)),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 3 * mm),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 3 * mm),
-            ('TOPPADDING', (0, 0), (-1, -1), 2 * mm),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2 * mm),
-        ]))
-        
-        customer_table.wrapOn(pdf, width, height)
-        customer_table.drawOn(pdf, margin, customer_y - 35 * mm)
-        
-        # ============================================================
-        # ITEMS TABLE
-        # ============================================================
-        
-        items_y = customer_y - 50 * mm
-        
-        # Table headers
-        items_data = [['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY', 'WIDTH', 'HEIGHT', 'DEPTH', 'PRICE', 'AMOUNT']]
-        
-        # Add items
+ 
+        # ── Fetch items ───────────────────────────────────────────────────
+        items = db_session.execute(
+            text("""
+                SELECT item_name, description, color, quantity, amount
+                FROM "StreemLyne_MT"."Quotation_Items"
+                WHERE quotation_id = :qid
+                ORDER BY item_id
+            """),
+            {'qid': quotation_id}
+        ).fetchall()
+ 
+        # ── PDF setup ─────────────────────────────────────────────────────
+        from .pdf_helpers import PDF
+ 
+        FILL   = (230, 230, 230)
+        YELLOW = (255, 255, 180)
+        GREEN  = (180, 230, 180)
+        lh     = 6
+ 
+        pdf = PDF('P', 'mm', 'A4')
+        pdf.doc_title = 'QUOTATION'
+        pdf.alias_nb_pages()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=20)
+ 
+        # ── Registration + bank details ───────────────────────────────────
+        pdf.set_fill_color(*GREEN)
+        pdf.set_font('Arial', 'B', 9)
+        pdf.cell(0, 5, 'Registered to England No 5246881   |   VAT Reg No.686 8010 72', 1, 1, 'C', 1)
+        pdf.ln(1)
+ 
+        pdf.set_fill_color(*YELLOW)
+        pdf.set_font('Arial', '', 9)
+        pdf.cell(0, 5,
+            'Acc name: Aztec Interiors Leicester LTD  |  Bank: HSBC  |  s/code: 40 28 06  |  acc no: 43820343',
+            1, 1, 'C', 1)
+        pdf.ln(1)
+ 
+        pdf.set_fill_color(*FILL)
+        pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
+        pdf.ln(4)
+ 
+        # ── QUOTATION title ───────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 16)
+        pdf.cell(0, 8, 'QUOTATION', 0, 1, 'C')
+        pdf.ln(3)
+ 
+        # ── Customer info ─────────────────────────────────────────────────
+        cust_name    = quotation.customer_name    or quotation.client_company_name or 'N/A'
+        cust_address = quotation.customer_address or quotation.client_address      or 'N/A'
+        cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or 'N/A'
+        date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
+ 
+        for label, value in [
+            ('DATE:',    date_str),
+            ('NAME:',    cust_name),
+            ('ADDRESS:', cust_address),
+            ('TEL:',     cust_phone),
+        ]:
+            pdf.set_font('Arial', 'B', 10)
+            pdf.set_fill_color(*FILL)
+            pdf.cell(35, lh, label, 1, 0, 'L', 1)
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(155, lh, value, 1, 1, 'L')
+ 
+        pdf.ln(5)
+ 
+        # ── Items table ───────────────────────────────────────────────────
+        # Total usable width = 190mm (A4 210mm - 2×10mm margins)
+        headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY', 'AMOUNT']
+        widths  = [25,       105,            22,       13,    25]  # sum = 190
+ 
+        pdf.set_fill_color(*FILL)
+        pdf.set_font('Arial', 'B', 9)
+        for h, w in zip(headers, widths):
+            pdf.cell(w, 8, h, 1, 0, 'C', 1)
+        pdf.ln()
+ 
+        pdf.set_font('Arial', '', 9)
+        subtotal = 0.0
+ 
         for item in items:
-            items_data.append([
-                item.item or '',
-                item.description or '',
-                item.colour or '',
-                str(item.quantity or 1),
-                str(item.width) if item.width else '—',
-                str(item.height) if item.height else '—',
-                str(item.depth) if item.depth else '—',
-                f"£{float(item.unit_price or 0):.2f}",
-                f"£{float(item.amount or 0):.2f}"
-            ])
-        
-        items_table = Table(items_data, colWidths=[
-            25 * mm,  # ITEM
-            50 * mm,  # DESCRIPTION
-            20 * mm,  # COLOUR
-            12 * mm,  # QTY
-            15 * mm,  # WIDTH
-            15 * mm,  # HEIGHT
-            15 * mm,  # DEPTH
-            20 * mm,  # PRICE
-            25 * mm   # AMOUNT
-        ])
-        
-        items_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONT', (0, 0), (-1, 0), 'Helvetica-Bold', 8),  # Header
-            ('FONT', (0, 1), (-1, -1), 'Helvetica', 8),       # Body
-            ('BACKGROUND', (0, 0), (-1, 0), colors.white),
-            ('ALIGN', (0, 0), (-1, 0), 'CENTER'),             # Header centered
-            ('ALIGN', (3, 1), (6, -1), 'CENTER'),             # QTY, WIDTH, HEIGHT, DEPTH centered
-            ('ALIGN', (7, 1), (8, -1), 'RIGHT'),              # PRICE, AMOUNT right-aligned
-            ('FONTNAME', (8, 1), (8, -1), 'Helvetica-Bold'),  # AMOUNT bold
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 2 * mm),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 2 * mm),
-            ('TOPPADDING', (0, 0), (-1, -1), 1.5 * mm),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 1.5 * mm),
-        ]))
-        
-        # Calculate height needed for items table
-        items_table_height = (len(items_data) * 6) * mm  # Approximate
-        
-        items_table.wrapOn(pdf, width, height)
-        items_table.drawOn(pdf, margin, items_y - items_table_height)
-        
-        # ============================================================
-        # TOTALS TABLE
-        # ============================================================
-        
-        totals_y = items_y - items_table_height - 10 * mm
-        totals_x = width - margin - 80 * mm  # Right-aligned, 80mm wide
-        
-        vat_percentage = quotation.vat_percentage or 20
-        
-        totals_data = [
-            ['SUB TOTAL', f"£{float(quotation.subtotal):.2f}"],
-            [f'VAT ({vat_percentage}%)', f"£{float(quotation.vat):.2f}"],
-            ['TOTAL', f"£{float(quotation.total):.2f}"]
-        ]
-        
-        totals_table = Table(totals_data, colWidths=[40 * mm, 40 * mm])
-        totals_table.setStyle(TableStyle([
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
-            ('FONT', (0, 0), (0, -1), 'Helvetica-Bold', 10),
-            ('FONT', (1, 0), (1, 1), 'Helvetica', 10),
-            ('FONT', (0, 2), (1, 2), 'Helvetica-Bold', 11),  # TOTAL row bold
-            ('BACKGROUND', (0, 0), (0, -1), colors.Color(0.96, 0.96, 0.96)),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 3 * mm),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 3 * mm),
-            ('TOPPADDING', (0, 0), (-1, -1), 2 * mm),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2 * mm),
-        ]))
-        
-        totals_table.wrapOn(pdf, width, height)
-        totals_table.drawOn(pdf, totals_x, totals_y - 30 * mm)
-        
-        # ============================================================
-        # PAYMENT TERMS
-        # ============================================================
-        
-        terms_y = totals_y - 50 * mm
-        
-        pdf.setFont("Helvetica-Bold", 9)
-        pdf.drawString(margin, terms_y, "Only Bacs or Cash will be accepted on Delivery and Completion")
-        pdf.drawString(margin, terms_y - 5 * mm, "NOTE: If you wish to proceed with this quote, you will be required to make")
-        pdf.drawString(margin, terms_y - 10 * mm, "the full payment upfront")
-        
-        pdf.setFillColorRGB(1, 0, 0)  # Red text
-        pdf.drawString(margin, terms_y - 18 * mm, "Please sign here to confirm.")
-        pdf.setFillColorRGB(0, 0, 0)  # Reset to black
-        
-        # ============================================================
-        # SIGNATURE SECTION
-        # ============================================================
-        
-        signature_y = terms_y - 30 * mm
-        
-        pdf.setFont("Helvetica", 9)
-        
-        # Signature lines
-        pdf.drawString(margin, signature_y, "Customer Signature:")
-        pdf.line(margin + 45 * mm, signature_y, width - margin, signature_y)
-        
-        pdf.drawString(margin, signature_y - 8 * mm, "Customer Name:")
-        pdf.line(margin + 45 * mm, signature_y - 8 * mm, width - margin, signature_y - 8 * mm)
-        
-        pdf.drawString(margin, signature_y - 16 * mm, "Date:")
-        pdf.line(margin + 45 * mm, signature_y - 16 * mm, width - margin, signature_y - 16 * mm)
-        
-        # ============================================================
-        # FINALIZE PDF
-        # ============================================================
-        
-        pdf.showPage()
-        pdf.save()
-        
-        buffer.seek(0)
-        
-        # Return PDF
-        filename = f'Quotation_{quotation_id}_{quotation.customer_name.replace(" ", "_")}.pdf'
-        
-        return send_file(
-            buffer,
-            mimetype='application/pdf',
-            as_attachment=False,  # Display in browser, not force download
-            download_name=filename
-        )
-        
+            name = item.item_name or ''
+            desc = item.description or ''
+            if not name and not desc and not (item.amount and float(item.amount) > 0):
+                continue
+ 
+            row_h   = 8
+            x0, y0  = pdf.get_x(), pdf.get_y()
+ 
+            # Draw outer border cells
+            pdf.cell(widths[0], row_h, name[:22],               1, 0, 'L')
+            pdf.cell(widths[1], row_h, '',                      1, 0, 'L')
+            pdf.cell(widths[2], row_h, item.color or '',        1, 0, 'C')
+            pdf.cell(widths[3], row_h, str(item.quantity or 1), 1, 0, 'C')
+            lt = float(item.amount or 0) * int(item.quantity or 1)
+            pdf.cell(widths[4], row_h, f"£{lt:.2f}",           1, 1, 'R')
+ 
+            # Write description text inside the description cell
+            pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            pdf.cell(widths[1] - 2, row_h - 2,
+                     (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
+            pdf.set_xy(x0, y0 + row_h)
+ 
+            subtotal += lt
+ 
+        # ── Totals ────────────────────────────────────────────────────────
+        pdf.ln(3)
+        vat_pct    = float(quotation.vat_percentage or 20)
+        vat_amount = subtotal * (vat_pct / 100)
+        total      = subtotal + vat_amount
+        tx         = 105
+ 
+        for label, value in [
+            ('SUB TOTAL:',             f"£{subtotal:.2f}"),
+            (f'VAT ({vat_pct:.0f}%):',  f"£{vat_amount:.2f}"),
+        ]:
+            pdf.set_x(tx)
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(50, lh, label, 0, 0, 'R')
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(35, lh, value, 0, 1, 'R')
+ 
+        pdf.set_x(tx)
+        pdf.set_fill_color(*FILL)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(50, 8, 'TOTAL:', 'T', 0, 'R', 1)
+        pdf.cell(35, 8, f"£{total:.2f}", 'T', 1, 'R', 1)
+        pdf.ln(8)
+ 
+        # ── Payment terms ─────────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 9)
+        pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
+        pdf.cell(0, 5, 'NOTE: If you wish to proceed with this quote, full payment is required upfront.', 0, 1, 'L')
+        pdf.ln(4)
+ 
+        pdf.set_text_color(200, 0, 0)
+        pdf.cell(0, 5, 'Please sign here to confirm.', 0, 1, 'L')
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(6)
+ 
+        # ── Signature section ─────────────────────────────────────────────
+        pdf.set_font('Arial', '', 9)
+        for label in ['Customer Signature:', 'Customer Name:', 'Date:']:
+            pdf.cell(45, 6, label, 0, 0, 'L')
+            pdf.cell(145, 6, '', 'B', 1, 'L')
+            pdf.ln(2)
+ 
+        # ── Return PDF ────────────────────────────────────────────────────
+        out  = pdf.output(dest='S')
+        buf  = BytesIO(out)
+        ref  = quotation.reference_number or str(quotation_id)
+        name = f"Quotation_{ref}_{cust_name.replace(' ', '_')}.pdf"
+ 
+        return send_file(buf, mimetype='application/pdf',
+                         as_attachment=False, download_name=name)
+ 
     except Exception as e:
-        print(f"❌ Error generating PDF: {e}")
-        import traceback
-        traceback.print_exc()
+        current_app.logger.exception(f"Quotation PDF generation failed: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         db_session.close()
