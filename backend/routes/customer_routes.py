@@ -689,89 +689,81 @@ def get_customer_projects(tenant_id, employee_id, customer_id):  # ✅ FIXED par
 @token_required
 @require_tenant
 def create_project(tenant_id, employee_id, customer_id):
-    """Create a new project for a customer"""
     session = SessionLocal()
     try:
         data = request.get_json()
-        
+
         if not data.get('project_title'):
             return jsonify({'error': 'project_title is required'}), 400
-        
-        # Verify client exists
-        client_query = text("""
-            SELECT client_id, client_company_name, address 
-            FROM "StreemLyne_MT"."Client_Master"
-            WHERE client_id = :client_id AND tenant_id = :tenant_id
-        """)
-        client = session.execute(client_query, {
-            'client_id': customer_id,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
+
+        client = session.execute(
+            text("""
+                SELECT client_id FROM "StreemLyne_MT"."Client_Master"
+                WHERE client_id = :client_id AND tenant_id = :tenant_id
+            """),
+            {'client_id': customer_id, 'tenant_id': str(tenant_id)}
+        ).fetchone()
+
         if not client:
             return jsonify({'error': 'Client not found'}), 404
-        
-        # Generate display ID
+
         from .project_routes import generate_project_reference
-        display_id = generate_project_reference(session, tenant_id)
-        
-        # ✅ Get stage_id from request (frontend now sends this)
+        display_id = generate_project_reference(session, tenant_id)  # integer e.g. 41
+
         stage_id = data.get('stage_id')
-        
-        # ✅ Validate stage_id if provided
         if stage_id:
-            stage_check = text("""
-                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
-                WHERE stage_id = :stage_id AND stage_type = 4
-            """)
-            stage_exists = session.execute(stage_check, {'stage_id': int(stage_id)}).fetchone()
+            stage_exists = session.execute(
+                text("""
+                    SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
+                    WHERE stage_id = :stage_id AND stage_type = 4
+                """),
+                {'stage_id': int(stage_id)}
+            ).fetchone()
             if not stage_exists:
                 return jsonify({'error': f'Invalid stage_id: {stage_id}'}), 400
-        
-        insert_query = text("""
-            INSERT INTO "StreemLyne_MT"."Project_Details"
-            (tenant_id, client_id, display_id, project_title, project_type, 
-             project_description, status, stage_id, date_of_measure,
-             assigned_employee_id, employee_id, notes)
-            VALUES (:tenant_id, :client_id, :display_id, :title, :project_type,
-                    :description, :status, :stage_id, :date_of_measure,
-                    :assigned_to, :employee_id, :notes)
-            RETURNING project_id
-        """)
-        
-        result = session.execute(insert_query, {
-            'tenant_id': str(tenant_id),
-            'client_id': customer_id,
-            'display_id': display_id,
-            'title': data['project_title'],
-            'project_type': data.get('project_type'),  # ✅ Kitchen, Bedroom, etc.
-            'description': data.get('project_description', ''),
-            'status': 'Active',
-            'stage_id': stage_id,  # ✅ Integer stage_id
-            'date_of_measure': data.get('date_of_measure'),
-            'assigned_to': employee_id,
-            'employee_id': employee_id,
-            'notes': data.get('notes', '')
-        })
-        
+
+        result = session.execute(
+            text("""
+                INSERT INTO "StreemLyne_MT"."Project_Details"
+                (tenant_id, client_id, display_id, project_title, project_type,
+                 project_description, status, stage_id, date_of_measure,
+                 assigned_employee_id, employee_id, notes)
+                VALUES (:tenant_id, :client_id, :display_id, :title, :project_type,
+                        :description, :status, :stage_id, :date_of_measure,
+                        :assigned_to, :employee_id, :notes)
+                RETURNING project_id
+            """),
+            {
+                'tenant_id':       str(tenant_id),
+                'client_id':       customer_id,
+                'display_id':      display_id,       # integer — DB accepts this
+                'title':           data['project_title'],
+                'project_type':    data.get('project_type'),
+                'description':     data.get('project_description', ''),
+                'status':          'Active',
+                'stage_id':        stage_id,
+                'date_of_measure': data.get('date_of_measure'),
+                'assigned_to':     employee_id,
+                'employee_id':     employee_id,
+                'notes':           data.get('notes', '')
+            }
+        )
+
         project_id = result.fetchone().project_id
         session.commit()
-        
-        current_app.logger.info(
-            f"✅ Project created: {display_id} | "
-            f"Type: {data.get('project_type')} | "
-            f"Stage ID: {stage_id}"
-        )
-        
+
+        display_ref = f"PRJ-{display_id:03d}"   # PRJ-041 — only for display
+        current_app.logger.info(f"Project created: {display_ref} | Type: {data.get('project_type')} | Stage: {stage_id}")
+
         return jsonify({
             'success': True,
             'message': 'Project created successfully',
             'project': {
-                'id': project_id,
-                'display_id': display_id
+                'id':         project_id,
+                'display_id': display_ref,   # frontend gets "PRJ-041"
             }
         }), 201
-        
+
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error creating project: {e}")

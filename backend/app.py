@@ -113,6 +113,7 @@ def create_app():
     from .routes.tasks_routes import tasks_bp
     from .routes.calendar_routes import calendar_bp
     from .routes.action_items_routes import action_items_bp
+    from .routes.payment_terms_routes import payment_terms_bp
  
     app.register_blueprint(auth_bp, url_prefix='/api')
     app.register_blueprint(invite_bp)
@@ -132,6 +133,7 @@ def create_app():
     app.register_blueprint(action_items_bp, url_prefix='/api')
     app.register_blueprint(quotation_bp)
     app.register_blueprint(pricelist_bp, url_prefix='/api')
+    app.register_blueprint(payment_terms_bp, url_prefix='/api/form')
 
     # ============================================
     # HEALTH CHECK

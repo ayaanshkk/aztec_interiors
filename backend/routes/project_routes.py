@@ -9,35 +9,16 @@ project_bp = Blueprint('projects', __name__)
 
 
 def generate_project_reference(session, tenant_id):
-    """Generate sequential project reference like PRJ-001"""
-    count_query = text("""
-        SELECT COUNT(*) as count FROM "StreemLyne_MT"."Project_Details"
-        WHERE tenant_id = :tenant_id
-    """)
-    
-    result = session.execute(count_query, {'tenant_id': str(tenant_id)}).fetchone()
-    project_count = result.count if result else 0
-    
-    reference_number = project_count + 1
-    project_reference = f"PRJ-{reference_number:03d}"
-    
-    # Ensure uniqueness
-    while True:
-        check_query = text("""
-            SELECT display_id FROM "StreemLyne_MT"."Project_Details"
-            WHERE display_id = :ref AND tenant_id = :tenant_id
-        """)
-        exists = session.execute(check_query, {
-            'ref': project_reference,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
-        if not exists:
-            break
-        reference_number += 1
-        project_reference = f"PRJ-{reference_number:03d}"
-    
-    return project_reference
+    """Returns next integer display_id. DB column is INTEGER — no PRJ- string stored."""
+    result = session.execute(
+        text("""
+            SELECT COALESCE(MAX(display_id), 0) as max_id
+            FROM "StreemLyne_MT"."Project_Details"
+            WHERE tenant_id = :tenant_id
+        """),
+        {'tenant_id': str(tenant_id)}
+    ).fetchone()
+    return int(result.max_id or 0) + 1
 
 
 @project_bp.route('/projects/<int:project_id>', methods=['GET'])

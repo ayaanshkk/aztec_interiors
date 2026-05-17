@@ -12,7 +12,7 @@ class PDF(FPDF):
         self.set_font('Arial', 'B', 16)
         self.cell(0, 10, 'AZTEC INTERIORS LEICESTER LTD', 0, 1, 'C')
         self.set_font('Arial', '', 10)
-        self.cell(0, 5, '20 Victoria Road East, Leicester, LE5 5FD', 0, 1, 'C')
+        self.cell(0, 5, '127 Barkby Rd, Leicester LE4 9LG', 0, 1, 'C')
         self.cell(0, 5, 'Tel: 0116 2761866 | Email: aztecinteriors@hotmail.co.uk', 0, 1, 'C')
         self.ln(5)
 
