@@ -220,12 +220,15 @@ def create_project(tenant_id, employee_id):
         
         # ✅ ADDED: Validate stage_id if provided
         if stage_id:
-            stage_check = text("""
-                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
-                WHERE stage_id = :stage_id AND stage_type = 4
-            """)
-            stage_exists = session.execute(stage_check, {'stage_id': int(stage_id)}).fetchone()
-            if not stage_exists:
+            stage_row = session.execute(
+                text("""
+                    SELECT stage_id, stage_name
+                    FROM "StreemLyne_MT"."Stage_Master"
+                    WHERE stage_id = :stage_id
+                """),
+                {'stage_id': int(stage_id)}
+            ).fetchone()
+            if not stage_row:
                 return jsonify({'error': f'Invalid stage_id: {stage_id}'}), 400
         
         insert_query = text("""

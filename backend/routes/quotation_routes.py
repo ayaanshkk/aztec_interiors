@@ -254,7 +254,7 @@ def create_quotation(tenant_id, employee_id):
                 'needs_manual': item.get('needs_manual_pricing', False),
                 'pricelist_id': item.get('price_list_item_id'),
                 'discount_percent': item.get('discount_percent', 0),
-                'discounted_amount': item.get('discounted_amount', item.get('amount', 0))
+                'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * int(item.get('quantity', 1)))
             })
         
         session.commit()
@@ -383,7 +383,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
                 'description': item['description'],
                 'color': item.get('colour'),
                 'quantity': item.get('qty', 1),
-                'amount': item.get('price', 0),
+                'amount': item.get('amount', 0),
                 'width': item.get('width'),
                 'height': item.get('height'),
                 'depth': item.get('depth'),

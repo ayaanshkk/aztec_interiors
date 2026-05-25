@@ -443,106 +443,90 @@ def update_customer_stage(tenant_id, employee_id, customer_id):
     try:
         data = request.get_json()
         new_stage = data.get('stage')
-        
+ 
         if not new_stage:
             return jsonify({'error': 'Stage is required'}), 400
-        
-        # ✅ GET CUSTOMER INFO FIRST (before updating)
-        customer_query = text("""
-            SELECT client_company_name, stage FROM "StreemLyne_MT"."Client_Master"
-            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
-        """)
-        
-        customer_result = session.execute(customer_query, {
-            'client_id': customer_id,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
+ 
+        # Get customer info
+        customer_result = session.execute(
+            text("""
+                SELECT client_company_name, stage FROM "StreemLyne_MT"."Client_Master"
+                WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
+            """),
+            {'client_id': customer_id, 'tenant_id': str(tenant_id)}
+        ).fetchone()
+ 
         if not customer_result:
             return jsonify({'error': 'Customer not found'}), 404
-        
+ 
         customer_name = customer_result.client_company_name or f'Customer {customer_id}'
-        old_stage = customer_result.stage or 'Lead'
-        
-        # ✅ GET EMPLOYEE NAME
-        employee_query = text("""
-            SELECT employee_name FROM "StreemLyne_MT"."Employee_Master"
-            WHERE employee_id = :employee_id AND tenant_id = :tenant_id
-        """)
-        
-        employee_result = session.execute(employee_query, {
-            'employee_id': employee_id,
-            'tenant_id': str(tenant_id)
-        }).fetchone()
-        
+        old_stage     = customer_result.stage or 'Lead'
+ 
+        # Get employee name
+        employee_result = session.execute(
+            text("""
+                SELECT employee_name FROM "StreemLyne_MT"."Employee_Master"
+                WHERE employee_id = :employee_id AND tenant_id = :tenant_id
+            """),
+            {'employee_id': employee_id, 'tenant_id': str(tenant_id)}
+        ).fetchone()
         employee_name = employee_result.employee_name if employee_result else 'Team Member'
-        
-        # Update client stage
-        update_query = text("""
-            UPDATE "StreemLyne_MT"."Client_Master"
-            SET stage = :stage
-            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
-        """)
-        
-        session.execute(update_query, {
-            'stage': new_stage,
-            'client_id': customer_id,
-            'tenant_id': str(tenant_id)
-        })
-        
-        # ✅ Also update the latest project's stage if exists
-        project_update_query = text("""
-            UPDATE "StreemLyne_MT"."Project_Details"
-            SET stage_id = (
-                SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
-                WHERE stage_name = :stage AND stage_type = 4
-                LIMIT 1
-            )
-            WHERE client_id = :client_id 
-              AND tenant_id = :tenant_id
-              AND project_id = (
-                  SELECT project_id FROM "StreemLyne_MT"."Project_Details"
-                  WHERE client_id = :client_id AND tenant_id = :tenant_id
-                  ORDER BY created_at DESC
-                  LIMIT 1
-              )
-        """)
-        
-        session.execute(project_update_query, {
-            'stage': new_stage,
-            'client_id': customer_id,
-            'tenant_id': str(tenant_id)
-        })
-        
+ 
+        # Update Client_Master stage
+        session.execute(
+            text("""
+                UPDATE "StreemLyne_MT"."Client_Master"
+                SET stage = :stage
+                WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
+            """),
+            {'stage': new_stage, 'client_id': customer_id, 'tenant_id': str(tenant_id)}
+        )
+ 
+        # Update the latest project's stage_id — no stage_type filter,
+        # just match by name so whatever is selected in the dropdown is used
+        session.execute(
+            text("""
+                UPDATE "StreemLyne_MT"."Project_Details"
+                SET stage_id = (
+                    SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
+                    WHERE stage_name = :stage
+                    ORDER BY stage_id ASC
+                    LIMIT 1
+                )
+                WHERE client_id = :client_id
+                  AND tenant_id = :tenant_id
+                  AND project_id = (
+                      SELECT project_id FROM "StreemLyne_MT"."Project_Details"
+                      WHERE client_id = :client_id AND tenant_id = :tenant_id
+                      ORDER BY created_at DESC
+                      LIMIT 1
+                  )
+            """),
+            {'stage': new_stage, 'client_id': customer_id, 'tenant_id': str(tenant_id)}
+        )
+ 
         session.commit()
-        
-        # ✅ CREATE CLEAN NOTIFICATION with all context
+ 
+        # Create notification
         try:
-            message = f"🔄 {customer_name} moved from {old_stage} to {new_stage}"
-            message += f"\n👤 Updated by: {employee_name}"
-            
-            notification_query = text("""
-                INSERT INTO "StreemLyne_MT"."Notification_Master"
-                (tenant_id, client_id, notification_type, priority, message, read, dismissed)
-                VALUES (:tenant_id, :client_id, 'stage_change', 'medium', :message, false, false)
-            """)
-            
-            session.execute(notification_query, {
-                'tenant_id': str(tenant_id),
-                'client_id': customer_id,
-                'message': message
-            })
+            message = f"Stage change: {customer_name} moved from {old_stage} to {new_stage}"
+            message += f"\nUpdated by: {employee_name}"
+ 
+            session.execute(
+                text("""
+                    INSERT INTO "StreemLyne_MT"."Notification_Master"
+                    (tenant_id, client_id, notification_type, priority, message, read, dismissed)
+                    VALUES (:tenant_id, :client_id, 'stage_change', 'medium', :message, false, false)
+                """),
+                {'tenant_id': str(tenant_id), 'client_id': customer_id, 'message': message}
+            )
             session.commit()
-            
-            current_app.logger.info(f"✅ Stage notification: {message}")
+            current_app.logger.info(f"Stage notification created: {message}")
         except Exception as notif_error:
             current_app.logger.warning(f"Failed to create notification: {notif_error}")
-        
-        return jsonify({
-            'success': True,
-            'new_stage': new_stage
-        }), 200
-        
+ 
+        return jsonify({'success': True, 'new_stage': new_stage}), 200
+ 
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error updating customer stage: {e}")
@@ -692,10 +676,10 @@ def create_project(tenant_id, employee_id, customer_id):
     session = SessionLocal()
     try:
         data = request.get_json()
-
+ 
         if not data.get('project_title'):
             return jsonify({'error': 'project_title is required'}), 400
-
+ 
         client = session.execute(
             text("""
                 SELECT client_id FROM "StreemLyne_MT"."Client_Master"
@@ -703,25 +687,49 @@ def create_project(tenant_id, employee_id, customer_id):
             """),
             {'client_id': customer_id, 'tenant_id': str(tenant_id)}
         ).fetchone()
-
+ 
         if not client:
             return jsonify({'error': 'Client not found'}), 404
-
+ 
         from .project_routes import generate_project_reference
-        display_id = generate_project_reference(session, tenant_id)  # integer e.g. 41
-
-        stage_id = data.get('stage_id')
+        display_id = generate_project_reference(session, tenant_id)  # integer
+ 
+        # ── Resolve stage — accept stage_name (string) or stage_id (int) ──
+        stage_id   = data.get('stage_id')
+        stage_name = data.get('stage_name') or data.get('stage')
+ 
         if stage_id:
-            stage_exists = session.execute(
-                text("""
-                    SELECT stage_id FROM "StreemLyne_MT"."Stage_Master"
-                    WHERE stage_id = :stage_id AND stage_type = 4
-                """),
-                {'stage_id': int(stage_id)}
+            # Caller sent numeric stage_id — look up the name
+            row = session.execute(
+                text('SELECT stage_id, stage_name FROM "StreemLyne_MT"."Stage_Master" WHERE stage_id = :id'),
+                {'id': int(stage_id)}
             ).fetchone()
-            if not stage_exists:
+            if row:
+                stage_name = row.stage_name
+            else:
                 return jsonify({'error': f'Invalid stage_id: {stage_id}'}), 400
-
+ 
+        elif stage_name:
+            # Caller sent stage name — look up the id (prefer stage_type=4)
+            row = session.execute(
+                text("""
+                    SELECT stage_id, stage_name FROM "StreemLyne_MT"."Stage_Master"
+                    WHERE stage_name = :name
+                    ORDER BY CASE WHEN stage_type = 4 THEN 0 ELSE 1 END, stage_id ASC
+                    LIMIT 1
+                """),
+                {'name': stage_name}
+            ).fetchone()
+            if row:
+                stage_id   = row.stage_id
+                stage_name = row.stage_name
+            else:
+                stage_id, stage_name = 100, 'Survey'  # fallback
+ 
+        else:
+            stage_id, stage_name = 100, 'Survey'  # default
+ 
+        # ── Insert project ────────────────────────────────────────────────
         result = session.execute(
             text("""
                 INSERT INTO "StreemLyne_MT"."Project_Details"
@@ -736,7 +744,7 @@ def create_project(tenant_id, employee_id, customer_id):
             {
                 'tenant_id':       str(tenant_id),
                 'client_id':       customer_id,
-                'display_id':      display_id,       # integer — DB accepts this
+                'display_id':      display_id,
                 'title':           data['project_title'],
                 'project_type':    data.get('project_type'),
                 'description':     data.get('project_description', ''),
@@ -748,22 +756,28 @@ def create_project(tenant_id, employee_id, customer_id):
                 'notes':           data.get('notes', '')
             }
         )
-
         project_id = result.fetchone().project_id
+ 
+        # Sync stage name to Client_Master so sales pipeline shows it
+        session.execute(
+            text("""
+                UPDATE "StreemLyne_MT"."Client_Master"
+                SET stage = :stage WHERE client_id = :cid AND tenant_id = :tid
+            """),
+            {'stage': stage_name, 'cid': customer_id, 'tid': str(tenant_id)}
+        )
+ 
         session.commit()
-
-        display_ref = f"PRJ-{display_id:03d}"   # PRJ-041 — only for display
-        current_app.logger.info(f"Project created: {display_ref} | Type: {data.get('project_type')} | Stage: {stage_id}")
-
+ 
+        display_ref = f"PRJ-{display_id:03d}"
+        current_app.logger.info(f"Project created: {display_ref} | Type: {data.get('project_type')} | Stage: {stage_name} ({stage_id})")
+ 
         return jsonify({
             'success': True,
             'message': 'Project created successfully',
-            'project': {
-                'id':         project_id,
-                'display_id': display_ref,   # frontend gets "PRJ-041"
-            }
+            'project': {'id': project_id, 'display_id': display_ref, 'stage': stage_name, 'stage_id': stage_id}
         }), 201
-
+ 
     except Exception as e:
         session.rollback()
         current_app.logger.error(f"Error creating project: {e}")
