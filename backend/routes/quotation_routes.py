@@ -1487,18 +1487,15 @@ def auto_price_lookup(tenant_id, employee_id):
             # If suffix specified, use that door type
             if component_door_type:
                 target_door_type = component_door_type
-            elif door_type:
-                # Map dropdown door type
+            else:
                 DOOR_TYPE_MAP = {
                     'basic slab': 'Basic Slab',
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
                 }
-                target_door_type = DOOR_TYPE_MAP.get(door_type.lower(), door_type)
-            else:
-                # Default to Basic Slab if nothing specified
-                target_door_type = 'Basic Slab'
+                # Map door_type, default to Basic Slab for anything not in map (e.g. 'Carcass Only')
+                target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
             
             price_row = next((r for r in results if r.door_type == target_door_type), None)
             
