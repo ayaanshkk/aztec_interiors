@@ -1357,10 +1357,11 @@ def auto_price_lookup(tenant_id, employee_id):
     db_session = SessionLocal()
     try:
         data = request.get_json()
-        description = data.get('description', '').strip().upper()  # Auto-uppercase
+        description = data.get('description', '').strip().upper()
         door_type = data.get('door_type', '').strip()
         room_type = data.get('room_type', 'Kitchen').strip()
         brand = data.get('brand', '').strip()
+        current_items = data.get('current_items', [])
         
         print(f"🔍 Smart lookup: description='{description}', door_type='{door_type}', room_type='{room_type}'")
         
@@ -1442,6 +1443,117 @@ def auto_price_lookup(tenant_id, employee_id):
         item_name = first_result.item_name
         
         print(f"✅ Found {len(results)} rows for '{item_code}' in category '{category}'")
+
+        # ========================================================================
+        # FITTINGS - Quantity calculated from current quote items
+        # ========================================================================
+
+        if category == 'Fittings':
+            print(f"   🔧 Fittings category lookup")
+
+            price_row = next((r for r in results if r.door_type == 'Standard'), None)
+            if not price_row or not price_row.base_price:
+                return jsonify({'found': False, 'error': f'No price found for {item_code}'}), 404
+
+            unit_price = float(price_row.base_price)
+            calculated_qty = 1  # default
+
+            # ── Quantity mapping rules ──────────────────────────────────
+            if current_items:
+                code_upper = item_code.upper()
+                import re as _re
+
+                # Code patterns
+                robe_pattern = _re.compile(r'^\d+R(C|DCNR)?$')           # 100R, 120RC, 90RDCNR
+                appliance_pattern = _re.compile(r'^[A-Z]{2,}\d{2,}[A-Z0-9]{2,}$')  # PUG61RAA5B, T36FBE1L0G
+                kitchen_pattern = _re.compile(r'^\d+[BWLDTQ](\d+)?$')    # 30B, 40W, 100L, 50D
+
+                if code_upper == 'APPL':
+                    import re as _re
+                    # Matches appliance codes: mix of letters and numbers, 6+ chars
+                    # e.g. PUG61RAA5B, T36FBE1L0G, EU611BEB5B
+                    appliance_model_pattern = _re.compile(r'^[A-Z0-9]{6,}$', _re.IGNORECASE)
+                    # Must contain both letters and digits to distinguish from pure codes like 100R
+                    def is_appliance_code(code):
+                        code = code.strip().upper()
+                        return (
+                            bool(appliance_model_pattern.match(code))
+                            and any(c.isalpha() for c in code)
+                            and any(c.isdigit() for c in code)
+                            and not _re.match(r'^\d+R(C|DCNR)?$', code)  # exclude robe codes
+                        )
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if is_appliance_code(i.get('item') or i.get('item_name') or '')
+                        or 'appliance' in (i.get('description') or '').lower()
+                    )
+
+                elif code_upper == 'ROBE':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if robe_pattern.match((i.get('item') or '').strip().upper())
+                        or 'robe' in (i.get('description') or '').lower()
+                        or 'rode' in (i.get('description') or '').lower()
+                    )
+
+                elif code_upper == 'KUNIT':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if kitchen_pattern.match((i.get('item') or '').strip().upper())
+                    )
+
+                elif code_upper == 'BUNIT':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if robe_pattern.match((i.get('item') or '').strip().upper())
+                        or 'robe' in (i.get('description') or '').lower()
+                        or 'rode' in (i.get('description') or '').lower()
+                        or 'bedroom' in (i.get('description') or '').lower()
+                    )
+
+                elif code_upper == 'SINKTAP':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if 'sink' in (i.get('description') or '').lower()
+                        or (i.get('item') or '').strip().upper() == 'SINK'
+                    )
+
+                elif code_upper == 'WTJT':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if 'worktop' in (i.get('description') or '').lower()
+                    )
+
+                elif code_upper == 'FITDR':
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if 'door' in (i.get('description') or '').lower()
+                    )
+
+                if calculated_qty <= 0:
+                    calculated_qty = 1
+
+            print(f"   💰 Fitting: {item_name} — qty={calculated_qty}, unit=£{unit_price:.2f}, total=£{unit_price * calculated_qty:.2f}")
+
+            return jsonify({
+                'found': True,
+                'price': unit_price,
+                'quantity': calculated_qty,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': price_row.item_description or item_name,
+                'door_type': 'Standard',
+                'category': category,
+                'pricelist_id': price_row.pricelist_id,
+                'is_fitting': True
+            }), 200
         
         # ========================================================================
         # ACCESSORIES & HANDLES - Single price, no door types
