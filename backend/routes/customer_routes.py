@@ -766,10 +766,21 @@ def create_project(tenant_id, employee_id, customer_id):
         session.execute(
             text("""
                 UPDATE "StreemLyne_MT"."Client_Master"
-                SET stage = :stage WHERE client_id = :cid AND tenant_id = :tid
+                SET stage = :stage 
+                WHERE client_id = :cid AND tenant_id = :tid
             """),
             {'stage': stage_name, 'cid': customer_id, 'tid': str(tenant_id)}
         )
+
+        if data.get('visit_date'):
+            session.execute(
+                text("""
+                    UPDATE "StreemLyne_MT"."Client_Master"
+                    SET visit_date = :visit_date
+                    WHERE client_id = :cid AND tenant_id = :tid
+                """),
+                {'visit_date': data['visit_date'], 'cid': customer_id, 'tid': str(tenant_id)}
+            )
  
         session.commit()
  
