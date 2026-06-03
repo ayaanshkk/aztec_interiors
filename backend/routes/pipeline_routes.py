@@ -35,6 +35,7 @@ def get_pipeline_data(tenant_id, employee_id):
                     c.is_allocated,
                     c.is_cleansed,
                     c.created_at,
+                    c.visit_date,
                     c.project_types,
                     -- Aggregate project data
                     json_agg(DISTINCT jsonb_build_object(
@@ -98,7 +99,8 @@ def get_pipeline_data(tenant_id, employee_id):
                             'contact_name': row.client_contact_name,
                             'phone': row.client_phone,
                             'email': row.client_email,
-                            'created_at': row.created_at.isoformat() if row.created_at else None
+                            'visit_date': row.visit_date.isoformat() if row.visit_date else None,
+                            'created_at': row.created_at.isoformat() if row.created_at else None,
                         },
                         'project': {
                             'id': project['project_id'],
@@ -126,7 +128,8 @@ def get_pipeline_data(tenant_id, employee_id):
                             'contact_name': row.client_contact_name,
                             'phone': row.client_phone,
                             'email': row.client_email,
-                            'created_at': row.created_at.isoformat() if row.created_at else None
+                            'created_at': row.created_at.isoformat() if row.created_at else None,
+                            'visit_date': row.visit_date.isoformat() if row.visit_date else None,
                         },
                         'opportunity': {
                             'id': opp['opportunity_id'],
@@ -154,6 +157,7 @@ def get_pipeline_data(tenant_id, employee_id):
                         'is_allocated': bool(row.is_allocated),
                         'is_cleansed': bool(row.is_cleansed),
                         'created_at': row.created_at.isoformat() if row.created_at else None,
+                        'visit_date': row.visit_date.isoformat() if row.visit_date else None,
                         'project_types': row.project_types if row.project_types else []
                     }
                 })

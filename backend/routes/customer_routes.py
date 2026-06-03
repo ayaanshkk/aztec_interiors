@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify, current_app, g, session
 from sqlalchemy import text
 from datetime import datetime
 import json
@@ -102,6 +102,7 @@ def get_customers(tenant_id, employee_id):
                 c.created_at,
                 c.is_deleted,
                 c.is_archived,
+                c.visit_date,
                 e.employee_name as salesperson_name,
                 COUNT(DISTINCT p.project_id) as project_count,
                 COUNT(DISTINCT doc.id) as document_count,
@@ -158,7 +159,8 @@ def get_customers(tenant_id, employee_id):
                 'document_count': client.document_count or 0,
                 'form_count': client.form_count or 0,
                 'has_documents': (client.document_count or 0) > 0,
-                'has_forms': (client.form_count or 0) > 0
+                'has_forms': (client.form_count or 0) > 0,
+                'visit_date': client.visit_date.isoformat() if client.visit_date else None,
             })
         
         return jsonify(result), 200
@@ -186,15 +188,15 @@ def create_customer(tenant_id, employee_id):
         if not data.get('phone'):
             return jsonify({'error': 'Phone is required'}), 400
         
-        # REMOVED: display_id generation - let database auto-increment handle it
         
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Client_Master"
             (tenant_id, client_company_name, client_contact_name, client_phone, 
             client_email, address, post_code, assigned_employee_id, stage,
-            is_allocated, is_cleansed, is_deleted, is_archived)
+            visit_date, is_allocated, is_cleansed, is_deleted, is_archived)
             VALUES (:tenant_id, :name, :contact_name, :phone, :email, :address, 
-                    :postcode, :assigned_to, 'Lead', false, false, false, false)
+                    :postcode, :assigned_to, :stage, :visit_date,
+                    false, false, false, false)
             RETURNING client_id
         """)
 
@@ -206,7 +208,9 @@ def create_customer(tenant_id, employee_id):
             'email': data.get('email', ''),
             'address': data.get('address', ''),
             'postcode': data.get('postcode', ''),
-            'assigned_to': data.get('assigned_employee_id', employee_id)
+            'assigned_to': data.get('assigned_employee_id', employee_id),
+            'stage': data.get('stage', 'Lead'),
+            'visit_date': data.get('visit_date') or None,
         })
 
         client_id = result.fetchone().client_id
