@@ -1375,27 +1375,36 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
-        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG)$'
+        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG|BST|AGT|VDT|BGT)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
         
         door_component_only = False
+        door_total_mode = False  # NEW: carcass + door combined
         base_code = None
         component_door_type = None
         
         if suffix_match:
-            base_code = suffix_match.group(1).upper()  # e.g., "50B", "PL", "CF"
-            suffix = suffix_match.group(2).upper()      # e.g., "BS", "AG"
+            base_code = suffix_match.group(1).upper()
+            suffix = suffix_match.group(2).upper()
             
-            # Map suffix to door type in database
             suffix_to_door_type = {
-                'BS': 'Basic Slab',
-                'AG': 'Acrylic Gloss/Matt',
-                'VD': 'Vinyl Doors',
-                'BG': 'Black Glass'
+                'BS':  'Basic Slab',
+                'AG':  'Acrylic Gloss/Matt',
+                'VD':  'Vinyl Doors',
+                'BG':  'Black Glass',
+                'BST': 'Basic Slab',
+                'AGT': 'Acrylic Gloss/Matt',
+                'VDT': 'Vinyl Doors',
+                'BGT': 'Black Glass',
             }
             
             component_door_type = suffix_to_door_type.get(suffix)
-            door_component_only = True
+            
+            if suffix.endswith('T'):
+                door_total_mode = True   # return carcass + door
+                door_component_only = False
+            else:
+                door_component_only = True  # return door component only
             
             print(f"🎯 SUFFIX DETECTED: '{description}' → Base: '{base_code}', Component: '{component_door_type}'")
         
@@ -1668,9 +1677,7 @@ def auto_price_lookup(tenant_id, employee_id):
         # SUFFIX MODE - Return door component ONLY
         # ========================================================================
         
-        if door_component_only and component_door_type:
-            print(f"   🚪 MODE: {component_door_type} door component ONLY for {item_code}")
-            
+        if (door_component_only or door_total_mode) and component_door_type:
             door_row = next((r for r in results if r.door_type == component_door_type), None)
             
             if not door_row or not door_row.base_price:
@@ -1680,27 +1687,55 @@ def auto_price_lookup(tenant_id, employee_id):
                 }), 404
             
             door_price = float(door_row.base_price)
-            
-            print(f"   💰 {component_door_type} Door ONLY: £{door_price:.2f}")
-            
-            return jsonify({
-                'found': True,
-                'price': door_price,
-                'item_code': item_code,
-                'item_name': item_name,
-                'description': f"{component_door_type} Door for {item_name}",
-                'door_type': component_door_type,
-                'category': category,
-                'width': first_result.width,
-                'height': first_result.height,
-                'depth': first_result.depth,
-                'pricelist_id': door_row.pricelist_id,
-                'component_only': True,
-                'breakdown': {
-                    'carcass': 0.0,
-                    'door_component': door_price
-                }
-            }), 200
+
+            if door_total_mode:
+                # Carcass + door combined total
+                carcass_row = next((r for r in results if r.door_type == 'Carcass Only'), None)
+                carcass_price = float(carcass_row.base_price) if carcass_row and carcass_row.base_price else 0.0
+                final_price = carcass_price + door_price
+                
+                print(f"   💰 TOTAL MODE: Carcass £{carcass_price:.2f} + {component_door_type} £{door_price:.2f} = £{final_price:.2f}")
+                
+                return jsonify({
+                    'found': True,
+                    'price': final_price,
+                    'item_code': item_code,
+                    'item_name': item_name,
+                    'description': f"{item_name} - {component_door_type} (Total)",
+                    'door_type': component_door_type,
+                    'category': category,
+                    'width': first_result.width,
+                    'height': first_result.height,
+                    'depth': first_result.depth,
+                    'pricelist_id': door_row.pricelist_id,
+                    'component_only': False,
+                    'breakdown': {
+                        'carcass': carcass_price,
+                        'door_component': door_price
+                    }
+                }), 200
+            else:
+                # Door component only
+                print(f"   💰 {component_door_type} Door ONLY: £{door_price:.2f}")
+                
+                return jsonify({
+                    'found': True,
+                    'price': door_price,
+                    'item_code': item_code,
+                    'item_name': item_name,
+                    'description': f"{component_door_type} Door for {item_name}",
+                    'door_type': component_door_type,
+                    'category': category,
+                    'width': first_result.width,
+                    'height': first_result.height,
+                    'depth': first_result.depth,
+                    'pricelist_id': door_row.pricelist_id,
+                    'component_only': True,
+                    'breakdown': {
+                        'carcass': 0.0,
+                        'door_component': door_price
+                    }
+                }), 200
         
         # ========================================================================
         # STANDARD MODE - Carcass or Carcass + Door
