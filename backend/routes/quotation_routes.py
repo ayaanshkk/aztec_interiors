@@ -205,9 +205,9 @@ def create_quotation(tenant_id, employee_id):
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
-             customer_name, customer_address, customer_phone, customer_email, vat_percentage)
+             customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
-                    :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage)
+                    :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type)
             RETURNING quotation_id
         """)
         
@@ -224,7 +224,9 @@ def create_quotation(tenant_id, employee_id):
             'customer_address': data.get('customer_address', ''),
             'customer_phone': data.get('customer_phone', ''),
             'customer_email': data.get('customer_email', ''),
-            'vat_percentage': data.get('vat_percentage', 20.0)
+            'vat_percentage': data.get('vat_percentage', 20.0),
+            'door_type': data.get('door_type', 'Carcass Only'),
+            'room_type': data.get('room_type', 'Kitchen'),
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -1028,6 +1030,8 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'customer_address': quote.customer_address or quote.client_address,  # ← Use saved customer_address first
                 'customer_phone': quote.customer_phone or quote.client_phone,        # ← Use saved customer_phone first
                 'customer_email': getattr(quote, 'customer_email', None),           # ← Add customer_email
+                'door_type': getattr(quote, 'door_type', 'Carcass Only'),
+                'room_type': getattr(quote, 'room_type', 'Kitchen'),
                 'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
                 'client_id': quote.client_id,
                 'client_name': quote.client_company_name,
@@ -1090,6 +1094,12 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'notes' in data:
                 update_fields.append("notes = :notes")
                 params['notes'] = data['notes']
+            if 'door_type' in data:
+                update_fields.append("door_type = :door_type")
+                params['door_type'] = data['door_type']
+            if 'room_type' in data:
+                update_fields.append("room_type = :room_type")
+                params['room_type'] = data['room_type']
             
             # ✅ NEW: UPDATE ITEMS
             if 'items' in data:
@@ -1375,7 +1385,7 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
-        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG|BST|AGT|VDT|BGT)$'
+        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG|BST|AGT|VDT|BGT|C)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
         
         door_component_only = False
@@ -1396,15 +1406,20 @@ def auto_price_lookup(tenant_id, employee_id):
                 'AGT': 'Acrylic Gloss/Matt',
                 'VDT': 'Vinyl Doors',
                 'BGT': 'Black Glass',
+                'C':   'Carcass Only',
             }
             
             component_door_type = suffix_to_door_type.get(suffix)
             
-            if suffix.endswith('T'):
-                door_total_mode = True   # return carcass + door
+            if suffix == 'C':
+                door_component_only = False
+                door_total_mode = False
+                component_door_type = None
+            elif suffix.endswith('T'):
+                door_total_mode = True
                 door_component_only = False
             else:
-                door_component_only = True  # return door component only
+                door_component_only = True
             
             print(f"🎯 SUFFIX DETECTED: '{description}' → Base: '{base_code}', Component: '{component_door_type}'")
         
@@ -1671,7 +1686,11 @@ def auto_price_lookup(tenant_id, employee_id):
             'base cabinet only': 'Base Cabinet Only',
         }
         
-        db_door_type = DOOR_TYPE_MAP.get(door_type.lower(), door_type) if door_type else None
+        if not (suffix_match and suffix_match.group(2).upper() == 'C'):
+            db_door_type = DOOR_TYPE_MAP.get(door_type.lower(), door_type) if door_type else None
+        if suffix_match and suffix_match.group(2).upper() == 'C':
+            db_door_type = 'Carcass Only'
+        print(f"   🚪 db_door_type resolved: '{db_door_type}' (from door_type='{door_type}')")
         
         # ========================================================================
         # SUFFIX MODE - Return door component ONLY
@@ -1750,7 +1769,8 @@ def auto_price_lookup(tenant_id, employee_id):
         carcass_price = float(carcass_row.base_price)
         
         # CASE 1: No door type specified OR "Carcass Only" selected
-        if not db_door_type or db_door_type == 'Carcass Only':
+        valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
+        if not db_door_type or db_door_type == 'Carcass Only' or db_door_type not in valid_door_types:
             print(f"   🏗️ MODE: Carcass ONLY for {item_code}")
             print(f"   💰 Price: £{carcass_price:.2f}")
             
@@ -1773,7 +1793,7 @@ def auto_price_lookup(tenant_id, employee_id):
             }), 200
         
         # CASE 2: Door type specified → Return carcass + door
-        print(f"   🏗️ MODE: Complete unit - {item_code} + {db_door_type}")
+        print(f"   🏗️ MODE: Auto-total - {item_code} + {db_door_type}")
         
         door_row = next((r for r in results if r.door_type == db_door_type), None)
         
