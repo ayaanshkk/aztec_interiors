@@ -1487,25 +1487,44 @@ def auto_price_lookup(tenant_id, employee_id):
                 code_upper = item_code.upper()
                 import re as _re
 
-                # Code patterns
-                robe_pattern = _re.compile(r'^\d+R(C|DCNR)?$')           # 100R, 120RC, 90RDCNR
-                appliance_pattern = _re.compile(r'^[A-Z]{2,}\d{2,}[A-Z0-9]{2,}$')  # PUG61RAA5B, T36FBE1L0G
-                kitchen_pattern = _re.compile(r'^\d+[BWLDTQ](\d+)?$')    # 30B, 40W, 100L, 50D
+                robe_pattern = _re.compile(r'^\d+R(C|DCNR)?$')
+                kitchen_larder_pattern = _re.compile(
+                    r'^(\d+[BWLDTQ](\d+)?'
+                    r'|[0-9]+BC(LM)?'
+                    r'|[0-9]+B(LC|LCC|DC|A|DD|PO|PB|PW)'
+                    r'|[0-9]+W(S|A|BI|C|DC|LC)?'
+                    r'|[0-9]+WT?'
+                    r'|[0-9]+SD[0-9]+DRW'
+                    r'|[0-9]+MD[0-9]+DRW'
+                    r'|[0-9]+TD[0-9]+DRW'
+                    r'|[0-9]+[0-9]+DRW'
+                    r'|LM[0-9]+'
+                    r'|LT[0-9]+'
+                    r'|[0-9]+TBS?'
+                    r'|[0-9]+TBM'
+                    r'|[0-9]+TBT'
+                    r'|CRV[A-Z0-9]+'
+                    r'|[0-9]+BR[0-9]+)$',
+                    _re.IGNORECASE
+                )
+                bedroom_pattern = _re.compile(
+                    r'^(\d+R(C|DCNR)?'
+                    r'|[0-9]+BRS'
+                    r'|BDF[0-9-]+)$',
+                    _re.IGNORECASE
+                )
+                kitchen_pattern = kitchen_larder_pattern
 
                 if code_upper == 'APPL':
                     import re as _re
-                    # Matches appliance codes: mix of letters and numbers, 6+ chars
-                    # e.g. PUG61RAA5B, T36FBE1L0G, EU611BEB5B
-                    appliance_model_pattern = _re.compile(r'^[A-Z0-9]{6,}$', _re.IGNORECASE)
-                    # Must contain both letters and digits to distinguish from pure codes like 100R
+                    appliance_model_pattern = _re.compile(r'^[A-Z]{2,3}[0-9]{2}[A-Z0-9]{5,}$', _re.IGNORECASE)
                     def is_appliance_code(code):
                         code = code.strip().upper()
                         return (
                             bool(appliance_model_pattern.match(code))
-                            and any(c.isalpha() for c in code)
-                            and any(c.isdigit() for c in code)
-                            and not _re.match(r'^\d+R(C|DCNR)?$', code)  # exclude robe codes
+                            and len(code) >= 9
                         )
+                    
                     calculated_qty = sum(
                         int(i.get('quantity', 1))
                         for i in current_items
@@ -1523,20 +1542,48 @@ def auto_price_lookup(tenant_id, employee_id):
                     )
 
                 elif code_upper == 'KUNIT':
+                    kitchen_larder_pattern = _re.compile(
+                        r'^(\d+[BWLDTQ](\d+)?'      # 30B, 40W, 100L, 50D, 60BDL, 504DRW etc.
+                        r'|[0-9]+BC(LM)?'             # 90BC, 100BCLM
+                        r'|[0-9]+B(LC|LCC|DC|A|DD|PO|PB|PW)'  # 90BLC, 90BDC, 30BA, 50BDD, 30PB
+                        r'|[0-9]+W(S|A|BI|C|DC|LC)?'  # 30WS, 30WA, 80WBI, 60WC
+                        r'|[0-9]+WT?'                  # 30WT tall wall
+                        r'|[0-9]+SD[0-9]+DRW'          # 30SD1DRW dresser standard
+                        r'|[0-9]+MD[0-9]+DRW'          # 30MD2DRW dresser medium
+                        r'|[0-9]+TD[0-9]+DRW'          # 30TD2DRW dresser tall
+                        r'|[0-9]+[0-9]+DRW'            # 504DRW, 302DRW draw packs
+                        r'|LM[0-9]+'                   # LM302, LM602 medium larder
+                        r'|LT[0-9]+'                   # LT302, LT602 tall larder
+                        r'|[0-9]+TBS?'                 # 50TBS top box standard
+                        r'|[0-9]+TBM'                  # 50TBM top box medium
+                        r'|[0-9]+TBT'                  # 50TBT top box tall
+                        r'|CRV[A-Z0-9]+'               # CRVW, CRVB curved
+                        r'|[0-9]+BR[0-9]+)$',           # 60BR285 bridging
+                        _re.IGNORECASE
+                    )
                     calculated_qty = sum(
                         int(i.get('quantity', 1))
                         for i in current_items
-                        if kitchen_pattern.match((i.get('item') or '').strip().upper())
+                        if kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
                     )
 
                 elif code_upper == 'BUNIT':
+                    bedroom_pattern = _re.compile(
+                        r'^(\d+R(C|DCNR)?'             # 100R, 120RC, 90RDCNR robes
+                        r'|[0-9]+BRS'                  # 40BRS, 50BRS bridging units
+                        r'|BDF[0-9]+'                  # BDF215-396 bedroom drawer fronts
+                        r'|[0-9]+-[0-9]+BDF)$',        # alternate BDF format
+                        _re.IGNORECASE
+                    )
                     calculated_qty = sum(
                         int(i.get('quantity', 1))
                         for i in current_items
-                        if robe_pattern.match((i.get('item') or '').strip().upper())
+                        if bedroom_pattern.match((i.get('item') or '').strip().upper())
                         or 'robe' in (i.get('description') or '').lower()
-                        or 'rode' in (i.get('description') or '').lower()
+                        or 'wardrobe' in (i.get('description') or '').lower()
                         or 'bedroom' in (i.get('description') or '').lower()
+                        or 'chest' in (i.get('description') or '').lower()
+                        or 'linen' in (i.get('description') or '').lower()
                     )
 
                 elif code_upper == 'SINKTAP':
@@ -1559,12 +1606,27 @@ def auto_price_lookup(tenant_id, employee_id):
                         int(i.get('quantity', 1))
                         for i in current_items
                         if 'door' in (i.get('description') or '').lower()
+                        and not kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
+                    )
+
+                elif code_upper == 'PANW':
+                    panel_codes = {
+                        'BEP', 'BF', 'CF', 'CR', 'IBP', 'IEP', 'PL',
+                        'SOF', 'TEP', 'TF', 'TWEP', 'WEP', 'WF', 'WTP'
+                    }
+                    calculated_qty = sum(
+                        int(i.get('quantity', 1))
+                        for i in current_items
+                        if (i.get('item') or '').strip().upper() in panel_codes
                     )
 
                 if calculated_qty <= 0:
-                    calculated_qty = 1
+                    calculated_qty = 0
 
             print(f"   💰 Fitting: {item_name} — qty={calculated_qty}, unit=£{unit_price:.2f}, total=£{unit_price * calculated_qty:.2f}")
+
+            if calculated_qty == 0:
+                return jsonify({'found': False, 'quantity': 0}), 404
 
             return jsonify({
                 'found': True,
