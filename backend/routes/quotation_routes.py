@@ -1524,13 +1524,14 @@ def auto_price_lookup(tenant_id, employee_id):
                             bool(appliance_model_pattern.match(code))
                             and len(code) >= 9
                         )
-                    
                     calculated_qty = sum(
                         int(i.get('quantity', 1))
                         for i in current_items
                         if is_appliance_code(i.get('item') or i.get('item_name') or '')
                         or 'appliance' in (i.get('description') or '').lower()
                     )
+                    if calculated_qty == 0:
+                        return jsonify({'found': False, 'quantity': 0}), 404
 
                 elif code_upper == 'ROBE':
                     calculated_qty = sum(
@@ -1593,6 +1594,8 @@ def auto_price_lookup(tenant_id, employee_id):
                         if 'sink' in (i.get('description') or '').lower()
                         or (i.get('item') or '').strip().upper() == 'SINK'
                     )
+                    if calculated_qty == 0:
+                        return jsonify({'found': False, 'quantity': 0}), 404
 
                 elif code_upper == 'WTJT':
                     calculated_qty = sum(
