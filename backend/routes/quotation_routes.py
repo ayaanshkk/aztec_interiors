@@ -1621,7 +1621,7 @@ def auto_price_lookup(tenant_id, employee_id):
                     )
 
                 if calculated_qty <= 0:
-                    calculated_qty = 0
+                    calculated_qty = 1 if not current_items else 0
 
             print(f"   💰 Fitting: {item_name} — qty={calculated_qty}, unit=£{unit_price:.2f}, total=£{unit_price * calculated_qty:.2f}")
 
