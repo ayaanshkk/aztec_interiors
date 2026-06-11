@@ -238,10 +238,10 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotation_Items"
             (quotation_id, item_name, description, color, quantity, amount,
             width, height, depth, needs_manual_pricing, pricelist_id,
-            discount_percent, discounted_amount, parent_item_id)
+            discount_percent, discounted_amount, parent_item_id, section)
             VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
                     :width, :height, :depth, :needs_manual, :pricelist_id,
-                    :discount_percent, :discounted_amount, :parent_item_id)
+                    :discount_percent, :discounted_amount, :parent_item_id, :section)
             RETURNING item_id
         """)
 
@@ -261,6 +261,7 @@ def create_quotation(tenant_id, employee_id):
                 'discount_percent': item.get('discount_percent', 0),
                 'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * int(item.get('quantity', 1))),
                 'parent_item_id': None,
+                'section': item.get('section', 'Furniture'),
             })
 
             parent_item_id = result.fetchone().item_id
@@ -283,6 +284,7 @@ def create_quotation(tenant_id, employee_id):
                     'discount_percent': sub.get('discount_percent', 0),
                     'discounted_amount': sub.get('discounted_amount', float(sub.get('amount', 0)) * int(sub.get('quantity', 1))),
                     'parent_item_id': parent_item_id,
+                    'section': item.get('section', 'Furniture'),
                 })
 
         session.commit()
@@ -1067,6 +1069,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     'needs_manual_pricing': i.needs_manual_pricing,
                     'price_list_item_id': i.pricelist_id,
                     'parent_item_id': getattr(i, 'parent_item_id', None),
+                    'section': getattr(i, 'section', None) or 'Furniture',
                 }
 
             valid_items = [
@@ -1165,10 +1168,10 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     INSERT INTO "StreemLyne_MT"."Quotation_Items"
                     (quotation_id, item_name, description, color, quantity, amount,
                     width, height, depth, needs_manual_pricing, pricelist_id,
-                    discount_percent, discounted_amount, parent_item_id)
+                    discount_percent, discounted_amount, parent_item_id, section)
                     VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
                             :width, :height, :depth, :needs_manual, :pricelist_id,
-                            :discount_percent, :discounted_amount, :parent_item_id)
+                            :discount_percent, :discounted_amount, :parent_item_id, :section)
                     RETURNING item_id
                 """)
                 
@@ -1180,6 +1183,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     
                     item_amount = float(item.get('amount', 0))
                     item_qty = int(item.get('quantity', 1))
+                    item_section = item.get('section', 'Furniture')
                     
                     result = session.execute(item_insert, {
                         'quotation_id': quotation_id,
@@ -1196,6 +1200,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         'discount_percent': item.get('discount_percent', 0),
                         'discounted_amount': item.get('discounted_amount', item_amount * item_qty),
                         'parent_item_id': None,
+                        'section': item_section,
                     })
                     
                     parent_item_id = result.fetchone().item_id
@@ -1224,6 +1229,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                             'discount_percent': sub.get('discount_percent', 0),
                             'discounted_amount': sub.get('discounted_amount', sub_amount * sub_qty),
                             'parent_item_id': parent_item_id,
+                            'section': item_section,
                         })
                         
                         total += sub_amount * sub_qty
@@ -1550,6 +1556,51 @@ def auto_price_lookup(tenant_id, employee_id):
         print(f"✅ Found {len(results)} rows for '{item_code}' in category '{category}'")
 
         # ========================================================================
+        # DRAWER FRONTS - Component-only pricing, no carcass required
+        # ========================================================================
+
+        if item_code.upper().startswith(('KDF', 'BDF', 'DF')):
+            print(f"   📐 Drawer front component lookup")
+
+            if component_door_type:
+                target_door_type = component_door_type
+            else:
+                DOOR_TYPE_MAP = {
+                    'basic slab': 'Basic Slab',
+                    'acrylic gloss/matt': 'Acrylic Gloss/Matt',
+                    'acrylic gloss': 'Acrylic Gloss/Matt',
+                    'acrylic matt': 'Acrylic Gloss/Matt',
+                    'vinyl': 'Vinyl Doors',
+                    'vinyl doors': 'Vinyl Doors',
+                }
+                target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
+
+            price_row = next((r for r in results if r.door_type == target_door_type), None)
+            if not price_row or not price_row.base_price:
+                price_row = next((r for r in results if r.door_type == 'Basic Slab'), None)
+                target_door_type = 'Basic Slab'
+
+            if not price_row or not price_row.base_price:
+                return jsonify({'found': False, 'error': f'No price found for {item_code}'}), 404
+
+            price = float(price_row.base_price)
+            print(f"   💰 Drawer front {target_door_type}: £{price:.2f}")
+
+            return jsonify({
+                'found': True,
+                'price': price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': item_name,
+                'door_type': target_door_type,
+                'category': category,
+                'width': first_result.width,
+                'height': first_result.height,
+                'depth': first_result.depth,
+                'pricelist_id': price_row.pricelist_id
+            }), 200
+
+        # ========================================================================
         # FITTINGS - Quantity calculated from current quote items
         # ========================================================================
 
@@ -1765,6 +1816,9 @@ def auto_price_lookup(tenant_id, employee_id):
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
+                    'vinyl': 'Vinyl Doors',
+                    'vinyl doors': 'Vinyl Doors',
+                    'black glass': 'Vinyl Doors',  # no Black Glass pricing for fillers, fall back to Vinyl
                 }
                 # Map door_type, default to Basic Slab for anything not in map (e.g. 'Carcass Only')
                 target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
@@ -2077,7 +2131,7 @@ def download_quotation_pdf(quotation_id):
         # ── Fetch items ───────────────────────────────────────────────────
         items = db_session.execute(
             text("""
-                SELECT item_name, description, color, quantity, amount
+                SELECT item_id, item_name, description, color, quantity, amount, parent_item_id, section
                 FROM "StreemLyne_MT"."Quotation_Items"
                 WHERE quotation_id = :qid
                 ORDER BY item_id
@@ -2145,40 +2199,65 @@ def download_quotation_pdf(quotation_id):
         # Total usable width = 190mm (A4 210mm - 2×10mm margins)
         headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY', 'AMOUNT']
         widths  = [25,       105,            22,       13,    25]  # sum = 190
- 
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 9)
-        for h, w in zip(headers, widths):
-            pdf.cell(w, 8, h, 1, 0, 'C', 1)
-        pdf.ln()
- 
+
+        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Fittings']
+
+        # Build top-level / sub-item structure, grouped by section
+        valid_items = [
+            i for i in items
+            if (i.item_name or '').strip() or (i.description or '').strip() or (i.amount and float(i.amount) > 0)
+        ]
+        top_level = [i for i in valid_items if not getattr(i, 'parent_item_id', None)]
+        sub_map = {}
+        for i in valid_items:
+            pid = getattr(i, 'parent_item_id', None)
+            if pid:
+                sub_map.setdefault(pid, []).append(i)
+
         pdf.set_font('Arial', '', 9)
         subtotal = 0.0
- 
-        for item in items:
-            name = item.item_name or ''
-            desc = item.description or ''
-            if not name and not desc and not (item.amount and float(item.amount) > 0):
-                continue
- 
-            row_h   = 8
-            x0, y0  = pdf.get_x(), pdf.get_y()
- 
-            # Draw outer border cells
-            pdf.cell(widths[0], row_h, name[:22],               1, 0, 'L')
-            pdf.cell(widths[1], row_h, '',                      1, 0, 'L')
-            pdf.cell(widths[2], row_h, item.color or '',        1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(item.quantity or 1), 1, 0, 'C')
-            lt = float(item.amount or 0) * int(item.quantity or 1)
-            pdf.cell(widths[4], row_h, f"£{lt:.2f}",           1, 1, 'R')
- 
-            # Write description text inside the description cell
+
+        def draw_row(name, desc, color, qty, amount, indent=False):
+            row_h = 8
+            x0, y0 = pdf.get_x(), pdf.get_y()
+            display_name = ('   > ' + name) if indent else name
+            pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
+            pdf.cell(widths[1], row_h, '', 1, 0, 'L')
+            pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
+            pdf.cell(widths[3], row_h, str(qty or 1), 1, 0, 'C')
+            lt = float(amount or 0) * int(qty or 1)
+            pdf.cell(widths[4], row_h, f"£{lt:.2f}", 1, 1, 'R')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
-            pdf.cell(widths[1] - 2, row_h - 2,
-                     (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
+            pdf.cell(widths[1] - 2, row_h - 2, (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
- 
-            subtotal += lt
+            return lt
+
+        for section in SECTIONS:
+            section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
+            if not section_items:
+                continue
+
+            # Section heading
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(0, 7, section, 0, 1, 'L')
+
+            # Table header for this section
+            pdf.set_fill_color(*FILL)
+            pdf.set_font('Arial', 'B', 9)
+            for h, w in zip(headers, widths):
+                pdf.cell(w, 8, h, 1, 0, 'C', 1)
+            pdf.ln()
+            pdf.set_font('Arial', '', 9)
+
+            for item in section_items:
+                lt = draw_row(item.item_name or '', item.description or '', item.color, item.quantity, item.amount)
+                subtotal += lt
+
+                for sub in sub_map.get(item.item_id, []):
+                    slt = draw_row(sub.item_name or '', sub.description or '', sub.color, sub.quantity, sub.amount, indent=True)
+                    subtotal += slt
+
+            pdf.ln(2)
  
         # ── Totals ────────────────────────────────────────────────────────
         pdf.ln(3)
