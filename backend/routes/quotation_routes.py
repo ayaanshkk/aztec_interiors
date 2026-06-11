@@ -1,3 +1,5 @@
+from unicodedata import category
+
 from flask import Blueprint, request, jsonify, current_app, send_file
 from sqlalchemy import text
 from datetime import datetime
@@ -1487,6 +1489,13 @@ def auto_price_lookup(tenant_id, employee_id):
                 code_upper = item_code.upper()
                 import re as _re
 
+                print(f"   🔍 ALL current_items: {[(i.get('item'), i.get('quantity')) for i in current_items]}")
+
+                non_unit_exclusions = {
+                    'WB', 'WT', 'WTP', 'WF', 'WEP', 'BF', 'BEP', 'TF', 'TEP',
+                    'CF', 'CR', 'PL', 'SOF', 'IBP', 'IEP', 'TWEP',
+                }
+
                 robe_pattern = _re.compile(r'^\d+R(C|DCNR)?$')
                 kitchen_larder_pattern = _re.compile(
                     r'^(\d+[BWLDTQ](\d+)?'
@@ -1498,8 +1507,8 @@ def auto_price_lookup(tenant_id, employee_id):
                     r'|[0-9]+MD[0-9]+DRW'
                     r'|[0-9]+TD[0-9]+DRW'
                     r'|[0-9]+[0-9]+DRW'
-                    r'|LM[0-9]+'
-                    r'|LT[0-9]+'
+                    r'|LM[0-9]+[A-Z]*'
+                    r'|LT[0-9]+[A-Z]*'
                     r'|[0-9]+TBS?'
                     r'|[0-9]+TBM'
                     r'|[0-9]+TBT'
@@ -1516,7 +1525,6 @@ def auto_price_lookup(tenant_id, employee_id):
                 kitchen_pattern = kitchen_larder_pattern
 
                 if code_upper == 'APPL':
-                    import re as _re
                     appliance_model_pattern = _re.compile(r'^[A-Z]{2,3}[0-9]{2}[A-Z0-9]{5,}$', _re.IGNORECASE)
                     def is_appliance_code(code):
                         code = code.strip().upper()
@@ -1543,41 +1551,19 @@ def auto_price_lookup(tenant_id, employee_id):
                     )
 
                 elif code_upper == 'KUNIT':
-                    kitchen_larder_pattern = _re.compile(
-                        r'^(\d+[BWLDTQ](\d+)?'      # 30B, 40W, 100L, 50D, 60BDL, 504DRW etc.
-                        r'|[0-9]+BC(LM)?'             # 90BC, 100BCLM
-                        r'|[0-9]+B(LC|LCC|DC|A|DD|PO|PB|PW)'  # 90BLC, 90BDC, 30BA, 50BDD, 30PB
-                        r'|[0-9]+W(S|A|BI|C|DC|LC)?'  # 30WS, 30WA, 80WBI, 60WC
-                        r'|[0-9]+WT?'                  # 30WT tall wall
-                        r'|[0-9]+SD[0-9]+DRW'          # 30SD1DRW dresser standard
-                        r'|[0-9]+MD[0-9]+DRW'          # 30MD2DRW dresser medium
-                        r'|[0-9]+TD[0-9]+DRW'          # 30TD2DRW dresser tall
-                        r'|[0-9]+[0-9]+DRW'            # 504DRW, 302DRW draw packs
-                        r'|LM[0-9]+'                   # LM302, LM602 medium larder
-                        r'|LT[0-9]+'                   # LT302, LT602 tall larder
-                        r'|[0-9]+TBS?'                 # 50TBS top box standard
-                        r'|[0-9]+TBM'                  # 50TBM top box medium
-                        r'|[0-9]+TBT'                  # 50TBT top box tall
-                        r'|CRV[A-Z0-9]+'               # CRVW, CRVB curved
-                        r'|[0-9]+BR[0-9]+)$',           # 60BR285 bridging
-                        _re.IGNORECASE
-                    )
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
+                    matched_items = [
+                        (i.get('item'), i.get('quantity', 1))
                         for i in current_items
-                        if kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
-                    )
+                        if (i.get('item') or '').strip().upper() not in non_unit_exclusions
+                        and kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
+                    ]
+                    print(f"   🔍 KUNIT matched items ({len(matched_items)} rows): {matched_items}")
+                    calculated_qty = sum(int(qty) for _, qty in matched_items)
+                    print(f"   🔍 KUNIT total qty: {calculated_qty}")
 
                 elif code_upper == 'BUNIT':
-                    bedroom_pattern = _re.compile(
-                        r'^(\d+R(C|DCNR)?'             # 100R, 120RC, 90RDCNR robes
-                        r'|[0-9]+BRS'                  # 40BRS, 50BRS bridging units
-                        r'|BDF[0-9]+'                  # BDF215-396 bedroom drawer fronts
-                        r'|[0-9]+-[0-9]+BDF)$',        # alternate BDF format
-                        _re.IGNORECASE
-                    )
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
+                    matched_items = [
+                        (i.get('item'), i.get('quantity', 1), i.get('description'))
                         for i in current_items
                         if bedroom_pattern.match((i.get('item') or '').strip().upper())
                         or 'robe' in (i.get('description') or '').lower()
@@ -1585,7 +1571,10 @@ def auto_price_lookup(tenant_id, employee_id):
                         or 'bedroom' in (i.get('description') or '').lower()
                         or 'chest' in (i.get('description') or '').lower()
                         or 'linen' in (i.get('description') or '').lower()
-                    )
+                    ]
+                    print(f"   🔍 BUNIT matched items ({len(matched_items)} rows): {matched_items}")
+                    calculated_qty = sum(int(qty) for _, qty, _ in matched_items)
+                    print(f"   🔍 BUNIT total qty: {calculated_qty}")
 
                 elif code_upper == 'SINKTAP':
                     calculated_qty = sum(
@@ -1617,11 +1606,14 @@ def auto_price_lookup(tenant_id, employee_id):
                         'BEP', 'BF', 'CF', 'CR', 'IBP', 'IEP', 'PL',
                         'SOF', 'TEP', 'TF', 'TWEP', 'WEP', 'WF', 'WTP'
                     }
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
+                    matched_items = [
+                        (i.get('item'), i.get('quantity', 1))
                         for i in current_items
                         if (i.get('item') or '').strip().upper() in panel_codes
-                    )
+                    ]
+                    print(f"   🔍 PANW matched items ({len(matched_items)} rows): {matched_items}")
+                    calculated_qty = sum(int(qty) for _, qty in matched_items)
+                    print(f"   🔍 PANW total qty: {calculated_qty}")
 
                 if calculated_qty <= 0:
                     calculated_qty = 1 if not current_items else 0
