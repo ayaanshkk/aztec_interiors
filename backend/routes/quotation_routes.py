@@ -234,18 +234,19 @@ def create_quotation(tenant_id, employee_id):
         quotation_id = result.fetchone().quotation_id
         
         # Add items
+        item_insert = text("""
+            INSERT INTO "StreemLyne_MT"."Quotation_Items"
+            (quotation_id, item_name, description, color, quantity, amount,
+            width, height, depth, needs_manual_pricing, pricelist_id,
+            discount_percent, discounted_amount, parent_item_id)
+            VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
+                    :width, :height, :depth, :needs_manual, :pricelist_id,
+                    :discount_percent, :discounted_amount, :parent_item_id)
+            RETURNING item_id
+        """)
+
         for item in items_data:
-            item_insert = text("""
-                INSERT INTO "StreemLyne_MT"."Quotation_Items"
-                (quotation_id, item_name, description, color, quantity, amount,
-                width, height, depth, needs_manual_pricing, pricelist_id,
-                discount_percent, discounted_amount)
-                VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
-                        :width, :height, :depth, :needs_manual, :pricelist_id,
-                        :discount_percent, :discounted_amount)
-            """)
-            
-            session.execute(item_insert, {
+            result = session.execute(item_insert, {
                 'quotation_id': quotation_id,
                 'item_name': item.get('item', ''),
                 'description': item.get('description', ''),
@@ -258,9 +259,32 @@ def create_quotation(tenant_id, employee_id):
                 'needs_manual': item.get('needs_manual_pricing', False),
                 'pricelist_id': item.get('price_list_item_id'),
                 'discount_percent': item.get('discount_percent', 0),
-                'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * int(item.get('quantity', 1)))
+                'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * int(item.get('quantity', 1))),
+                'parent_item_id': None,
             })
-        
+
+            parent_item_id = result.fetchone().item_id
+
+            for sub in item.get('subItems', []):
+                if not sub.get('item') and not sub.get('description') and not sub.get('amount'):
+                    continue
+                session.execute(item_insert, {
+                    'quotation_id': quotation_id,
+                    'item_name': sub.get('item', ''),
+                    'description': sub.get('description', ''),
+                    'color': sub.get('color'),
+                    'quantity': sub.get('quantity') or 1,
+                    'amount': sub.get('amount', 0),
+                    'width': sub.get('width'),
+                    'height': sub.get('height'),
+                    'depth': sub.get('depth'),
+                    'needs_manual': sub.get('needs_manual_pricing', False),
+                    'pricelist_id': sub.get('price_list_item_id'),
+                    'discount_percent': sub.get('discount_percent', 0),
+                    'discounted_amount': sub.get('discounted_amount', float(sub.get('amount', 0)) * int(sub.get('quantity', 1))),
+                    'parent_item_id': parent_item_id,
+                })
+
         session.commit()
         
         print(f"Quotation {ref_num} created")
@@ -1022,16 +1046,57 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             """)
             
             items = session.execute(items_query, {'quotation_id': quotation_id}).fetchall()
+
+            def item_to_dict(i):
+                return {
+                    'id': i.item_id,
+                    'item_id': i.item_id,
+                    'item': i.item_name,
+                    'item_name': i.item_name,
+                    'description': i.description,
+                    'color': i.color,
+                    'quantity': i.quantity,
+                    'amount': float(i.amount) if i.amount else 0,
+                    'discount_type': getattr(i, 'discount_type', 'none'),
+                    'discount_value': float(i.discount_value) if hasattr(i, 'discount_value') and i.discount_value else 0,
+                    'discount_percent': float(i.discount_percent) if hasattr(i, 'discount_percent') and i.discount_percent else 0,
+                    'discounted_total': float(i.discounted_amount) if hasattr(i, 'discounted_amount') and i.discounted_amount else float(i.amount or 0) * (i.quantity or 1),
+                    'width': i.width,
+                    'height': i.height,
+                    'depth': i.depth,
+                    'needs_manual_pricing': i.needs_manual_pricing,
+                    'price_list_item_id': i.pricelist_id,
+                    'parent_item_id': getattr(i, 'parent_item_id', None),
+                }
+
+            valid_items = [
+                i for i in items
+                if (i.item_name and i.item_name.strip()) or (i.description and i.description.strip()) or (i.amount and float(i.amount) > 0)
+            ]
+
+            top_level = [i for i in valid_items if not getattr(i, 'parent_item_id', None)]
+            sub_items_map = {}
+            for i in valid_items:
+                pid = getattr(i, 'parent_item_id', None)
+                if pid:
+                    sub_items_map.setdefault(pid, []).append(item_to_dict(i))
+
+            items_result = []
+            for i in top_level:
+                d = item_to_dict(i)
+                if i.item_id in sub_items_map:
+                    d['subItems'] = sub_items_map[i.item_id]
+                items_result.append(d)
             
             result = {
                 'id': quote.quotation_id,
                 'quotation_id': quote.quotation_id,
                 'reference_number': quote.reference_number,
                 'customer_id': str(quote.client_id),
-                'customer_name': quote.customer_name or quote.client_company_name,  # ← Use saved customer_name first
-                'customer_address': quote.customer_address or quote.client_address,  # ← Use saved customer_address first
-                'customer_phone': quote.customer_phone or quote.client_phone,        # ← Use saved customer_phone first
-                'customer_email': getattr(quote, 'customer_email', None),           # ← Add customer_email
+                'customer_name': quote.customer_name or quote.client_company_name,
+                'customer_address': quote.customer_address or quote.client_address,
+                'customer_phone': quote.customer_phone or quote.client_phone,
+                'customer_email': getattr(quote, 'customer_email', None),
                 'door_type': getattr(quote, 'door_type', 'Carcass Only'),
                 'room_type': getattr(quote, 'room_type', 'Kitchen'),
                 'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
@@ -1045,24 +1110,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'notes': quote.notes,
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
                 'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
-                'items': [{
-                    'id': i.item_id,
-                    'item_id': i.item_id,
-                    'item': i.item_name,
-                    'item_name': i.item_name,
-                    'description': i.description,
-                    'color': i.color,
-                    'quantity': i.quantity,
-                    'amount': float(i.amount) if i.amount else 0,
-                    'discount_type': getattr(i, 'discount_type', 'none'),
-                    'discount_value': float(i.discount_value) if hasattr(i, 'discount_value') and i.discount_value else 0,
-                    'discounted_total': float(i.discounted_amount) if hasattr(i, 'discounted_amount') and i.discounted_amount else float(i.amount),
-                    'width': i.width,
-                    'height': i.height,
-                    'depth': i.depth,
-                    'needs_manual_pricing': i.needs_manual_pricing,
-                    'price_list_item_id': i.pricelist_id
-                } for i in items if (i.item_name and i.item_name.strip()) or (i.description and i.description.strip()) or (i.amount and float(i.amount) > 0)]  # ← FILTER OUT EMPTY ITEMS
+                'items': items_result
             }
             
             return jsonify(result), 200
@@ -1112,13 +1160,16 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 """)
                 session.execute(delete_items, {'quotation_id': quotation_id})
                 
-                # Insert new items
+                # Insert new items - returns item_id for sub-item linking
                 item_insert = text("""
                     INSERT INTO "StreemLyne_MT"."Quotation_Items"
                     (quotation_id, item_name, description, color, quantity, amount,
-                    width, height, depth, needs_manual_pricing, pricelist_id)
+                    width, height, depth, needs_manual_pricing, pricelist_id,
+                    discount_percent, discounted_amount, parent_item_id)
                     VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
-                            :width, :height, :depth, :needs_manual, :pricelist_id)
+                            :width, :height, :depth, :needs_manual, :pricelist_id,
+                            :discount_percent, :discounted_amount, :parent_item_id)
+                    RETURNING item_id
                 """)
                 
                 total = 0.0
@@ -1130,7 +1181,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     item_amount = float(item.get('amount', 0))
                     item_qty = int(item.get('quantity', 1))
                     
-                    session.execute(item_insert, {
+                    result = session.execute(item_insert, {
                         'quotation_id': quotation_id,
                         'item_name': item.get('item', ''),
                         'description': item.get('description', ''),
@@ -1142,12 +1193,40 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         'depth': item.get('depth'),
                         'needs_manual': item.get('needs_manual_pricing', False),
                         'pricelist_id': item.get('price_list_item_id'),
-                        'discount_type': item.get('discount_type', 'none'),
-                        'discount_value': item.get('discount_value', 0),
-                        'discounted_amount': item.get('discounted_amount', item.get('amount', 0))
+                        'discount_percent': item.get('discount_percent', 0),
+                        'discounted_amount': item.get('discounted_amount', item_amount * item_qty),
+                        'parent_item_id': None,
                     })
                     
+                    parent_item_id = result.fetchone().item_id
                     total += item_amount * item_qty
+
+                    # Insert sub-items linked to this parent
+                    for sub in item.get('subItems', []):
+                        if not sub.get('item') and not sub.get('description') and not sub.get('amount'):
+                            continue
+                        
+                        sub_amount = float(sub.get('amount', 0))
+                        sub_qty = int(sub.get('quantity', 1))
+                        
+                        session.execute(item_insert, {
+                            'quotation_id': quotation_id,
+                            'item_name': sub.get('item', ''),
+                            'description': sub.get('description', ''),
+                            'color': sub.get('color', ''),
+                            'quantity': sub_qty,
+                            'amount': sub_amount,
+                            'width': sub.get('width'),
+                            'height': sub.get('height'),
+                            'depth': sub.get('depth'),
+                            'needs_manual': sub.get('needs_manual_pricing', False),
+                            'pricelist_id': sub.get('price_list_item_id'),
+                            'discount_percent': sub.get('discount_percent', 0),
+                            'discounted_amount': sub.get('discounted_amount', sub_amount * sub_qty),
+                            'parent_item_id': parent_item_id,
+                        })
+                        
+                        total += sub_amount * sub_qty
                 
                 # Update total in quotation
                 update_fields.append("total = :total")
