@@ -416,7 +416,9 @@ def download_payment_terms_pdf(pt_id):
         pdf.cell(80, 6, '', 'B', 1, 'L')
 
         out  = pdf.output(dest='S')
-        buf  = BytesIO(out)
+        if isinstance(out, str):
+            out = out.encode('latin-1')
+        buf  = BytesIO(bytes(out))
         name = f"PaymentTerms_{row.pt_number}_{(row.customer_name or 'Customer').replace(' ', '_')}.pdf"
         return send_file(buf, mimetype='application/pdf', as_attachment=False, download_name=name)
 

@@ -2348,7 +2348,9 @@ def download_quotation_pdf(quotation_id):
  
         # ── Return PDF ────────────────────────────────────────────────────
         out  = pdf.output(dest='S')
-        buf  = BytesIO(out)
+        if isinstance(out, str):
+            out = out.encode('latin-1')
+        buf  = BytesIO(bytes(out))
         ref  = quotation.reference_number or str(quotation_id)
         name = f"Quotation_{ref}_{cust_name.replace(' ', '_')}.pdf"
  

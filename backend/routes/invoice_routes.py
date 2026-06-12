@@ -621,7 +621,9 @@ def download_invoice_pdf(invoice_id):
             pdf.ln(2)
 
         out  = pdf.output(dest='S')
-        buf  = BytesIO(out)
+        if isinstance(out, str):
+            out = out.encode('latin-1')
+        buf  = BytesIO(bytes(out))
         name = f"Invoice_{row.invoice_number}_{(row.customer_name or 'Customer').replace(' ', '_')}.pdf"
         return send_file(buf, mimetype='application/pdf', as_attachment=False, download_name=name)
 
