@@ -1667,7 +1667,8 @@ def auto_price_lookup(tenant_id, employee_id):
                 bedroom_pattern = _re.compile(
                     r'^(\d+R(C|DCNR)?'
                     r'|[0-9]+BRS'
-                    r'|BDF[0-9-]+)$',
+                    r'|BDF[0-9-]+'
+                    r'|[0-9]+BDRW)$',
                     _re.IGNORECASE
                 )
                 kitchen_pattern = kitchen_larder_pattern
