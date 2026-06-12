@@ -1103,6 +1103,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'door_type': getattr(quote, 'door_type', 'Carcass Only'),
                 'room_type': getattr(quote, 'room_type', 'Kitchen'),
                 'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
+                'global_discount_percent': float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0,
                 'client_id': quote.client_id,
                 'client_name': quote.client_company_name,
                 'client_address': quote.client_address,
@@ -1695,12 +1696,16 @@ def auto_price_lookup(tenant_id, employee_id):
                     matched_items = [
                         (i.get('item'), i.get('quantity', 1), i.get('description'))
                         for i in current_items
-                        if bedroom_pattern.match((i.get('item') or '').strip().upper())
-                        or 'robe' in (i.get('description') or '').lower()
-                        or 'wardrobe' in (i.get('description') or '').lower()
-                        or 'bedroom' in (i.get('description') or '').lower()
-                        or 'chest' in (i.get('description') or '').lower()
-                        or 'linen' in (i.get('description') or '').lower()
+                        if not robe_pattern.match((i.get('item') or '').strip().upper())
+                        and 'robe' not in (i.get('description') or '').lower()
+                        and 'rode' not in (i.get('description') or '').lower()
+                        and (
+                            bedroom_pattern.match((i.get('item') or '').strip().upper())
+                            or 'wardrobe' in (i.get('description') or '').lower()
+                            or 'bedroom' in (i.get('description') or '').lower()
+                            or 'chest' in (i.get('description') or '').lower()
+                            or 'linen' in (i.get('description') or '').lower()
+                        )
                     ]
                     print(f"   🔍 BUNIT matched items ({len(matched_items)} rows): {matched_items}")
                     calculated_qty = sum(int(qty) for _, qty, _ in matched_items)
@@ -2115,6 +2120,7 @@ def download_quotation_pdf(quotation_id):
                     q.created_at,
                     q.total,
                     q.vat_percentage,
+                    q.global_discount_percent,
                     c.client_company_name,
                     c.address        AS client_address,
                     c.client_phone   AS client_phone_num
@@ -2151,7 +2157,7 @@ def download_quotation_pdf(quotation_id):
         pdf.doc_title = 'QUOTATION'
         pdf.alias_nb_pages()
         pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=False, margin=20)
  
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
@@ -2197,8 +2203,8 @@ def download_quotation_pdf(quotation_id):
  
         # ── Items table ───────────────────────────────────────────────────
         # Total usable width = 190mm (A4 210mm - 2×10mm margins)
-        headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY', 'AMOUNT']
-        widths  = [25,       105,            22,       13,    25]  # sum = 190
+        headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
+        widths  = [25,       128,            22,       15]  # sum = 190
 
         SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Fittings']
 
@@ -2224,24 +2230,16 @@ def download_quotation_pdf(quotation_id):
             pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
             pdf.cell(widths[1], row_h, '', 1, 0, 'L')
             pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(qty or 1), 1, 0, 'C')
-            lt = float(amount or 0) * int(qty or 1)
-            pdf.cell(widths[4], row_h, f"£{lt:.2f}", 1, 1, 'R')
+            pdf.cell(widths[3], row_h, str(qty or 1), 1, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
             pdf.cell(widths[1] - 2, row_h - 2, (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
-            return lt
+            return float(amount or 0) * int(qty or 1)
 
-        for section in SECTIONS:
-            section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
-            if not section_items:
-                continue
 
-            # Section heading
+        def draw_section_header(section_name):
             pdf.set_font('Arial', 'B', 10)
-            pdf.cell(0, 7, section, 0, 1, 'L')
-
-            # Table header for this section
+            pdf.cell(0, 7, section_name, 0, 1, 'L')
             pdf.set_fill_color(*FILL)
             pdf.set_font('Arial', 'B', 9)
             for h, w in zip(headers, widths):
@@ -2249,11 +2247,29 @@ def download_quotation_pdf(quotation_id):
             pdf.ln()
             pdf.set_font('Arial', '', 9)
 
+        ROW_H = 8
+        PAGE_BOTTOM = pdf.h - pdf.b_margin  # usable bottom limit
+
+        for section in SECTIONS:
+            section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
+            if not section_items:
+                continue
+
+            draw_section_header(section)
+
             for item in section_items:
+                if pdf.get_y() + ROW_H > PAGE_BOTTOM:
+                    pdf.add_page()
+                    draw_section_header(section)
+
                 lt = draw_row(item.item_name or '', item.description or '', item.color, item.quantity, item.amount)
                 subtotal += lt
 
                 for sub in sub_map.get(item.item_id, []):
+                    if pdf.get_y() + ROW_H > PAGE_BOTTOM:
+                        pdf.add_page()
+                        draw_section_header(section)
+
                     slt = draw_row(sub.item_name or '', sub.description or '', sub.color, sub.quantity, sub.amount, indent=True)
                     subtotal += slt
 
@@ -2261,15 +2277,20 @@ def download_quotation_pdf(quotation_id):
  
         # ── Totals ────────────────────────────────────────────────────────
         pdf.ln(3)
+        discount_pct    = float(getattr(quotation, 'global_discount_percent', 0) or 0)
+        discount_amount = subtotal * (discount_pct / 100)
+        subtotal_after_discount = subtotal - discount_amount
         vat_pct    = float(quotation.vat_percentage or 20)
-        vat_amount = subtotal * (vat_pct / 100)
-        total      = subtotal + vat_amount
+        vat_amount = subtotal_after_discount * (vat_pct / 100)
+        total      = subtotal_after_discount + vat_amount
         tx         = 105
  
-        for label, value in [
-            ('SUB TOTAL:',             f"£{subtotal:.2f}"),
-            (f'VAT ({vat_pct:.0f}%):',  f"£{vat_amount:.2f}"),
-        ]:
+        totals_rows = [('SUB TOTAL:', f"£{subtotal:.2f}")]
+        if discount_pct > 0:
+            totals_rows.append((f'DISCOUNT ({discount_pct:.0f}%):', f"-£{discount_amount:.2f}"))
+        totals_rows.append((f'VAT ({vat_pct:.0f}%):', f"£{vat_amount:.2f}"))
+
+        for label, value in totals_rows:
             pdf.set_x(tx)
             pdf.set_font('Arial', '', 10)
             pdf.cell(50, lh, label, 0, 0, 'R')
