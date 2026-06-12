@@ -113,19 +113,60 @@ def handle_tasks(tenant_id, employee_id):
             
             # Get customer name and client_id
             customer_name = data.get('customer_name')
-            client_id = data.get('client_id')
-            
-            if client_id and not customer_name:
-                client_query = text("""
-                    SELECT client_company_name FROM "StreemLyne_MT"."Client_Master"
-                    WHERE client_id = :client_id AND tenant_id = :tenant_id
-                """)
-                client = session.execute(client_query, {
-                    'client_id': client_id,
-                    'tenant_id': str(tenant_id)
-                }).fetchone()
-                if client:
-                    customer_name = client.client_company_name
+            raw_client_id = data.get('client_id')
+            client_id = None
+
+            if raw_client_id is not None:
+                # Try as an existing integer client_id
+                try:
+                    candidate_id = int(raw_client_id)
+                    client_query = text("""
+                        SELECT client_id, client_company_name FROM "StreemLyne_MT"."Client_Master"
+                        WHERE client_id = :client_id AND tenant_id = :tenant_id
+                    """)
+                    client = session.execute(client_query, {
+                        'client_id': candidate_id,
+                        'tenant_id': str(tenant_id)
+                    }).fetchone()
+                    if client:
+                        client_id = client.client_id
+                        if not customer_name:
+                            customer_name = client.client_company_name
+                except (TypeError, ValueError):
+                    pass
+
+                # Not a valid existing integer id -> treat as a new customer name
+                if client_id is None:
+                    new_name = str(raw_client_id).strip()
+                    if new_name:
+                        # Avoid duplicates: check by name first
+                        name_check = text("""
+                            SELECT client_id, client_company_name FROM "StreemLyne_MT"."Client_Master"
+                            WHERE LOWER(client_company_name) = LOWER(:name) AND tenant_id = :tenant_id
+                        """)
+                        existing = session.execute(name_check, {
+                            'name': new_name,
+                            'tenant_id': str(tenant_id)
+                        }).fetchone()
+
+                        if existing:
+                            client_id = existing.client_id
+                            if not customer_name:
+                                customer_name = existing.client_company_name
+                        else:
+                            insert_client = text("""
+                                INSERT INTO "StreemLyne_MT"."Client_Master"
+                                (client_company_name, tenant_id, is_deleted)
+                                VALUES (:name, :tenant_id, false)
+                                RETURNING client_id, client_company_name
+                            """)
+                            new_client = session.execute(insert_client, {
+                                'name': new_name,
+                                'tenant_id': str(tenant_id)
+                            }).fetchone()
+                            client_id = new_client.client_id
+                            if not customer_name:
+                                customer_name = new_client.client_company_name
             
             # Parse times
             start_time = None
@@ -519,22 +560,62 @@ def handle_single_task(task_id, tenant_id, employee_id):
                 params['project_id'] = data['project_id']
             
             # Update client
-            if 'client_id' in data:
-                update_fields.append("client_id = :client_id")
-                params['client_id'] = data['client_id']
-                
-                if data['client_id']:
+            if 'client_id' in data and data['client_id']:
+                raw_client_id = data['client_id']
+                resolved_client_id = None
+                resolved_customer_name = None
+
+                try:
+                    candidate_id = int(raw_client_id)
                     client_query = text("""
-                        SELECT client_company_name FROM "StreemLyne_MT"."Client_Master"
+                        SELECT client_id, client_company_name FROM "StreemLyne_MT"."Client_Master"
                         WHERE client_id = :client_id AND tenant_id = :tenant_id
                     """)
                     client = session.execute(client_query, {
-                        'client_id': data['client_id'],
+                        'client_id': candidate_id,
                         'tenant_id': str(tenant_id)
                     }).fetchone()
                     if client:
-                        update_fields.append("customer_name = :customer_name")
-                        params['customer_name'] = client.client_company_name
+                        resolved_client_id = client.client_id
+                        resolved_customer_name = client.client_company_name
+                except (TypeError, ValueError):
+                    pass
+
+                if resolved_client_id is None:
+                    new_name = str(raw_client_id).strip()
+                    if new_name:
+                        name_check = text("""
+                            SELECT client_id, client_company_name FROM "StreemLyne_MT"."Client_Master"
+                            WHERE LOWER(client_company_name) = LOWER(:name) AND tenant_id = :tenant_id
+                        """)
+                        existing = session.execute(name_check, {
+                            'name': new_name,
+                            'tenant_id': str(tenant_id)
+                        }).fetchone()
+
+                        if existing:
+                            resolved_client_id = existing.client_id
+                            resolved_customer_name = existing.client_company_name
+                        else:
+                            insert_client = text("""
+                                INSERT INTO "StreemLyne_MT"."Client_Master"
+                                (client_company_name, tenant_id, is_deleted)
+                                VALUES (:name, :tenant_id, false)
+                                RETURNING client_id, client_company_name
+                            """)
+                            new_client = session.execute(insert_client, {
+                                'name': new_name,
+                                'tenant_id': str(tenant_id)
+                            }).fetchone()
+                            resolved_client_id = new_client.client_id
+                            resolved_customer_name = new_client.client_company_name
+
+                update_fields.append("client_id = :client_id")
+                params['client_id'] = resolved_client_id
+
+                if resolved_customer_name:
+                    update_fields.append("customer_name = :customer_name")
+                    params['customer_name'] = resolved_customer_name
             
             if 'customer_name' in data:
                 update_fields.append("customer_name = :customer_name")
