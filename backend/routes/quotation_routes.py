@@ -207,9 +207,11 @@ def create_quotation(tenant_id, employee_id):
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
-             customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type)
+             customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
+             carcass_colour, door_colour, door_style)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
-                    :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type)
+                    :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
+                    :carcass_colour, :door_colour, :door_style)
             RETURNING quotation_id
         """)
         
@@ -229,6 +231,9 @@ def create_quotation(tenant_id, employee_id):
             'vat_percentage': data.get('vat_percentage', 20.0),
             'door_type': data.get('door_type', 'Carcass Only'),
             'room_type': data.get('room_type', 'Kitchen'),
+            'carcass_colour': data.get('carcass_colour', ''),
+            'door_colour': data.get('door_colour', ''),
+            'door_style': data.get('door_style', ''),
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -1104,6 +1109,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'room_type': getattr(quote, 'room_type', 'Kitchen'),
                 'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
                 'global_discount_percent': float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0,
+                'carcass_colour': getattr(quote, 'carcass_colour', None) or '',
+                'door_colour': getattr(quote, 'door_colour', None) or '',
+                'door_style': getattr(quote, 'door_style', None) or '',
                 'client_id': quote.client_id,
                 'client_name': quote.client_company_name,
                 'client_address': quote.client_address,
@@ -1154,6 +1162,15 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'room_type' in data:
                 update_fields.append("room_type = :room_type")
                 params['room_type'] = data['room_type']
+            if 'carcass_colour' in data:
+                update_fields.append("carcass_colour = :carcass_colour")
+                params['carcass_colour'] = data['carcass_colour']
+            if 'door_colour' in data:
+                update_fields.append("door_colour = :door_colour")
+                params['door_colour'] = data['door_colour']
+            if 'door_style' in data:
+                update_fields.append("door_style = :door_style")
+                params['door_style'] = data['door_style']
             
             # ✅ NEW: UPDATE ITEMS
             if 'items' in data:
@@ -2121,6 +2138,9 @@ def download_quotation_pdf(quotation_id):
                     q.total,
                     q.vat_percentage,
                     q.global_discount_percent,
+                    q.carcass_colour,
+                    q.door_colour,
+                    q.door_style,
                     c.client_company_name,
                     c.address        AS client_address,
                     c.client_phone   AS client_phone_num
@@ -2192,6 +2212,9 @@ def download_quotation_pdf(quotation_id):
             ('NAME:',    cust_name),
             ('ADDRESS:', cust_address),
             ('TEL:',     cust_phone),
+            ('CARCASS COLOUR:', getattr(quotation, 'carcass_colour', None) or 'N/A'),
+            ('DOOR COLOUR:',    getattr(quotation, 'door_colour', None) or 'N/A'),
+            ('DOOR STYLE:',     getattr(quotation, 'door_style', None) or 'N/A'),
         ]:
             pdf.set_font('Arial', 'B', 10)
             pdf.set_fill_color(*FILL)
