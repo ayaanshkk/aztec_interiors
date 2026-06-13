@@ -16,27 +16,31 @@ file_bp = Blueprint('file_routes', __name__)
 # ==========================================
 
 def upload_to_vercel_blob(file, filename):
-    """Upload file to Vercel Blob via Next.js API"""
+    """Upload file directly to Vercel Blob storage"""
     try:
-        NEXTJS_URL = os.getenv('NEXT_PUBLIC_FRONTEND_URL', 'http://localhost:3000')
-        
-        # Prepare file for upload
-        files = {'file': (filename, file.stream, file.content_type)}
-        
-        # Upload to Vercel Blob via Next.js API
-        upload_response = requests.post(
-            f'{NEXTJS_URL}/api/upload',
-            files=files,
+        blob_token = os.getenv('BLOB_READ_WRITE_TOKEN')
+        if not blob_token:
+            raise Exception("BLOB_READ_WRITE_TOKEN not configured")
+
+        file_bytes = file.read()
+
+        upload_response = requests.put(
+            f'https://blob.vercel-storage.com/{filename}',
+            data=file_bytes,
+            headers={
+                'authorization': f'Bearer {blob_token}',
+                'x-content-type': file.content_type or 'application/octet-stream',
+                'x-add-random-suffix': '1',
+            },
             timeout=30
         )
-        
-        if upload_response.status_code != 200:
-            error_data = upload_response.json() if upload_response.text else {}
-            raise Exception(f"Vercel Blob upload failed: {error_data.get('error', 'Unknown error')}")
-        
+
+        if upload_response.status_code not in (200, 201):
+            raise Exception(f"Vercel Blob upload failed: {upload_response.text}")
+
         blob_data = upload_response.json()
-        return blob_data['url']  # Full Vercel Blob URL
-        
+        return blob_data['url']
+
     except requests.exceptions.Timeout:
         current_app.logger.error("Timeout uploading to Vercel Blob")
         raise Exception("Upload timeout - please try again")
