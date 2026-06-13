@@ -126,7 +126,15 @@ def get_quotations(tenant_id, employee_id):
                 q.*,
                 c.client_company_name,
                 (SELECT COUNT(*) FROM "StreemLyne_MT"."Quotation_Items" 
-                 WHERE quotation_id = q.quotation_id) as items_count
+                 WHERE quotation_id = q.quotation_id) as items_count,
+                (SELECT COALESCE(SUM(amount * quantity), 0) FROM "StreemLyne_MT"."Quotation_Items"
+                 WHERE quotation_id = q.quotation_id
+                 AND (
+                     (item_name IS NOT NULL AND item_name != '')
+                     OR (description IS NOT NULL AND description != '')
+                     OR (amount > 0)
+                 )
+                ) as computed_subtotal
             FROM "StreemLyne_MT"."Quotations" q
             INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
             WHERE {where_clause}
@@ -137,6 +145,14 @@ def get_quotations(tenant_id, employee_id):
         
         result = []
         for q in quotations:
+            subtotal = float(q.computed_subtotal or 0)
+            discount_pct = float(getattr(q, 'global_discount_percent', 0) or 0)
+            vat_pct = float(getattr(q, 'vat_percentage', 20) or 20)
+
+            subtotal_after_discount = subtotal - (subtotal * discount_pct / 100)
+            vat_amount = subtotal_after_discount * (vat_pct / 100)
+            computed_total = subtotal_after_discount + vat_amount
+
             result.append({
                 'id': q.quotation_id,  # ✅ CRITICAL: Frontend needs this for delete!
                 'quotation_id': q.quotation_id,  # Keep for backward compatibility
@@ -146,7 +162,11 @@ def get_quotations(tenant_id, employee_id):
                 'client_name': q.client_company_name,
                 'customer_name': q.client_company_name,  # ✅ ADDED: Alternative field name
                 'project_id': q.project_id,
-                'total': float(q.total) if q.total else 0.0,
+                'subtotal': subtotal,
+                'discount_percent': discount_pct,
+                'vat_percentage': vat_pct,
+                'vat_amount': vat_amount,
+                'total': computed_total,  # ✅ NOW: subtotal - discount + VAT, computed from items
                 'status': q.status,
                 'notes': q.notes,
                 'items_count': q.items_count or 0,
@@ -208,10 +228,10 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
-             carcass_colour, door_colour, door_style)
+             carcass_colour, door_colour, panelwork_colour, door_style)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
-                    :carcass_colour, :door_colour, :door_style)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style)
             RETURNING quotation_id
         """)
         
@@ -1095,6 +1115,17 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 if i.item_id in sub_items_map:
                     d['subItems'] = sub_items_map[i.item_id]
                 items_result.append(d)
+
+            # ✅ NEW: Compute subtotal/total from items (source of truth — matches PDF)
+            subtotal = sum(
+                float(i.amount or 0) * (i.quantity or 1)
+                for i in valid_items
+            )
+            vat_pct_val = float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0
+            discount_pct_val = float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0
+            subtotal_after_discount = subtotal - (subtotal * discount_pct_val / 100)
+            vat_amount_val = subtotal_after_discount * (vat_pct_val / 100)
+            computed_total = subtotal_after_discount + vat_amount_val
             
             result = {
                 'id': quote.quotation_id,
@@ -1107,17 +1138,21 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'customer_email': getattr(quote, 'customer_email', None),
                 'door_type': getattr(quote, 'door_type', 'Carcass Only'),
                 'room_type': getattr(quote, 'room_type', 'Kitchen'),
-                'vat_percentage': float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0,
-                'global_discount_percent': float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0,
+                'vat_percentage': vat_pct_val,
+                'global_discount_percent': discount_pct_val,
                 'carcass_colour': getattr(quote, 'carcass_colour', None) or '',
                 'door_colour': getattr(quote, 'door_colour', None) or '',
+                'panelwork_colour': getattr(quote, 'panelwork_colour', None) or '',
                 'door_style': getattr(quote, 'door_style', None) or '',
                 'client_id': quote.client_id,
                 'client_name': quote.client_company_name,
                 'client_address': quote.client_address,
                 'client_phone': quote.client_phone,
                 'project_id': quote.project_id,
-                'total': float(quote.total) if quote.total else 0,
+                'subtotal': subtotal,            # ✅ NEW
+                'vat_amount': vat_amount_val,     # ✅ NEW
+                'discount_amount': subtotal * (discount_pct_val / 100),  # ✅ NEW
+                'total': computed_total,          # ✅ CHANGED: computed from items, not stored column
                 'status': quote.status,
                 'notes': quote.notes,
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
@@ -1150,6 +1185,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'vat_percentage' in data:
                 update_fields.append("vat_percentage = :vat_percentage")
                 params['vat_percentage'] = data['vat_percentage']
+            if 'global_discount_percent' in data:
+                update_fields.append("global_discount_percent = :global_discount_percent")
+                params['global_discount_percent'] = data['global_discount_percent']
             if 'status' in data:
                 update_fields.append("status = :status")
                 params['status'] = data['status']
@@ -1168,11 +1206,14 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'door_colour' in data:
                 update_fields.append("door_colour = :door_colour")
                 params['door_colour'] = data['door_colour']
+            if 'panelwork_colour' in data:
+                update_fields.append("panelwork_colour = :panelwork_colour")
+                params['panelwork_colour'] = data['panelwork_colour']
             if 'door_style' in data:
                 update_fields.append("door_style = :door_style")
                 params['door_style'] = data['door_style']
             
-            # ✅ NEW: UPDATE ITEMS
+            # ✅ UPDATE ITEMS
             if 'items' in data:
                 # Delete all existing items
                 delete_items = text("""
@@ -1193,7 +1234,8 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     RETURNING item_id
                 """)
                 
-                total = 0.0
+                # ✅ CHANGED: this is now treated as the SUBTOTAL (pre-discount, pre-VAT)
+                subtotal = 0.0
                 for item in data['items']:
                     # Skip completely empty items
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
@@ -1222,7 +1264,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     })
                     
                     parent_item_id = result.fetchone().item_id
-                    total += item_amount * item_qty
+                    subtotal += item_amount * item_qty
 
                     # Insert sub-items linked to this parent
                     for sub in item.get('subItems', []):
@@ -1250,11 +1292,12 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                             'section': item_section,
                         })
                         
-                        total += sub_amount * sub_qty
+                        subtotal += sub_amount * sub_qty
                 
-                # Update total in quotation
+                # ✅ CHANGED: store the item subtotal in the 'total' column
+                # (kept as pre-VAT/pre-discount subtotal for consistency with create_quotation)
                 update_fields.append("total = :total")
-                params['total'] = total
+                params['total'] = subtotal
             elif 'total' in data:
                 update_fields.append("total = :total")
                 params['total'] = data['total']
@@ -1309,8 +1352,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
-
+        
 # ============================================================================
 # DELETE QUOTATION ITEM
 # ============================================================================
@@ -1471,6 +1513,14 @@ def auto_price_lookup(tenant_id, employee_id):
     """
     db_session = SessionLocal()
     try:
+        DOOR_TYPE_DISPLAY = {
+            'Basic Slab': 'Slab',
+            'Acrylic Gloss/Matt': 'Lacquered Slab',
+        }
+
+        def display_door_type(dt):
+            return DOOR_TYPE_DISPLAY.get(dt, dt)
+
         data = request.get_json()
         description = data.get('description', '').strip().upper()
         door_type = data.get('door_type', '').strip()
@@ -1492,6 +1542,8 @@ def auto_price_lookup(tenant_id, employee_id):
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
         suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG|BST|AGT|VDT|BGT|C)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
+        print(f"   🔬 DEBUG: description='{description}', suffix_match={bool(suffix_match)}, groups={suffix_match.groups() if suffix_match else None}")
+
         
         door_component_only = False
         door_total_mode = False  # NEW: carcass + door combined
@@ -1584,13 +1636,18 @@ def auto_price_lookup(tenant_id, employee_id):
                 target_door_type = component_door_type
             else:
                 DOOR_TYPE_MAP = {
+                    'carcass only': 'Carcass Only',
                     'basic slab': 'Basic Slab',
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
+                    'timber': 'Timber',
                     'vinyl': 'Vinyl Doors',
                     'vinyl doors': 'Vinyl Doors',
+                    'black glass': 'Black Glass',
+                    'base cabinet only': 'Base Cabinet Only',
                 }
+
                 target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
 
             price_row = next((r for r in results if r.door_type == target_door_type), None)
@@ -1933,7 +1990,7 @@ def auto_price_lookup(tenant_id, employee_id):
                     'price': final_price,
                     'item_code': item_code,
                     'item_name': item_name,
-                    'description': f"{item_name} - {component_door_type} (Total)",
+                    'description': f"{item_name} - {display_door_type(component_door_type)} (Total)",
                     'door_type': component_door_type,
                     'category': category,
                     'width': first_result.width,
@@ -1955,7 +2012,7 @@ def auto_price_lookup(tenant_id, employee_id):
                     'price': door_price,
                     'item_code': item_code,
                     'item_name': item_name,
-                    'description': f"{component_door_type} Door for {item_name}",
+                    'description': f"{display_door_type(component_door_type)} Door for {item_name}",
                     'door_type': component_door_type,
                     'category': category,
                     'width': first_result.width,
@@ -1982,7 +2039,7 @@ def auto_price_lookup(tenant_id, employee_id):
         carcass_price = float(carcass_row.base_price)
         
         # CASE 1: No door type specified OR "Carcass Only" selected
-        valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
+        valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Timber', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
         if not db_door_type or db_door_type == 'Carcass Only' or db_door_type not in valid_door_types:
             print(f"   🏗️ MODE: Carcass ONLY for {item_code}")
             print(f"   💰 Price: £{carcass_price:.2f}")
@@ -2018,7 +2075,8 @@ def auto_price_lookup(tenant_id, employee_id):
                 'price': carcass_price,
                 'item_code': item_code,
                 'item_name': item_name,
-                'description': f"{item_name} - {db_door_type} (door price not found)",
+                'description': f"{item_name} - {display_door_type(db_door_type)} (door price not found)",
+                'door_type': db_door_type,
                 'door_type': db_door_type,
                 'category': category,
                 'width': first_result.width,
@@ -2042,7 +2100,7 @@ def auto_price_lookup(tenant_id, employee_id):
             'price': final_price,
             'item_code': item_code,
             'item_name': item_name,
-            'description': f"{item_name} - {db_door_type}",
+            'description': f"{item_name} - {display_door_type(db_door_type)}",
             'door_type': db_door_type,
             'category': category,
             'width': first_result.width,
@@ -2215,6 +2273,7 @@ def download_quotation_pdf(quotation_id):
             ('TEL:',     cust_phone),
             ('CARCASS COLOUR:', getattr(quotation, 'carcass_colour', None) or 'N/A'),
             ('DOOR COLOUR:',    getattr(quotation, 'door_colour', None) or 'N/A'),
+            ('PANELWORK COLOUR:', getattr(quotation, 'panelwork_colour', None) or 'N/A'),
             ('DOOR STYLE:',     getattr(quotation, 'door_style', None) or 'N/A'),
         ]:
             pdf.set_font('Arial', 'B', 10)
