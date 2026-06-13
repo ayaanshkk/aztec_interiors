@@ -89,6 +89,7 @@ def get_pricelist(tenant_id, employee_id):
                 'dimension_based': item.dimension_based,
                 'dimension_formula': item.dimension_formula,
                 'brand': item.brand if hasattr(item, 'brand') else None,
+                'colour': item.colour if hasattr(item, 'colour') else None,
                 'created_at': item.created_at.isoformat() if item.created_at else None,
                 'updated_at': item.updated_at.isoformat() if item.updated_at else None
             })
@@ -128,9 +129,9 @@ def create_pricelist_item(tenant_id, employee_id):
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."PriceList_Master"
             (tenant_id, category, item_code, item_name, description, base_price, door_type,
-             width, height, depth, unit, dimension_based, dimension_formula)
+             width, height, depth, unit, dimension_based, dimension_formula, colour)
             VALUES (:tenant_id, :category, :item_code, :item_name, :description, :base_price, :door_type,
-                    :width, :height, :depth, :unit, :dimension_based, :dimension_formula)
+                    :width, :height, :depth, :unit, :dimension_based, :dimension_formula, :colour)
             RETURNING pricelist_id
         """)
         
@@ -147,7 +148,8 @@ def create_pricelist_item(tenant_id, employee_id):
             'depth': data.get('depth'),
             'unit': data.get('unit', 'each'),
             'dimension_based': data.get('dimension_based', False),
-            'dimension_formula': data.get('dimension_formula')
+            'dimension_formula': data.get('dimension_formula'),
+            'colour': data.get('colour')
         })
         
         pricelist_id = result.fetchone().pricelist_id
@@ -226,7 +228,8 @@ def update_pricelist_item(pricelist_id, tenant_id, employee_id):
             'unit': 'unit',
             'category': 'category',
             'dimension_based': 'dimension_based',
-            'dimension_formula': 'dimension_formula'
+            'dimension_formula': 'dimension_formula',
+            'colour': 'colour'
         }
         
         for key, col in updatable.items():

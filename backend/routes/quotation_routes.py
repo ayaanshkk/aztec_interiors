@@ -253,6 +253,7 @@ def create_quotation(tenant_id, employee_id):
             'room_type': data.get('room_type', 'Kitchen'),
             'carcass_colour': data.get('carcass_colour', ''),
             'door_colour': data.get('door_colour', ''),
+            'panelwork_colour': data.get('panelwork_colour', ''),
             'door_style': data.get('door_style', ''),
         })
         
@@ -1352,7 +1353,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-        
+
 # ============================================================================
 # DELETE QUOTATION ITEM
 # ============================================================================
@@ -1850,10 +1851,9 @@ def auto_price_lookup(tenant_id, employee_id):
         # ACCESSORIES & HANDLES - Single price, no door types
         # ========================================================================
         
-        if category in ['Accessories', 'Handles']:
+        if category in ['Accessories', 'Handles', 'Sink and Tap', 'Worktops']:
             print(f"   📦 {category} category - single price lookup")
             
-            # These categories only have one price (door_type = 'Standard')
             price_row = next((r for r in results if r.door_type == 'Standard'), None)
             
             if not price_row or not price_row.base_price:
@@ -2289,7 +2289,7 @@ def download_quotation_pdf(quotation_id):
         headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
         widths  = [25,       128,            22,       15]  # sum = 190
 
-        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Fittings']
+        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Fittings', 'Sink and Tap', 'Worktops']
 
         # Build top-level / sub-item structure, grouped by section
         valid_items = [
