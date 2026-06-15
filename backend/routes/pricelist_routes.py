@@ -91,7 +91,8 @@ def get_pricelist(tenant_id, employee_id):
                 'brand': item.brand if hasattr(item, 'brand') else None,
                 'colour': item.colour if hasattr(item, 'colour') else None,
                 'created_at': item.created_at.isoformat() if item.created_at else None,
-                'updated_at': item.updated_at.isoformat() if item.updated_at else None
+                'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+                'alias_codes': item.alias_codes if hasattr(item, 'alias_codes') else None,
             })
         
         return jsonify({
@@ -114,7 +115,7 @@ def get_pricelist(tenant_id, employee_id):
 @token_required
 @require_tenant
 def create_pricelist_item(tenant_id, employee_id):
-    """Create a new price list item"""
+    """Create or upsert a price list item"""
     session = SessionLocal()
     try:
         data = request.get_json()
@@ -125,13 +126,52 @@ def create_pricelist_item(tenant_id, employee_id):
             return jsonify({'error': 'item_code is required'}), 400
         if not data.get('door_type'):
             return jsonify({'error': 'door_type is required'}), 400
-        
+
+        # ✅ For Appliances: upsert by item_name + brand + door_type
+        # This prevents duplicate rows when editing empty levels
+        if data.get('category') == 'Appliances' and data.get('brand') and data.get('item_name'):
+            existing = session.execute(text("""
+                SELECT pricelist_id FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                  AND category = 'Appliances'
+                  AND item_name = :item_name
+                  AND brand = :brand
+                  AND door_type = :door_type
+                LIMIT 1
+            """), {
+                'tenant_id': str(tenant_id),
+                'item_name': data['item_name'],
+                'brand': data['brand'],
+                'door_type': data['door_type'],
+            }).fetchone()
+
+            if existing:
+                # Row already exists for this appliance+brand+level — update it
+                session.execute(text("""
+                    UPDATE "StreemLyne_MT"."PriceList_Master"
+                    SET item_code = :item_code,
+                        base_price = :base_price,
+                        description = :description
+                    WHERE pricelist_id = :pricelist_id
+                """), {
+                    'pricelist_id': existing.pricelist_id,
+                    'item_code': data['item_code'],
+                    'base_price': data.get('base_price'),
+                    'description': data.get('description', ''),
+                })
+                session.commit()
+                return jsonify({
+                    'pricelist_id': existing.pricelist_id,
+                    'message': 'Price list item updated (upsert)'
+                }), 200
+
+        # ✅ Standard insert for all other categories
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."PriceList_Master"
             (tenant_id, category, item_code, item_name, description, base_price, door_type,
-             width, height, depth, unit, dimension_based, dimension_formula, colour)
+             width, height, depth, unit, dimension_based, dimension_formula, colour, brand)
             VALUES (:tenant_id, :category, :item_code, :item_name, :description, :base_price, :door_type,
-                    :width, :height, :depth, :unit, :dimension_based, :dimension_formula, :colour)
+                    :width, :height, :depth, :unit, :dimension_based, :dimension_formula, :colour, :brand)
             RETURNING pricelist_id
         """)
         
@@ -149,7 +189,8 @@ def create_pricelist_item(tenant_id, employee_id):
             'unit': data.get('unit', 'each'),
             'dimension_based': data.get('dimension_based', False),
             'dimension_formula': data.get('dimension_formula'),
-            'colour': data.get('colour')
+            'colour': data.get('colour'),
+            'brand': data.get('brand'),
         })
         
         pricelist_id = result.fetchone().pricelist_id
@@ -229,7 +270,9 @@ def update_pricelist_item(pricelist_id, tenant_id, employee_id):
             'category': 'category',
             'dimension_based': 'dimension_based',
             'dimension_formula': 'dimension_formula',
-            'colour': 'colour'
+            'colour': 'colour',
+            'brand': 'brand',
+            'alias_codes': 'alias_codes',
         }
         
         for key, col in updatable.items():

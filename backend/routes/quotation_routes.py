@@ -278,7 +278,7 @@ def create_quotation(tenant_id, employee_id):
                 'quotation_id': quotation_id,
                 'item_name': item.get('item', ''),
                 'description': item.get('description', ''),
-                'color': item.get('color'),
+                'color': item.get('colour') or item.get('color') or '',
                 'quantity': item.get('quantity') or 1,
                 'amount': item.get('amount', 0),
                 'width': item.get('width'),
@@ -301,7 +301,7 @@ def create_quotation(tenant_id, employee_id):
                     'quotation_id': quotation_id,
                     'item_name': sub.get('item', ''),
                     'description': sub.get('description', ''),
-                    'color': sub.get('color'),
+                    'color': sub.get('colour') or sub.get('color') or '',
                     'quantity': sub.get('quantity') or 1,
                     'amount': sub.get('amount', 0),
                     'width': sub.get('width'),
@@ -578,6 +578,41 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
     except Exception as e:
         print(f"❌ Error finding price by code: {e}")
         return (0.0, None, None, None, None, True, None)
+    
+def _lookup_appliance_price(session, tenant_id, model_code):
+    """
+    Look up appliance price by exact item_code match.
+    Returns (price, pricelist_id, description, needs_manual_pricing)
+    """
+    try:
+        if not model_code or len(model_code.strip()) < 3:
+            return (0.0, None, '', True)
+
+        query = text("""
+            SELECT pricelist_id, base_price, item_name, description, door_type
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+              AND category = 'Appliances'
+              AND UPPER(item_code) = UPPER(:model_code)
+            LIMIT 1
+        """)
+
+        result = session.execute(query, {
+            'tenant_id': str(tenant_id),
+            'model_code': model_code.strip(),
+        }).fetchone()
+
+        if result and result.base_price:
+            desc = result.description or result.item_name or ''
+            print(f"✅ Appliance match: '{model_code}' → £{result.base_price} | {desc}")
+            return (float(result.base_price), result.pricelist_id, desc, False)
+
+        print(f"⚠️  No appliance found for '{model_code}'")
+        return (0.0, None, '', True)
+
+    except Exception as e:
+        print(f"Error looking up appliance '{model_code}': {e}")
+        return (0.0, None, '', True)
 
 
 def extract_checklist_items(form_data, session, tenant_id):
@@ -655,7 +690,7 @@ def extract_checklist_items(form_data, session, tenant_id):
     handles_qty_raw = str(form_data.get('handles_quantity', '') or '').strip()
  
     if handles_code and handles_code not in ('N/A', ''):
-        handle_price, handle_pricelist_id, _, needs_pricing = find_price_for_item(
+        handle_price, handle_pricelist_id, _, needs_pricing, handle_desc = find_price_for_item(
             session, tenant_id, 'handle', 'Handles', handles_code
         )
         try:
@@ -665,7 +700,7 @@ def extract_checklist_items(form_data, session, tenant_id):
  
         items.append({
             'item': handles_code,
-            'description': '',
+            'description': handle_desc,
             'colour': '',
             'qty': qty,
             'price': handle_price,
@@ -685,7 +720,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             add_qty_raw = str(handle.get('handles_quantity', '') or '').strip()
             if not add_code or add_code in ('N/A', ''):
                 continue
-            add_price, add_pricelist_id, _, add_needs = find_price_for_item(
+            add_price, add_pricelist_id, _, add_needs, add_desc = find_price_for_item(
                 session, tenant_id, 'handle', 'Handles', add_code
             )
             try:
@@ -694,7 +729,7 @@ def extract_checklist_items(form_data, session, tenant_id):
                 add_qty = 1
             items.append({
                 'item': add_code,
-                'description': '',
+                'description': add_desc,
                 'colour': '',
                 'qty': add_qty,
                 'price': add_price,
@@ -715,12 +750,12 @@ def extract_checklist_items(form_data, session, tenant_id):
             for acc_entry in raw_entries:
                 if not acc_entry or acc_entry in ('N/A', ''):
                     continue
-                acc_price, acc_pricelist_id, _, acc_needs = find_price_for_item(
+                acc_price, acc_pricelist_id, _, acc_needs, acc_desc = find_price_for_item(
                     session, tenant_id, 'accessory', 'Accessories', acc_entry
                 )
                 items.append({
                     'item': acc_entry,
-                    'description': '',
+                    'description': acc_desc,
                     'colour': '',
                     'qty': 1,
                     'price': acc_price,
@@ -739,12 +774,12 @@ def extract_checklist_items(form_data, session, tenant_id):
         color = (color or '').strip()
         if not code or code in ('N/A', ''):
             return
-        wt_price, wt_pricelist_id, _, wt_needs = find_price_for_item(
+        wt_price, wt_pricelist_id, _, wt_needs, wt_desc = find_price_for_item(
             session, tenant_id, 'worktop', 'Worktops', code
         )
         items.append({
             'item': code,
-            'description': '',
+            'description': wt_desc,
             'colour': color if color and color != 'N/A' else '',
             'qty': 1,
             'price': wt_price,
@@ -785,7 +820,7 @@ def extract_checklist_items(form_data, session, tenant_id):
             appliances = form_data.get('appliances', [])
  
             if isinstance(appliances, list):
-                for idx, app in enumerate(appliances):
+                for idx, app in enumerate(appliances[:7]):
                     if not isinstance(app, dict):
                         continue
                     make = (app.get('make') or '').strip()
@@ -795,12 +830,12 @@ def extract_checklist_items(form_data, session, tenant_id):
  
                     appliance_name = standard_appliance_names[idx] if idx < len(standard_appliance_names) else f'Appliance {idx+1}'
                     lookup_code = model if model and model != 'N/A' else appliance_name
-                    app_price, app_pricelist_id, _, app_needs = find_price_for_item(
-                        session, tenant_id, 'appliance', 'Appliances', lookup_code
+                    app_price, app_pricelist_id, app_desc, app_needs = _lookup_appliance_price(
+                        session, tenant_id, lookup_code
                     )
                     items.append({
                         'item': model if model and model != 'N/A' else appliance_name,
-                        'description': '',
+                        'description': app_desc,
                         'colour': '',
                         'qty': 1,
                         'price': app_price,
@@ -820,10 +855,10 @@ def extract_checklist_items(form_data, session, tenant_id):
                 except ValueError:
                     fridge_qty = 1
                 lookup = integ_fridge_model if integ_fridge_model and integ_fridge_model != 'N/A' else 'INTG Fridge'
-                f_price, f_pid, _, f_needs = find_price_for_item(session, tenant_id, 'appliance', 'Appliances', lookup)
+                f_price, f_pid, f_desc, f_needs = _lookup_appliance_price(session, tenant_id, lookup)
                 items.append({
                     'item': lookup,
-                    'description': '',
+                    'description': f_desc,
                     'colour': '',
                     'qty': fridge_qty,
                     'price': f_price,
@@ -843,10 +878,11 @@ def extract_checklist_items(form_data, session, tenant_id):
                 except ValueError:
                     freezer_qty = 1
                 lookup = integ_freezer_model if integ_freezer_model and integ_freezer_model != 'N/A' else 'INTG Freezer'
-                fz_price, fz_pid, _, fz_needs = find_price_for_item(session, tenant_id, 'appliance', 'Appliances', lookup)
+                fz_price, fz_pid, fz_desc, fz_needs = _lookup_appliance_price(session, tenant_id, lookup)
+
                 items.append({
                     'item': lookup,
-                    'description': '',
+                    'description': fz_desc,
                     'colour': '',
                     'qty': freezer_qty,
                     'price': fz_price,
@@ -870,12 +906,12 @@ def extract_checklist_items(form_data, session, tenant_id):
             sink_lookup = sink_model if sink_model and sink_model != 'N/A' else sink_details
  
             if sink_lookup and sink_lookup != 'N/A':
-                sink_price, sink_pid, _, sink_needs = find_price_for_item(
+                sink_price, sink_pid, _, sink_needs, sink_desc = find_price_for_item(
                     session, tenant_id, 'sink', 'Sink and Tap', sink_lookup
                 )
                 items.append({
                     'item': sink_lookup,
-                    'description': '',
+                    'description': sink_desc,
                     'colour': '',
                     'qty': 1,
                     'price': sink_price,
@@ -892,12 +928,12 @@ def extract_checklist_items(form_data, session, tenant_id):
             tap_lookup = tap_model if tap_model and tap_model != 'N/A' else tap_details
  
             if tap_lookup and tap_lookup != 'N/A':
-                tap_price, tap_pid, _, tap_needs = find_price_for_item(
+                tap_price, tap_pid, _, tap_needs, tap_desc = find_price_for_item(
                     session, tenant_id, 'tap', 'Sink and Tap', tap_lookup
                 )
                 items.append({
                     'item': tap_lookup,
-                    'description': '',
+                    'description': tap_desc,
                     'colour': '',
                     'qty': 1,
                     'price': tap_price,
@@ -1305,7 +1341,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         'quotation_id': quotation_id,
                         'item_name': item.get('item', ''),
                         'description': item.get('description', ''),
-                        'color': item.get('color', ''),
+                        'color': item.get('colour') or item.get('color') or '',
                         'quantity': item_qty,
                         'amount': item_amount,
                         'width': item.get('width'),
@@ -1334,7 +1370,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                             'quotation_id': quotation_id,
                             'item_name': sub.get('item', ''),
                             'description': sub.get('description', ''),
-                            'color': sub.get('color', ''),
+                            'color': sub.get('colour') or sub.get('color') or '',
                             'quantity': sub_qty,
                             'amount': sub_amount,
                             'width': sub.get('width'),
@@ -1665,6 +1701,24 @@ def auto_price_lookup(tenant_id, employee_id):
             'tenant_id': str(tenant_id),
             'item_code': search_code
         }).fetchall()
+        
+        # ✅ Alias fallback — checks alias_codes column
+        if not results:
+            alias_query = text("""
+                SELECT 
+                    item_code, item_name, door_type, base_price,
+                    width, height, depth, category, pricelist_id,
+                    description as item_description
+                FROM "StreemLyne_MT"."PriceList_Master"
+                WHERE tenant_id = :tenant_id
+                    AND alias_codes ILIKE :pattern
+            """)
+            results = db_session.execute(alias_query, {
+                'tenant_id': str(tenant_id),
+                'pattern': f'%{search_code}%'
+            }).fetchall()
+            if results:
+                print(f"✅ Found via alias: {search_code} → {results[0].item_code}")
         
         if not results:
             print(f"❌ No items found for code: {search_code}")
