@@ -13,15 +13,14 @@ materials_bp = Blueprint('materials', __name__)
 # ==========================================
 
 def can_manage_materials(tenant_id, employee_id, session):
-    """Check if user is Platform Admin (role_id = 1)"""
     role_query = text("""
         SELECT EXISTS (
             SELECT 1 FROM "StreemLyne_MT"."User_Master" u
             INNER JOIN "StreemLyne_MT"."User_Role_Mapping" urm ON u.user_id = urm.user_id
             WHERE u.employee_id = :employee_id 
                 AND u.tenant_id = :tenant_id
-                AND urm.role_id = 1
-        ) as is_platform_admin
+                AND urm.role_id IN (1, 2)  -- 1=Platform Admin, 2=Salesperson
+        ) as has_access
     """)
     
     result = session.execute(role_query, {
@@ -29,7 +28,7 @@ def can_manage_materials(tenant_id, employee_id, session):
         'tenant_id': str(tenant_id)
     }).fetchone()
     
-    return result.is_platform_admin if result else False
+    return result.has_access if result else False
 
 
 # ==========================================
