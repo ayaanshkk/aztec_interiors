@@ -362,25 +362,28 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         
         # Check if quote already exists
         existing_query = text("""
-            SELECT quotation_id, reference_number, total
-            FROM "StreemLyne_MT"."Quotations"
+            SELECT quotation_id FROM "StreemLyne_MT"."Quotations"
             WHERE tenant_id = :tenant_id
                 AND reference_number LIKE :pattern
         """)
-        
+
         existing = session.execute(existing_query, {
             'tenant_id': str(tenant_id),
             'pattern': f'%{form_submission_id}%'
         }).fetchone()
-        
+
         if existing:
-            return jsonify({
-                'success': True,
-                'quotation_id': existing.quotation_id,
-                'reference_number': existing.reference_number,
-                'total': float(existing.total) if existing.total else 0,
-                'message': 'Quote already exists for this checklist'
-            }), 200
+            # Delete old items then old quote so we regenerate fresh from updated checklist
+            session.execute(text("""
+                DELETE FROM "StreemLyne_MT"."Quotation_Items"
+                WHERE quotation_id = :qid
+            """), {'qid': existing.quotation_id})
+            session.execute(text("""
+                DELETE FROM "StreemLyne_MT"."Quotations"
+                WHERE quotation_id = :qid AND tenant_id = :tenant_id
+            """), {'qid': existing.quotation_id, 'tenant_id': str(tenant_id)})
+            session.flush()
+            print(f"🗑️  Deleted old quote {existing.quotation_id} to regenerate from updated checklist")
         
         # Parse form data
         form_data = json.loads(form.form_data) if isinstance(form.form_data, str) else form.form_data
@@ -429,9 +432,9 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         item_insert = text("""
             INSERT INTO "StreemLyne_MT"."Quotation_Items"
             (quotation_id, item_name, description, color, quantity, amount,
-             width, height, depth, needs_manual_pricing, pricelist_id)
+             width, height, depth, needs_manual_pricing, pricelist_id, section)
             VALUES (:quotation_id, :item_name, :description, :color, :quantity, :amount,
-                    :width, :height, :depth, :needs_manual, :pricelist_id)
+                    :width, :height, :depth, :needs_manual, :pricelist_id, :section)
         """)
         
         for item in extracted_items:
@@ -446,7 +449,8 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
                 'height': item.get('height'),
                 'depth': item.get('depth'),
                 'needs_manual': item.get('needs_manual_pricing', False),
-                'pricelist_id': item.get('pricelist_id')
+                'pricelist_id': item.get('pricelist_id'),
+                'section': item.get('section', 'Furniture'),
             })
             
             total += item.get('price', 0) * item.get('qty', 1)
@@ -578,353 +582,398 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
 
 def extract_checklist_items(form_data, session, tenant_id):
     """
-    Extract ONLY main components from checklist for quotation.
-    WITH DIAGNOSTIC LOGGING to debug additional doors
+    Extract items from checklist and categorise into correct quote sections.
+ 
+    Section mapping:
+    - Furniture     → Main door type + additional doors
+    - Handles       → handles_code + additional_handles
+    - Accessories   → accessories textarea (kitchen only)
+    - Worktops      → worktop_code + additional_worktops
+    - Appliances    → appliances list + integ fridge/freezer (kitchen only)
+    - Sink and Tap  → sink_model/sink_details + tap_model/tap_details (kitchen only)
     """
     items = []
-    
-    # ===== DIAGNOSTIC LOGGING START =====
-    import json
-    print("=" * 80)
-    print("📋 BEDROOM CHECKLIST DEBUG")
-    print("=" * 80)
-    print(f"🔑 All keys: {list(form_data.keys())}")
-    print(f"🚪 door_type: {form_data.get('door_type')}")
-    print(f"🚪 door_color: {form_data.get('door_color')}")
-    print(f"🚪 door_details: {form_data.get('door_details')}")
-    print(f"🚪 door_style: {form_data.get('door_style')}")
-    print(f"📄 FULL FORM DATA:")
-    try:
-        print(json.dumps(form_data, indent=2, default=str))
-    except:
-        print(str(form_data))
-    print("=" * 80)
-    # ===== DIAGNOSTIC LOGGING END =====
-    
-    # ===== 1. MAIN DOOR TYPE =====
+ 
+    form_type = form_data.get('form_type', '').lower()
+    checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
+ 
+    print(f"📋 extract_checklist_items: form_type={form_type}, checklist_type={checklist_type}")
+ 
+    # =========================================================================
+    # 1. FURNITURE — Main door + additional doors
+    # =========================================================================
     door_type = form_data.get('door_type', '').strip()
     door_color = form_data.get('door_color', '').strip()
-    
-    if door_type and door_type != 'N/A' and door_type != '':
+ 
+    if door_type and door_type not in ('N/A', ''):
         items.append({
             'item': f'Door - {door_type}',
             'description': '',
-            'colour': door_color if door_color and door_color != 'N/A' else 'Colour',
+            'colour': door_color if door_color and door_color != 'N/A' else '',
             'qty': 1,
             'price': 0,
             'amount': 0,
             'pricelist_id': None,
-            'needs_manual_pricing': True
+            'needs_manual_pricing': True,
+            'section': 'Furniture',
         })
-        print(f"✅ Added main door: {door_type} ({door_color})")
-    
-    # ===== 1B. ADDITIONAL DOORS - TRY MULTIPLE FIELD NAMES =====
-    # Try different possible field names
-    additional_doors = None
-    
-    for field_name in ['door_details', 'additional_doors', 'extra_doors', 'doorDetails', 'additionalDoors']:
-        if field_name in form_data:
-            additional_doors = form_data.get(field_name, [])
-            print(f"✅ Found additional doors in field: '{field_name}'")
-            print(f"   Value: {additional_doors}")
-            break
-    
-    if not additional_doors:
-        print("⚠️ No additional doors field found")
-    
-    if additional_doors and isinstance(additional_doors, list):
-        print(f"📦 Processing {len(additional_doors)} additional door entries")
-        
-        for idx, additional_door in enumerate(additional_doors):
-            print(f"   Door {idx + 1}: {additional_door}")
-            
-            if not isinstance(additional_door, dict):
-                print(f"   ⚠️ Not a dict, skipping")
+        print(f"   [Furniture] Main door: {door_type} ({door_color})")
+ 
+    additional_doors = form_data.get('additional_doors', [])
+    if isinstance(additional_doors, list):
+        for idx, door in enumerate(additional_doors):
+            if not isinstance(door, dict):
                 continue
-            
-            # Try multiple field name variations
-            add_door_style = (
-                additional_door.get('door_style') or 
-                additional_door.get('doorStyle') or 
-                additional_door.get('style') or ''
-            ).strip()
-            
-            add_door_color = (
-                additional_door.get('door_color') or 
-                additional_door.get('doorColor') or 
-                additional_door.get('color') or ''
-            ).strip()
-            
-            add_quantity = (
-                additional_door.get('quantity') or 
-                additional_door.get('qty') or ''
-            ).strip()
-            
-            print(f"   Extracted: style={add_door_style}, color={add_door_color}, qty={add_quantity}")
-            
-            # Skip if no door style
-            if not add_door_style or add_door_style == 'N/A':
-                print(f"   ⚠️ No door style, skipping")
+            add_door_type = (door.get('door_type') or door.get('door_style') or '').strip()
+            add_door_color = (door.get('door_color') or '').strip()
+            add_qty_raw = str(door.get('quantity', '') or '').strip()
+            if not add_door_type or add_door_type in ('N/A', ''):
                 continue
-            
-            # Parse quantity
-            qty = 1
             try:
-                qty = int(add_quantity) if add_quantity and add_quantity != 'N/A' else 1
-            except:
+                qty = int(add_qty_raw) if add_qty_raw and add_qty_raw != 'N/A' else 1
+            except ValueError:
                 qty = 1
-            
-            # Skip if quantity is 0
             if qty <= 0:
-                print(f"   ⚠️ Quantity is 0, skipping")
                 continue
-            
             items.append({
-                'item': f'Door - {add_door_style}',
+                'item': f'Door - {add_door_type}',
                 'description': '',
-                'colour': add_door_color if add_door_color and add_door_color != 'N/A' else 'Colour',
+                'colour': add_door_color if add_door_color and add_door_color != 'N/A' else '',
                 'qty': qty,
                 'price': 0,
                 'amount': 0,
                 'pricelist_id': None,
-                'needs_manual_pricing': True
+                'needs_manual_pricing': True,
+                'section': 'Furniture',
             })
-            print(f"   ✅ Added additional door: {add_door_style} ({add_door_color}) x{qty}")
-    
-    # ===== 2. HANDLES =====
+            print(f"   [Furniture] Additional door {idx+1}: {add_door_type} ({add_door_color}) x{qty}")
+ 
+    # =========================================================================
+    # 2. HANDLES — handles_code + additional_handles
+    # =========================================================================
     handles_code = form_data.get('handles_code', '').strip()
-    handles_qty = form_data.get('handles_quantity', '').strip()
-    
-    if handles_code and handles_code != 'N/A' and handles_code != '':
+    handles_qty_raw = str(form_data.get('handles_quantity', '') or '').strip()
+ 
+    if handles_code and handles_code not in ('N/A', ''):
         handle_price, handle_pricelist_id, _, needs_pricing = find_price_for_item(
             session, tenant_id, 'handle', 'Handles', handles_code
         )
-        
-        qty = 1
         try:
-            qty = int(handles_qty) if handles_qty and handles_qty != 'N/A' else 1
-        except:
+            qty = int(handles_qty_raw) if handles_qty_raw and handles_qty_raw != 'N/A' else 1
+        except ValueError:
             qty = 1
-        
+ 
         items.append({
-            'item': f'Handles - {handles_code}',
+            'item': handles_code,
             'description': '',
-            'colour': 'Colour',
+            'colour': '',
             'qty': qty,
             'price': handle_price,
-            'amount': handle_price * qty,
+            'amount': handle_price,
             'pricelist_id': handle_pricelist_id,
-            'needs_manual_pricing': needs_pricing
+            'needs_manual_pricing': needs_pricing,
+            'section': 'Handles',
         })
-    
-    # ===== 3. WORKTOP =====
-    worktop_type = form_data.get('worktop_material_type', '').strip()
-    worktop_color = form_data.get('worktop_material_color', '').strip()
-    
-    if worktop_type and worktop_type != 'N/A' and worktop_type != '':
-        worktop_price, worktop_pricelist_id, _, needs_pricing = find_price_for_item(
-            session, tenant_id, 'worktop', 'Worktops', f'{worktop_type}'
-        )
-        
-        items.append({
-            'item': f'Worktop - {worktop_type}',
-            'description': '',
-            'colour': worktop_color if worktop_color and worktop_color != 'N/A' else 'H1',
-            'qty': 1,
-            'price': worktop_price,
-            'amount': worktop_price,
-            'pricelist_id': worktop_pricelist_id,
-            'needs_manual_pricing': needs_pricing
-        })
-    
-    # ===== 4. APPLIANCES (ONLY IF NOT N/A) =====
-    appliances_owned = form_data.get('appliances_customer_owned', '').strip()
-    
-    if appliances_owned and appliances_owned.lower() in ['yes', 'no']:
-        appliances = form_data.get('appliances', [])
-        
-        if appliances and isinstance(appliances, list):
-            standard_appliances = ["Oven", "Microwave", "Washing Machine", "Dryer", "HOB", "Extractor", "INTG Dishwasher"]
-            
-            for idx, app in enumerate(appliances):
-                if not isinstance(app, dict):
+        print(f"   [Handles] {handles_code} x{qty} → £{handle_price}")
+ 
+    additional_handles = form_data.get('additional_handles', [])
+    if isinstance(additional_handles, list):
+        for idx, handle in enumerate(additional_handles):
+            if not isinstance(handle, dict):
+                continue
+            add_code = (handle.get('handles_code') or '').strip()
+            add_qty_raw = str(handle.get('handles_quantity', '') or '').strip()
+            if not add_code or add_code in ('N/A', ''):
+                continue
+            add_price, add_pricelist_id, _, add_needs = find_price_for_item(
+                session, tenant_id, 'handle', 'Handles', add_code
+            )
+            try:
+                add_qty = int(add_qty_raw) if add_qty_raw and add_qty_raw != 'N/A' else 1
+            except ValueError:
+                add_qty = 1
+            items.append({
+                'item': add_code,
+                'description': '',
+                'colour': '',
+                'qty': add_qty,
+                'price': add_price,
+                'amount': add_price,
+                'pricelist_id': add_pricelist_id,
+                'needs_manual_pricing': add_needs,
+                'section': 'Handles',
+            })
+            print(f"   [Handles] Additional {idx+1}: {add_code} x{add_qty} → £{add_price}")
+ 
+    # =========================================================================
+    # 3. ACCESSORIES — Kitchen only
+    # =========================================================================
+    if checklist_type == 'kitchen':
+        accessories_text = form_data.get('accessories', '').strip()
+        if accessories_text and accessories_text not in ('N/A', ''):
+            raw_entries = [a.strip() for a in accessories_text.replace('\n', ',').split(',') if a.strip()]
+            for acc_entry in raw_entries:
+                if not acc_entry or acc_entry in ('N/A', ''):
                     continue
-                
-                make = app.get('make', '').strip()
-                model = app.get('model', '').strip()
-                
-                if not make or make == 'N/A':
-                    if not model or model == 'N/A':
-                        continue
-                
-                appliance_name = standard_appliances[idx] if idx < len(standard_appliances) else f'Appliance {idx + 1}'
-                
-                appliance_price, appliance_pricelist_id, _, needs_pricing = find_price_for_item(
-                    session, tenant_id, 'appliance', 'Appliances', appliance_name
+                acc_price, acc_pricelist_id, _, acc_needs = find_price_for_item(
+                    session, tenant_id, 'accessory', 'Accessories', acc_entry
                 )
-                
                 items.append({
-                    'item': f'Appliance - {appliance_name}',
-                    'description': '',  # ✅ BLANK
-                    'colour': 'Colour',
+                    'item': acc_entry,
+                    'description': '',
+                    'colour': '',
                     'qty': 1,
-                    'price': appliance_price,
-                    'amount': appliance_price,
-                    'pricelist_id': appliance_pricelist_id,
-                    'needs_manual_pricing': needs_pricing
+                    'price': acc_price,
+                    'amount': acc_price,
+                    'pricelist_id': acc_pricelist_id,
+                    'needs_manual_pricing': acc_needs,
+                    'section': 'Accessories',
                 })
-        
-        # INTG Fridge
-        integ_fridge_make = form_data.get('integ_fridge_make', '').strip()
-        if integ_fridge_make and integ_fridge_make != 'N/A':
-            qty = 1
-            try:
-                qty = int(form_data.get('integ_fridge_qty', '').strip() or 1)
-            except:
-                qty = 1
-            
-            fridge_price, fridge_pricelist_id, _, needs_pricing = find_price_for_item(
-                session, tenant_id, 'appliance', 'Appliances', 'INTG Fridge'
+                print(f"   [Accessories] {acc_entry} → £{acc_price}")
+ 
+    # =========================================================================
+    # 4. WORKTOPS — worktop_code + additional_worktops
+    # =========================================================================
+    def _add_worktop(code, color, label=''):
+        code = (code or '').strip()
+        color = (color or '').strip()
+        if not code or code in ('N/A', ''):
+            return
+        wt_price, wt_pricelist_id, _, wt_needs = find_price_for_item(
+            session, tenant_id, 'worktop', 'Worktops', code
+        )
+        items.append({
+            'item': code,
+            'description': '',
+            'colour': color if color and color != 'N/A' else '',
+            'qty': 1,
+            'price': wt_price,
+            'amount': wt_price,
+            'pricelist_id': wt_pricelist_id,
+            'needs_manual_pricing': wt_needs,
+            'section': 'Worktops',
+        })
+        print(f"   [Worktops]{label} {code} ({color}) → £{wt_price}")
+ 
+    _add_worktop(
+        form_data.get('worktop_code', ''),
+        form_data.get('worktop_material_color', '')
+    )
+ 
+    additional_worktops = form_data.get('additional_worktops', [])
+    if isinstance(additional_worktops, list):
+        for idx, wt in enumerate(additional_worktops):
+            if not isinstance(wt, dict):
+                continue
+            _add_worktop(
+                wt.get('worktop_code', ''),
+                wt.get('worktop_material_color', ''),
+                label=f' (additional {idx+1})'
             )
-            
-            items.append({
-                'item': 'Appliance - INTG Fridge',
-                'description': '',  # ✅ BLANK
-                'colour': 'Colour',
-                'qty': qty,
-                'price': fridge_price,
-                'amount': fridge_price * qty,
-                'pricelist_id': fridge_pricelist_id,
-                'needs_manual_pricing': needs_pricing
-            })
-        
-        # INTG Freezer
-        integ_freezer_make = form_data.get('integ_freezer_make', '').strip()
-        if integ_freezer_make and integ_freezer_make != 'N/A':
-            qty = 1
-            try:
-                qty = int(form_data.get('integ_freezer_qty', '').strip() or 1)
-            except:
-                qty = 1
-            
-            freezer_price, freezer_pricelist_id, _, needs_pricing = find_price_for_item(
-                session, tenant_id, 'appliance', 'Appliances', 'INTG Freezer'
-            )
-            
-            items.append({
-                'item': 'Appliance - INTG Freezer',
-                'description': '',  # ✅ BLANK
-                'colour': 'Colour',
-                'qty': qty,
-                'price': freezer_price,
-                'amount': freezer_price * qty,
-                'pricelist_id': freezer_pricelist_id,
-                'needs_manual_pricing': needs_pricing
-            })
-    
-    # ===== 5. SINK (ONLY IF NOT N/A) =====
-    sink_owned = form_data.get('sink_tap_customer_owned', '').strip()
-    
-    if sink_owned and sink_owned.lower() in ['yes', 'no']:
-        sink_details = form_data.get('sink_details', '').strip()
-        
-        if sink_details and sink_details != 'N/A':
-            sink_price, sink_pricelist_id, _, needs_pricing = find_price_for_item(
-                session, tenant_id, 'sink', 'Sinks', sink_details
-            )
-            
-            items.append({
-                'item': 'Sink',
-                'description': '',  # ✅ BLANK
-                'colour': 'Colour',
-                'qty': 1,
-                'price': sink_price,
-                'amount': sink_price,
-                'pricelist_id': sink_pricelist_id,
-                'needs_manual_pricing': needs_pricing
-            })
-    
-    # ===== 6. TAP (ONLY IF NOT N/A) =====
-    if sink_owned and sink_owned.lower() in ['yes', 'no']:
-        tap_details = form_data.get('tap_details', '').strip()
-        
-        if tap_details and tap_details != 'N/A':
-            tap_price, tap_pricelist_id, _, needs_pricing = find_price_for_item(
-                session, tenant_id, 'tap', 'Taps', tap_details
-            )
-            
-            items.append({
-                'item': 'Tap',
-                'description': '',  # ✅ BLANK
-                'colour': 'Colour',
-                'qty': 1,
-                'price': tap_price,
-                'amount': tap_price,
-                'pricelist_id': tap_pricelist_id,
-                'needs_manual_pricing': needs_pricing
-            })
-    
+ 
+    # =========================================================================
+    # 5. APPLIANCES — Kitchen only
+    # =========================================================================
+    if checklist_type == 'kitchen':
+        appliances_owned = form_data.get('appliances_customer_owned', '').strip()
+ 
+        if appliances_owned and appliances_owned.lower() not in ('n/a', ''):
+            standard_appliance_names = [
+                "Oven", "Microwave", "Washing Machine", "Dryer",
+                "HOB", "Extractor", "INTG Dishwasher"
+            ]
+            appliances = form_data.get('appliances', [])
+ 
+            if isinstance(appliances, list):
+                for idx, app in enumerate(appliances):
+                    if not isinstance(app, dict):
+                        continue
+                    make = (app.get('make') or '').strip()
+                    model = (app.get('model') or '').strip()
+                    if (not make or make == 'N/A') and (not model or model == 'N/A'):
+                        continue
+ 
+                    appliance_name = standard_appliance_names[idx] if idx < len(standard_appliance_names) else f'Appliance {idx+1}'
+                    lookup_code = model if model and model != 'N/A' else appliance_name
+                    app_price, app_pricelist_id, _, app_needs = find_price_for_item(
+                        session, tenant_id, 'appliance', 'Appliances', lookup_code
+                    )
+                    items.append({
+                        'item': model if model and model != 'N/A' else appliance_name,
+                        'description': '',
+                        'colour': '',
+                        'qty': 1,
+                        'price': app_price,
+                        'amount': app_price,
+                        'pricelist_id': app_pricelist_id,
+                        'needs_manual_pricing': app_needs,
+                        'section': 'Appliances',
+                    })
+                    print(f"   [Appliances] {appliance_name}: {make} {model} → £{app_price}")
+ 
+            # INTG Fridge
+            integ_fridge_make = form_data.get('integ_fridge_make', '').strip()
+            integ_fridge_model = form_data.get('integ_fridge_model', '').strip()
+            if integ_fridge_make and integ_fridge_make != 'N/A':
+                try:
+                    fridge_qty = int(str(form_data.get('integ_fridge_qty', '') or '').strip() or 1)
+                except ValueError:
+                    fridge_qty = 1
+                lookup = integ_fridge_model if integ_fridge_model and integ_fridge_model != 'N/A' else 'INTG Fridge'
+                f_price, f_pid, _, f_needs = find_price_for_item(session, tenant_id, 'appliance', 'Appliances', lookup)
+                items.append({
+                    'item': lookup,
+                    'description': '',
+                    'colour': '',
+                    'qty': fridge_qty,
+                    'price': f_price,
+                    'amount': f_price,
+                    'pricelist_id': f_pid,
+                    'needs_manual_pricing': f_needs,
+                    'section': 'Appliances',
+                })
+                print(f"   [Appliances] INTG Fridge: {integ_fridge_make} x{fridge_qty} → £{f_price}")
+ 
+            # INTG Freezer
+            integ_freezer_make = form_data.get('integ_freezer_make', '').strip()
+            integ_freezer_model = form_data.get('integ_freezer_model', '').strip()
+            if integ_freezer_make and integ_freezer_make != 'N/A':
+                try:
+                    freezer_qty = int(str(form_data.get('integ_freezer_qty', '') or '').strip() or 1)
+                except ValueError:
+                    freezer_qty = 1
+                lookup = integ_freezer_model if integ_freezer_model and integ_freezer_model != 'N/A' else 'INTG Freezer'
+                fz_price, fz_pid, _, fz_needs = find_price_for_item(session, tenant_id, 'appliance', 'Appliances', lookup)
+                items.append({
+                    'item': lookup,
+                    'description': '',
+                    'colour': '',
+                    'qty': freezer_qty,
+                    'price': fz_price,
+                    'amount': fz_price,
+                    'pricelist_id': fz_pid,
+                    'needs_manual_pricing': fz_needs,
+                    'section': 'Appliances',
+                })
+                print(f"   [Appliances] INTG Freezer: {integ_freezer_make} x{freezer_qty} → £{fz_price}")
+ 
+    # =========================================================================
+    # 6. SINK AND TAP — Kitchen only
+    # =========================================================================
+    if checklist_type == 'kitchen':
+        sink_owned = form_data.get('sink_tap_customer_owned', '').strip()
+ 
+        if sink_owned and sink_owned.lower() not in ('n/a', ''):
+            # Sink: prefer model code, fall back to details text
+            sink_model = form_data.get('sink_model', '').strip()
+            sink_details = form_data.get('sink_details', '').strip()
+            sink_lookup = sink_model if sink_model and sink_model != 'N/A' else sink_details
+ 
+            if sink_lookup and sink_lookup != 'N/A':
+                sink_price, sink_pid, _, sink_needs = find_price_for_item(
+                    session, tenant_id, 'sink', 'Sink and Tap', sink_lookup
+                )
+                items.append({
+                    'item': sink_lookup,
+                    'description': '',
+                    'colour': '',
+                    'qty': 1,
+                    'price': sink_price,
+                    'amount': sink_price,
+                    'pricelist_id': sink_pid,
+                    'needs_manual_pricing': sink_needs,
+                    'section': 'Sink and Tap',
+                })
+                print(f"   [Sink and Tap] Sink: {sink_lookup} → £{sink_price}")
+ 
+            # Tap: prefer model code, fall back to details text
+            tap_model = form_data.get('tap_model', '').strip()
+            tap_details = form_data.get('tap_details', '').strip()
+            tap_lookup = tap_model if tap_model and tap_model != 'N/A' else tap_details
+ 
+            if tap_lookup and tap_lookup != 'N/A':
+                tap_price, tap_pid, _, tap_needs = find_price_for_item(
+                    session, tenant_id, 'tap', 'Sink and Tap', tap_lookup
+                )
+                items.append({
+                    'item': tap_lookup,
+                    'description': '',
+                    'colour': '',
+                    'qty': 1,
+                    'price': tap_price,
+                    'amount': tap_price,
+                    'pricelist_id': tap_pid,
+                    'needs_manual_pricing': tap_needs,
+                    'section': 'Sink and Tap',
+                })
+                print(f"   [Sink and Tap] Tap: {tap_lookup} → £{tap_price}")
+ 
     print(f"📊 Total items extracted: {len(items)}")
     return items
  
  
 def find_price_for_item(session, tenant_id, item_type, category, search_term):
-    """
-    Find price for an item from PriceList_Master.
-    
-    Returns: (price, pricelist_id, dimension_formula, needs_manual_pricing)
-    """
-    from sqlalchemy import text, or_
-    
+    from sqlalchemy import text
+
     try:
-        # Search in PriceList_Master
-        query = text("""
+        if not search_term or len(search_term.strip()) < 4:
+            print(f"⚠️  Skipping lookup for '{search_term}' (too short)")
+            return (0.0, None, None, True, '')
+
+        search_term = search_term.strip()
+
+        # ── 1. Exact item_code match ──
+        exact_query = text("""
             SELECT pricelist_id, base_price, dimension_formula, item_name, description
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
-            AND category = :category
-            AND (
-                LOWER(item_name) LIKE LOWER(:search_term)
-                OR LOWER(description) LIKE LOWER(:search_term)
-            )
+              AND category = :category
+              AND UPPER(item_code) = UPPER(:search_term)
+              AND (door_type = 'Standard' OR door_type IS NULL)
             LIMIT 1
         """)
-        
-        result = session.execute(query, {
+
+        result = session.execute(exact_query, {
             'tenant_id': str(tenant_id),
             'category': category,
-            'search_term': f'%{search_term}%'
+            'search_term': search_term,
         }).fetchone()
-        
-        if result:
-            return (
-                float(result.base_price or 0),
-                result.pricelist_id,
-                result.dimension_formula,
-                False  # Found in database
-            )
-        
-        # Not found - return fallback prices
-        fallback_prices = {
-            'door': 0.0,
-            'panel': 0.0,
-            'handle': 0.0,      # ← Set to 0
-            'worktop': 0.0,     # ← Set to 0
-            'appliance': 0.0,
-            'sink': 0.0,
-            'tap': 0.0
-        }
-        
-        return (
-            fallback_prices.get(item_type, 0.0),
-            None,
-            None,
-            True  # Needs manual pricing
-        )
-        
+
+        if result and result.base_price:
+            desc = result.description or result.item_name or ''
+            print(f"✅ Exact item_code match: '{search_term}' → £{result.base_price} | {desc}")
+            return (float(result.base_price), result.pricelist_id, result.dimension_formula, False, desc)
+
+        # ── 2. Fuzzy item_name / description match ──
+        fuzzy_query = text("""
+            SELECT pricelist_id, base_price, dimension_formula, item_name, description
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+              AND category = :category
+              AND (
+                  LOWER(item_name) LIKE LOWER(:search_term)
+                  OR LOWER(description) LIKE LOWER(:search_term)
+              )
+            LIMIT 1
+        """)
+
+        result = session.execute(fuzzy_query, {
+            'tenant_id': str(tenant_id),
+            'category': category,
+            'search_term': f'%{search_term}%',
+        }).fetchone()
+
+        if result and result.base_price:
+            desc = result.description or result.item_name or ''
+            print(f"✅ Fuzzy name match: '{search_term}' → £{result.base_price} | {desc}")
+            return (float(result.base_price), result.pricelist_id, result.dimension_formula, False, desc)
+
+        print(f"⚠️  No match found for '{search_term}' in category '{category}'")
+        return (0.0, None, None, True, '')
+
     except Exception as e:
-        print(f"Error finding price for {item_type}: {e}")
-        return (0.0, None, None, True)
+        print(f"Error finding price for {item_type} '{search_term}': {e}")
+        return (0.0, None, None, True, '')
  
 @quotation_bp.route('/pricelist/search', methods=['GET'])
 @token_required
