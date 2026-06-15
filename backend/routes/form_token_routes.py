@@ -349,6 +349,66 @@ def submit_customer_form():
     finally:
         session.close()
 
+@form_token_bp.route('/form-submissions', methods=['GET'])
+@token_required
+@require_tenant
+def get_form_submissions(tenant_id, employee_id):
+    """Get form submissions, optionally filtered by customer_id"""
+    session = SessionLocal()
+    try:
+        where_conditions = ["fs.tenant_id = :tenant_id"]
+        params = {'tenant_id': str(tenant_id)}
+
+        customer_id = request.args.get('customer_id')
+        if customer_id:
+            where_conditions.append("fs.client_id = :client_id")
+            params['client_id'] = int(customer_id)
+
+        where_clause = " AND ".join(where_conditions)
+
+        query = text(f"""
+            SELECT 
+                fs.form_submission_id,
+                fs.client_id,
+                fs.form_type,
+                fs.form_data,
+                fs.submitted_at,
+                fs.created_at,
+                c.client_company_name
+            FROM "StreemLyne_MT"."Customer_Form_Submissions" fs
+            LEFT JOIN "StreemLyne_MT"."Client_Master" c ON fs.client_id = c.client_id
+            WHERE {where_clause}
+            ORDER BY fs.submitted_at DESC
+        """)
+
+        submissions = session.execute(query, params).fetchall()
+
+        result = []
+        for s in submissions:
+            form_data = s.form_data
+            if isinstance(form_data, str):
+                try:
+                    form_data = json.loads(form_data)
+                except Exception:
+                    form_data = {}
+
+            result.append({
+                'id': s.form_submission_id,
+                'customer_id': s.client_id,
+                'customer_name': s.client_company_name or 'N/A',
+                'form_type': form_data.get('form_type', s.form_type or 'unknown'),
+                'room': form_data.get('room', ''),
+                'form_data': form_data,
+                'created_at': (s.submitted_at or s.created_at).isoformat() if (s.submitted_at or s.created_at) else None,
+            })
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        current_app.logger.exception(f"Error fetching form submissions: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
 
 # ─────────────────────────────────────────
 # FORM SUBMISSION MANAGEMENT (authenticated)
