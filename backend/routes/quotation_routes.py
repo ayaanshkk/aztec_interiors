@@ -154,19 +154,20 @@ def get_quotations(tenant_id, employee_id):
             computed_total = subtotal_after_discount + vat_amount
 
             result.append({
-                'id': q.quotation_id,  # ✅ CRITICAL: Frontend needs this for delete!
-                'quotation_id': q.quotation_id,  # Keep for backward compatibility
+                'id': q.quotation_id,
+                'quotation_id': q.quotation_id,
                 'reference_number': q.reference_number,
                 'client_id': q.client_id,
-                'customer_id': q.client_id,  # ✅ ADDED: Frontend also checks this
+                'customer_id': q.client_id,
                 'client_name': q.client_company_name,
-                'customer_name': q.client_company_name,  # ✅ ADDED: Alternative field name
+                'customer_name': q.client_company_name,
                 'project_id': q.project_id,
+                'room_name': getattr(q, 'room_name', '') or '',
                 'subtotal': subtotal,
                 'discount_percent': discount_pct,
                 'vat_percentage': vat_pct,
                 'vat_amount': vat_amount,
-                'total': computed_total,  # ✅ NOW: subtotal - discount + VAT, computed from items
+                'total': computed_total,
                 'status': q.status,
                 'notes': q.notes,
                 'items_count': q.items_count or 0,
@@ -228,10 +229,10 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
-             carcass_colour, door_colour, panelwork_colour, door_style)
+             carcass_colour, door_colour, panelwork_colour, door_style, room_name)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
-                    :carcass_colour, :door_colour, :panelwork_colour, :door_style)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name)
             RETURNING quotation_id
         """)
         
@@ -255,6 +256,7 @@ def create_quotation(tenant_id, employee_id):
             'door_colour': data.get('door_colour', ''),
             'panelwork_colour': data.get('panelwork_colour', ''),
             'door_style': data.get('door_style', ''),
+            'room_name': data.get('room_name', ''),
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -1139,6 +1141,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'customer_email': getattr(quote, 'customer_email', None),
                 'door_type': getattr(quote, 'door_type', 'Carcass Only'),
                 'room_type': getattr(quote, 'room_type', 'Kitchen'),
+                'room_name': getattr(quote, 'room_name', '') or '',
                 'vat_percentage': vat_pct_val,
                 'global_discount_percent': discount_pct_val,
                 'carcass_colour': getattr(quote, 'carcass_colour', None) or '',
@@ -1150,10 +1153,10 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'client_address': quote.client_address,
                 'client_phone': quote.client_phone,
                 'project_id': quote.project_id,
-                'subtotal': subtotal,            # ✅ NEW
-                'vat_amount': vat_amount_val,     # ✅ NEW
-                'discount_amount': subtotal * (discount_pct_val / 100),  # ✅ NEW
-                'total': computed_total,          # ✅ CHANGED: computed from items, not stored column
+                'subtotal': subtotal,
+                'vat_amount': vat_amount_val,
+                'discount_amount': subtotal * (discount_pct_val / 100),
+                'total': computed_total,
                 'status': quote.status,
                 'notes': quote.notes,
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
@@ -1213,6 +1216,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'door_style' in data:
                 update_fields.append("door_style = :door_style")
                 params['door_style'] = data['door_style']
+            if 'room_name' in data:
+                update_fields.append("room_name = :room_name")
+                params['room_name'] = data['room_name']
             
             # ✅ UPDATE ITEMS
             if 'items' in data:
