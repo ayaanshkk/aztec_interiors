@@ -480,7 +480,7 @@ def update_customer_stage(tenant_id, employee_id, customer_id):
         session.execute(
             text("""
                 UPDATE "StreemLyne_MT"."Client_Master"
-                SET stage = :stage
+                SET stage = :stage, stage_updated_at = NOW()
                 WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
             """),
             {'stage': new_stage, 'client_id': customer_id, 'tenant_id': str(tenant_id)}

@@ -35,6 +35,7 @@ def get_pipeline_data(tenant_id, employee_id):
                     c.is_allocated,
                     c.is_cleansed,
                     c.created_at,
+                    c.stage_updated_at,
                     c.visit_date,
                     c.project_types,
                     -- Aggregate project data
@@ -101,6 +102,7 @@ def get_pipeline_data(tenant_id, employee_id):
                             'email': row.client_email,
                             'visit_date': row.visit_date.isoformat() if row.visit_date else None,
                             'created_at': row.created_at.isoformat() if row.created_at else None,
+                            'stage_updated_at': row.stage_updated_at.isoformat() if row.stage_updated_at else None,
                         },
                         'project': {
                             'id': project['project_id'],
@@ -130,6 +132,7 @@ def get_pipeline_data(tenant_id, employee_id):
                             'email': row.client_email,
                             'created_at': row.created_at.isoformat() if row.created_at else None,
                             'visit_date': row.visit_date.isoformat() if row.visit_date else None,
+                            'stage_updated_at': row.stage_updated_at.isoformat() if row.stage_updated_at else None,
                         },
                         'opportunity': {
                             'id': opp['opportunity_id'],
@@ -158,7 +161,8 @@ def get_pipeline_data(tenant_id, employee_id):
                         'is_cleansed': bool(row.is_cleansed),
                         'created_at': row.created_at.isoformat() if row.created_at else None,
                         'visit_date': row.visit_date.isoformat() if row.visit_date else None,
-                        'project_types': row.project_types if row.project_types else []
+                        'project_types': row.project_types if row.project_types else [],
+                        'stage_updated_at': row.stage_updated_at.isoformat() if row.stage_updated_at else None,
                     }
                 })
         
@@ -201,7 +205,7 @@ def update_client_stage(tenant_id, employee_id, client_id):
         
         update_query = text("""
             UPDATE "StreemLyne_MT"."Client_Master"
-            SET stage = :stage
+            SET stage = :stage, stage_updated_at = NOW()
             WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
             RETURNING stage
         """)
@@ -264,8 +268,8 @@ def update_project_stage(tenant_id, employee_id, project_id):
         # Update the CLIENT's stage
         update_query = text("""
             UPDATE "StreemLyne_MT"."Client_Master"
-            SET stage = :stage
-            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            SET stage = :stage, stage_updated_at = NOW()
+            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
             RETURNING stage
         """)
         
@@ -324,8 +328,8 @@ def update_opportunity_stage(tenant_id, employee_id, opportunity_id):
         # Update the CLIENT's stage
         update_query = text("""
             UPDATE "StreemLyne_MT"."Client_Master"
-            SET stage = :stage
-            WHERE client_id = :client_id AND tenant_id = :tenant_id
+            SET stage = :stage, stage_updated_at = NOW()
+            WHERE client_id = :client_id AND tenant_id = :tenant_id AND is_deleted = false
             RETURNING stage
         """)
         
