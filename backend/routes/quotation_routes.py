@@ -2459,7 +2459,7 @@ def download_quotation_pdf(quotation_id):
         headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
         widths  = [25,       128,            22,       15]  # sum = 190
 
-        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Fittings', 'Sink and Tap', 'Worktops']
+        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Sink and Tap', 'Worktops', 'Fittings']
 
         # Build top-level / sub-item structure, grouped by section
         valid_items = [
