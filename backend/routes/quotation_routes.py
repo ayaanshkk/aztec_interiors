@@ -1799,13 +1799,47 @@ def auto_price_lookup(tenant_id, employee_id):
             unit_price = float(price_row.base_price)
             calculated_qty = 1  # default
 
-            # ── Quantity mapping rules ──────────────────────────────────
             if current_items:
                 code_upper = item_code.upper()
                 import re as _re
 
                 print(f"   🔍 ALL current_items: {[(i.get('item'), i.get('quantity')) for i in current_items]}")
 
+                # ── Category mappings ──────────────────────────────────────────
+                BUNIT_CATEGORIES = {
+                    'Linen Press', 'Chest of drawers', 'Bedroom Wall Units', 'Bedroom Drawer Fronts'
+                }
+                ROBE_CATEGORIES = {
+                    'Wardrobes'
+                }
+                KUNIT_CATEGORIES = {
+                    'Base Units', 'Larder Units', 'Larder P/O', 'Wall Units', 'Misc',
+                    'Finishing', 'Kitchen', 'Dresser Units', 'Top Box', 'Quad',
+                    'Fillers & End Panels'
+                }
+                APPL_CATEGORIES = {'Appliances'}
+                SINKTAP_CATEGORIES = {'Sink and Tap'}
+
+                # ── Helper: get category for an item code from DB ──────────────
+                def get_item_category(item_code_str):
+                    if not item_code_str:
+                        return None
+                    try:
+                        cat_query = text("""
+                            SELECT category FROM "StreemLyne_MT"."PriceList_Master"
+                            WHERE tenant_id = :tenant_id
+                              AND UPPER(item_code) = UPPER(:item_code)
+                            LIMIT 1
+                        """)
+                        cat_result = db_session.execute(cat_query, {
+                            'tenant_id': str(tenant_id),
+                            'item_code': item_code_str.strip()
+                        }).fetchone()
+                        return cat_result.category if cat_result else None
+                    except:
+                        return None
+
+                # ── Existing regex patterns (kept as fallback) ─────────────────
                 non_unit_exclusions = {
                     'WB', 'WT', 'WTP', 'WF', 'WEP', 'BF', 'BEP', 'TF', 'TEP',
                     'CF', 'CR', 'PL', 'SOF', 'IBP', 'IEP', 'TWEP',
@@ -1838,71 +1872,75 @@ def auto_price_lookup(tenant_id, employee_id):
                     r'|[0-9]+BDRW)$',
                     _re.IGNORECASE
                 )
-                kitchen_pattern = kitchen_larder_pattern
 
                 if code_upper == 'APPL':
-                    appliance_model_pattern = _re.compile(r'^[A-Z]{2,3}[0-9]{2}[A-Z0-9]{5,}$', _re.IGNORECASE)
-                    def is_appliance_code(code):
-                        code = code.strip().upper()
-                        return (
-                            bool(appliance_model_pattern.match(code))
-                            and len(code) >= 9
-                        )
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
-                        for i in current_items
-                        if is_appliance_code(i.get('item') or i.get('item_name') or '')
-                        or 'appliance' in (i.get('description') or '').lower()
-                    )
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip()
+                        cat = get_item_category(item_c)
+                        if cat in APPL_CATEGORIES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ APPL match via category: {item_c}")
                     if calculated_qty == 0:
                         return jsonify({'found': False, 'quantity': 0}), 404
 
                 elif code_upper == 'ROBE':
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
-                        for i in current_items
-                        if robe_pattern.match((i.get('item') or '').strip().upper())
-                        or 'robe' in (i.get('description') or '').lower()
-                        or 'rode' in (i.get('description') or '').lower()
-                    )
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip()
+                        cat = get_item_category(item_c)
+                        if cat in ROBE_CATEGORIES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ ROBE match via category: {item_c}")
+                            continue
+                        # Fallback to regex
+                        if robe_pattern.match(item_c.upper()):
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ ROBE match via regex: {item_c}")
 
                 elif code_upper == 'KUNIT':
-                    matched_items = [
-                        (i.get('item'), i.get('quantity', 1))
-                        for i in current_items
-                        if (i.get('item') or '').strip().upper() not in non_unit_exclusions
-                        and kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
-                    ]
-                    print(f"   🔍 KUNIT matched items ({len(matched_items)} rows): {matched_items}")
-                    calculated_qty = sum(int(qty) for _, qty in matched_items)
-                    print(f"   🔍 KUNIT total qty: {calculated_qty}")
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip()
+                        if item_c.upper() in non_unit_exclusions:
+                            continue
+                        cat = get_item_category(item_c)
+                        if cat in KUNIT_CATEGORIES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ KUNIT match via category: {item_c} ({cat})")
+                            continue
+                        # Fallback to regex
+                        if kitchen_larder_pattern.match(item_c.upper()):
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ KUNIT match via regex: {item_c}")
 
                 elif code_upper == 'BUNIT':
-                    matched_items = [
-                        (i.get('item'), i.get('quantity', 1), i.get('description'))
-                        for i in current_items
-                        if not robe_pattern.match((i.get('item') or '').strip().upper())
-                        and 'robe' not in (i.get('description') or '').lower()
-                        and 'rode' not in (i.get('description') or '').lower()
-                        and (
-                            bedroom_pattern.match((i.get('item') or '').strip().upper())
-                            or 'wardrobe' in (i.get('description') or '').lower()
-                            or 'bedroom' in (i.get('description') or '').lower()
-                            or 'chest' in (i.get('description') or '').lower()
-                            or 'linen' in (i.get('description') or '').lower()
-                        )
-                    ]
-                    print(f"   🔍 BUNIT matched items ({len(matched_items)} rows): {matched_items}")
-                    calculated_qty = sum(int(qty) for _, qty, _ in matched_items)
-                    print(f"   🔍 BUNIT total qty: {calculated_qty}")
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip()
+                        cat = get_item_category(item_c)
+                        if cat in BUNIT_CATEGORIES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ BUNIT match via category: {item_c} ({cat})")
+                            continue
+                        # Fallback to regex
+                        if (bedroom_pattern.match(item_c.upper())
+                                and not robe_pattern.match(item_c.upper())):
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ BUNIT match via regex: {item_c}")
 
                 elif code_upper == 'SINKTAP':
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
-                        for i in current_items
-                        if 'sink' in (i.get('description') or '').lower()
-                        or (i.get('item') or '').strip().upper() == 'SINK'
-                    )
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip()
+                        cat = get_item_category(item_c)
+                        if cat in SINKTAP_CATEGORIES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ SINKTAP match via category: {item_c}")
+                            continue
+                        # Fallback to description
+                        if 'sink' in (i.get('description') or '').lower():
+                            calculated_qty += int(i.get('quantity', 1))
                     if calculated_qty == 0:
                         return jsonify({'found': False, 'quantity': 0}), 404
 
@@ -1926,14 +1964,13 @@ def auto_price_lookup(tenant_id, employee_id):
                         'BEP', 'BF', 'CF', 'CR', 'IBP', 'IEP', 'PL',
                         'SOF', 'TEP', 'TF', 'TWEP', 'WEP', 'WF', 'WTP'
                     }
-                    matched_items = [
-                        (i.get('item'), i.get('quantity', 1))
-                        for i in current_items
-                        if (i.get('item') or '').strip().upper() in panel_codes
-                    ]
-                    print(f"   🔍 PANW matched items ({len(matched_items)} rows): {matched_items}")
-                    calculated_qty = sum(int(qty) for _, qty in matched_items)
-                    print(f"   🔍 PANW total qty: {calculated_qty}")
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip().upper()
+                        cat = get_item_category(item_c)
+                        if item_c in panel_codes or cat == 'Fillers & End Panels':
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ PANW match: {item_c} ({cat})")
 
                 if calculated_qty <= 0:
                     calculated_qty = 1 if not current_items else 0
