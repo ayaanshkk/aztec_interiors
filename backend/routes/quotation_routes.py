@@ -1930,19 +1930,25 @@ def auto_price_lookup(tenant_id, employee_id):
                             print(f"   ✅ BUNIT match via regex: {item_c}")
 
                 elif code_upper == 'SINKTAP':
-                    calculated_qty = 0
+                    # ✅ SINKTAP is always qty 1 — as long as at least one Sink and Tap item exists
+                    has_sinktap = False
                     for i in current_items:
                         item_c = (i.get('item') or '').strip()
                         cat = get_item_category(item_c)
                         if cat in SINKTAP_CATEGORIES:
-                            calculated_qty += int(i.get('quantity', 1))
-                            print(f"   ✅ SINKTAP match via category: {item_c}")
-                            continue
+                            has_sinktap = True
+                            print(f"   ✅ SINKTAP found via category: {item_c}")
+                            break
                         # Fallback to description
                         if 'sink' in (i.get('description') or '').lower():
-                            calculated_qty += int(i.get('quantity', 1))
-                    if calculated_qty == 0:
+                            has_sinktap = True
+                            break
+                    
+                    if not has_sinktap:
                         return jsonify({'found': False, 'quantity': 0}), 404
+                    
+                    calculated_qty = 1  # Always 1 regardless of how many sink/tap items
+                    print(f"   ✅ SINKTAP qty fixed at 1")
 
                 elif code_upper == 'WTJT':
                     calculated_qty = sum(
