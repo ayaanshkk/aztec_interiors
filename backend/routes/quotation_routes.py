@@ -2232,7 +2232,6 @@ def auto_price_lookup(tenant_id, employee_id):
 
 
 def lookup_appliance(session, tenant_id, description, brand=None):
-    """Appliance lookup - unchanged"""
     import re
     
     print(f"\n🔥 APPLIANCE LOOKUP")
@@ -2240,9 +2239,9 @@ def lookup_appliance(session, tenant_id, description, brand=None):
     
     model_pattern = r'\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,})\b'
     model_match = re.search(model_pattern, description, re.IGNORECASE)
-    
     model_code = model_match.group(1).upper() if model_match else description.strip().upper()
     
+    # ✅ Try exact item_code match first
     query = text("""
         SELECT 
             pricelist_id, item_code, item_name, description,
@@ -2258,6 +2257,25 @@ def lookup_appliance(session, tenant_id, description, brand=None):
         'tenant_id': str(tenant_id),
         'model_code': model_code
     }).fetchone()
+    
+    # ✅ NEW: If not found by item_code, check alias_codes
+    if not result:
+        alias_query = text("""
+            SELECT 
+                pricelist_id, item_code, item_name, description,
+                base_price, brand, door_type, category
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+              AND category = 'Appliances'
+              AND alias_codes ILIKE :pattern
+            LIMIT 1
+        """)
+        result = session.execute(alias_query, {
+            'tenant_id': str(tenant_id),
+            'pattern': f'%{model_code}%'
+        }).fetchone()
+        if result:
+            print(f"✅ Found via alias: {model_code} → {result.item_code}")
     
     if result:
         series_info = ''
