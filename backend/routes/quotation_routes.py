@@ -229,10 +229,10 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
-             carcass_colour, door_colour, panelwork_colour, door_style, room_name)
+             carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
-                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts)
             RETURNING quotation_id
         """)
         
@@ -257,6 +257,7 @@ def create_quotation(tenant_id, employee_id):
             'panelwork_colour': data.get('panelwork_colour', ''),
             'door_style': data.get('door_style', ''),
             'room_name': data.get('room_name', ''),
+            'section_discounts': json.dumps(data.get('section_discounts', {})),
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -391,7 +392,19 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         checklist_type = 'kitchen' if 'kitchen' in form_type else 'bedroom'
         
         # ✅ NEW: Extract door_type and room_type from form data
-        door_type = form_data.get('door_type', 'Basic Slab')
+        door_type_raw = form_data.get('door_type', '') or ''
+        door_type_map = {
+            'Slab': 'Basic Slab',
+            'Basic Slab': 'Basic Slab',
+            'Lacquered Slab': 'Acrylic Gloss/Matt',
+            'Acrylic Gloss/Matt': 'Acrylic Gloss/Matt',
+            'Vinyl': 'Vinyl Doors',
+            'Vinyl doors': 'Vinyl Doors',
+            'Black Glass': 'Black Glass',
+            'Carcass Only (No Doors/Drawers)': 'Carcass Only',
+            'Carcass Only': 'Carcass Only',
+        }
+        door_type = door_type_map.get(door_type_raw, door_type_raw or 'Basic Slab')
         
         # Determine room type from checklist type
         room_type = 'Kitchen' if checklist_type == 'kitchen' else 'Bedroom'
@@ -1244,6 +1257,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'total': computed_total,
                 'status': quote.status,
                 'notes': quote.notes,
+                'section_discounts': (json.loads(quote.section_discounts) if isinstance(quote.section_discounts, str) else quote.section_discounts) if getattr(quote, 'section_discounts', None) else {},
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
                 'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
                 'items': items_result
@@ -1304,6 +1318,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'room_name' in data:
                 update_fields.append("room_name = :room_name")
                 params['room_name'] = data['room_name']
+            if 'section_discounts' in data:
+                update_fields.append("section_discounts = :section_discounts")
+                params['section_discounts'] = json.dumps(data.get('section_discounts', {}))
             
             # ✅ UPDATE ITEMS
             if 'items' in data:
@@ -1748,6 +1765,8 @@ def auto_price_lookup(tenant_id, employee_id):
                 DOOR_TYPE_MAP = {
                     'carcass only': 'Carcass Only',
                     'basic slab': 'Basic Slab',
+                    'slab': 'Basic Slab',                        # ← ADD
+                    'lacquered slab': 'Acrylic Gloss/Matt',       # ← ADD
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
@@ -2045,6 +2064,8 @@ def auto_price_lookup(tenant_id, employee_id):
             else:
                 DOOR_TYPE_MAP = {
                     'basic slab': 'Basic Slab',
+                    'slab': 'Basic Slab',                        # ← ADD
+                    'lacquered slab': 'Acrylic Gloss/Matt',       # ← ADD
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
@@ -2052,7 +2073,6 @@ def auto_price_lookup(tenant_id, employee_id):
                     'vinyl doors': 'Vinyl Doors',
                     'black glass': 'Vinyl Doors',  # no Black Glass pricing for fillers, fall back to Vinyl
                 }
-                # Map door_type, default to Basic Slab for anything not in map (e.g. 'Carcass Only')
                 target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
             
             price_row = next((r for r in results if r.door_type == target_door_type), None)
@@ -2099,9 +2119,12 @@ def auto_price_lookup(tenant_id, employee_id):
         DOOR_TYPE_MAP = {
             'carcass only': 'Carcass Only',
             'basic slab': 'Basic Slab',
+            'slab': 'Basic Slab',                        # ← ADD
+            'lacquered slab': 'Acrylic Gloss/Matt',       # ← ADD
             'acrylic gloss/matt': 'Acrylic Gloss/Matt',
             'acrylic gloss': 'Acrylic Gloss/Matt',
             'acrylic matt': 'Acrylic Gloss/Matt',
+            'timber': 'Timber',
             'vinyl': 'Vinyl Doors',
             'vinyl doors': 'Vinyl Doors',
             'black glass': 'Black Glass',
@@ -2352,7 +2375,7 @@ def download_quotation_pdf(quotation_id):
         from io import BytesIO
         from flask import send_file, current_app, jsonify
         from sqlalchemy import text
- 
+
         # ── Fetch quotation ───────────────────────────────────────────────
         quotation = db_session.execute(
             text("""
@@ -2370,6 +2393,8 @@ def download_quotation_pdf(quotation_id):
                     q.carcass_colour,
                     q.door_colour,
                     q.door_style,
+                    q.panelwork_colour,
+                    q.section_discounts,
                     c.client_company_name,
                     c.address        AS client_address,
                     c.client_phone   AS client_phone_num
@@ -2379,10 +2404,14 @@ def download_quotation_pdf(quotation_id):
             """),
             {'qid': quotation_id}
         ).fetchone()
- 
+
         if not quotation:
             return jsonify({'error': 'Quotation not found'}), 404
- 
+
+        # ── Parse section discounts ───────────────────────────────────────
+        section_discounts_raw = getattr(quotation, 'section_discounts', None)
+        section_discounts = (json.loads(section_discounts_raw) if isinstance(section_discounts_raw, str) else section_discounts_raw) if section_discounts_raw else {}
+
         # ── Fetch items ───────────────────────────────────────────────────
         items = db_session.execute(
             text("""
@@ -2393,49 +2422,49 @@ def download_quotation_pdf(quotation_id):
             """),
             {'qid': quotation_id}
         ).fetchall()
- 
+
         # ── PDF setup ─────────────────────────────────────────────────────
         from .pdf_helpers import PDF
- 
+
         FILL   = (230, 230, 230)
         YELLOW = (255, 255, 180)
         GREEN  = (180, 230, 180)
         lh     = 6
- 
+
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'QUOTATION'
         pdf.alias_nb_pages()
         pdf.add_page()
         pdf.set_auto_page_break(auto=False, margin=20)
- 
+
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
         pdf.set_font('Arial', 'B', 9)
         pdf.cell(0, 5, 'Registered to England No 5246881   |   VAT Reg No.686 8010 72', 1, 1, 'C', 1)
         pdf.ln(1)
- 
+
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
             'Acc name: Aztec Interiors Leicester LTD  |  Bank: HSBC  |  s/code: 40 28 06  |  acc no: 43820343',
             1, 1, 'C', 1)
         pdf.ln(1)
- 
+
         pdf.set_fill_color(*FILL)
         pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
         pdf.ln(4)
- 
+
         # ── QUOTATION title ───────────────────────────────────────────────
         pdf.set_font('Arial', 'B', 16)
         pdf.cell(0, 8, 'QUOTATION', 0, 1, 'C')
         pdf.ln(3)
- 
+
         # ── Customer info ─────────────────────────────────────────────────
         cust_name    = quotation.customer_name    or quotation.client_company_name or 'N/A'
         cust_address = quotation.customer_address or quotation.client_address      or 'N/A'
         cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or 'N/A'
         date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
- 
+
         for label, value in [
             ('DATE:',    date_str),
             ('NAME:',    cust_name),
@@ -2451,17 +2480,15 @@ def download_quotation_pdf(quotation_id):
             pdf.cell(35, lh, label, 1, 0, 'L', 1)
             pdf.set_font('Arial', '', 10)
             pdf.cell(155, lh, value, 1, 1, 'L')
- 
+
         pdf.ln(5)
- 
+
         # ── Items table ───────────────────────────────────────────────────
-        # Total usable width = 190mm (A4 210mm - 2×10mm margins)
         headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
-        widths  = [25,       128,            22,       15]  # sum = 190
+        widths  = [25,       128,            22,       15]
 
-        SECTIONS = ['Furniture', 'Appliances', 'Handles', 'Accessories', 'Fillers and End Panels', 'Sink and Tap', 'Worktops', 'Fittings']
+        SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles', 'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
-        # Build top-level / sub-item structure, grouped by section
         valid_items = [
             i for i in items
             if (i.item_name or '').strip() or (i.description or '').strip() or (i.amount and float(i.amount) > 0)
@@ -2475,6 +2502,7 @@ def download_quotation_pdf(quotation_id):
 
         pdf.set_font('Arial', '', 9)
         subtotal = 0.0
+        subtotal_after_section_discounts = 0.0
 
         def draw_row(name, desc, color, qty, amount, indent=False):
             row_h = 8
@@ -2489,7 +2517,6 @@ def download_quotation_pdf(quotation_id):
             pdf.set_xy(x0, y0 + row_h)
             return float(amount or 0) * int(qty or 1)
 
-
         def draw_section_header(section_name):
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(0, 7, section_name, 0, 1, 'L')
@@ -2501,7 +2528,7 @@ def download_quotation_pdf(quotation_id):
             pdf.set_font('Arial', '', 9)
 
         ROW_H = 8
-        PAGE_BOTTOM = pdf.h - pdf.b_margin  # usable bottom limit
+        PAGE_BOTTOM = pdf.h - pdf.b_margin
 
         for section in SECTIONS:
             section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
@@ -2510,35 +2537,63 @@ def download_quotation_pdf(quotation_id):
 
             draw_section_header(section)
 
+            section_subtotal = 0.0
             for item in section_items:
                 if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                     pdf.add_page()
                     draw_section_header(section)
 
                 lt = draw_row(item.item_name or '', item.description or '', item.color, item.quantity, item.amount)
+                section_subtotal += lt
                 subtotal += lt
 
                 for sub in sub_map.get(item.item_id, []):
                     if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                         pdf.add_page()
                         draw_section_header(section)
-
                     slt = draw_row(sub.item_name or '', sub.description or '', sub.color, sub.quantity, sub.amount, indent=True)
+                    section_subtotal += slt
                     subtotal += slt
 
-            pdf.ln(2)
- 
+            # ✅ Section totals with optional section discount
+            sec_discount_pct = float(section_discounts.get(section, 0) or 0)
+            sec_discount_amt = section_subtotal * (sec_discount_pct / 100)
+            sec_total = section_subtotal - sec_discount_amt
+            subtotal_after_section_discounts += sec_total
+
+            pdf.ln(1)
+            sec_tx = 120
+            pdf.set_font('Arial', '', 8)
+            pdf.set_x(sec_tx)
+            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
+            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
+
+            if sec_discount_pct > 0:
+                pdf.set_font('Arial', '', 8)
+                pdf.set_x(sec_tx)
+                pdf.cell(45, 5, f'Section Discount ({sec_discount_pct:.1f}%):', 0, 0, 'R')
+                pdf.set_text_color(200, 0, 0)
+                pdf.cell(25, 5, f'-£{sec_discount_amt:.2f}', 0, 1, 'R')
+                pdf.set_text_color(0, 0, 0)
+
+            pdf.set_font('Arial', 'B', 8)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.set_x(sec_tx)
+            pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
+            pdf.cell(25, 5, f'£{sec_total:.2f}', 1, 1, 'R', 1)
+            pdf.ln(4)
+
         # ── Totals ────────────────────────────────────────────────────────
         pdf.ln(3)
         discount_pct    = float(getattr(quotation, 'global_discount_percent', 0) or 0)
-        discount_amount = subtotal * (discount_pct / 100)
-        subtotal_after_discount = subtotal - discount_amount
+        discount_amount = subtotal_after_section_discounts * (discount_pct / 100)
+        subtotal_after_discount = subtotal_after_section_discounts - discount_amount
         vat_pct    = float(quotation.vat_percentage or 20)
         vat_amount = subtotal_after_discount * (vat_pct / 100)
         total      = subtotal_after_discount + vat_amount
         tx         = 105
- 
-        totals_rows = [('SUB TOTAL:', f"£{subtotal:.2f}")]
+
+        totals_rows = [('SUB TOTAL:', f"£{subtotal_after_section_discounts:.2f}")]
         if discount_pct > 0:
             totals_rows.append((f'DISCOUNT ({discount_pct:.0f}%):', f"-£{discount_amount:.2f}"))
         totals_rows.append((f'VAT ({vat_pct:.0f}%):', f"£{vat_amount:.2f}"))
@@ -2549,32 +2604,32 @@ def download_quotation_pdf(quotation_id):
             pdf.cell(50, lh, label, 0, 0, 'R')
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(35, lh, value, 0, 1, 'R')
- 
+
         pdf.set_x(tx)
         pdf.set_fill_color(*FILL)
         pdf.set_font('Arial', 'B', 12)
         pdf.cell(50, 8, 'TOTAL:', 'T', 0, 'R', 1)
         pdf.cell(35, 8, f"£{total:.2f}", 'T', 1, 'R', 1)
         pdf.ln(8)
- 
+
         # ── Payment terms ─────────────────────────────────────────────────
         pdf.set_font('Arial', 'B', 9)
         pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
         pdf.cell(0, 5, 'NOTE: If you wish to proceed with this quote, full payment is required upfront.', 0, 1, 'L')
         pdf.ln(4)
- 
+
         pdf.set_text_color(200, 0, 0)
         pdf.cell(0, 5, 'Please sign here to confirm.', 0, 1, 'L')
         pdf.set_text_color(0, 0, 0)
         pdf.ln(6)
- 
+
         # ── Signature section ─────────────────────────────────────────────
         pdf.set_font('Arial', '', 9)
         for label in ['Customer Signature:', 'Customer Name:', 'Date:']:
             pdf.cell(45, 6, label, 0, 0, 'L')
             pdf.cell(145, 6, '', 'B', 1, 'L')
             pdf.ln(2)
- 
+
         # ── Return PDF ────────────────────────────────────────────────────
         out  = pdf.output(dest='S')
         if isinstance(out, str):
@@ -2582,10 +2637,10 @@ def download_quotation_pdf(quotation_id):
         buf  = BytesIO(bytes(out))
         ref  = quotation.reference_number or str(quotation_id)
         name = f"Quotation_{ref}_{cust_name.replace(' ', '_')}.pdf"
- 
+
         return send_file(buf, mimetype='application/pdf',
                          as_attachment=False, download_name=name)
- 
+
     except Exception as e:
         current_app.logger.exception(f"Quotation PDF generation failed: {e}")
         return jsonify({'error': str(e)}), 500
