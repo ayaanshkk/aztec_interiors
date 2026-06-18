@@ -2466,20 +2466,20 @@ def download_quotation_pdf(quotation_id):
         date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
 
         for label, value in [
-            ('DATE:',    date_str),
-            ('NAME:',    cust_name),
-            ('ADDRESS:', cust_address),
-            ('TEL:',     cust_phone),
-            ('CARCASS COLOUR:', getattr(quotation, 'carcass_colour', None) or 'N/A'),
-            ('DOOR COLOUR:',    getattr(quotation, 'door_colour', None) or 'N/A'),
+            ('DATE:',             date_str),
+            ('NAME:',             cust_name),
+            ('ADDRESS:',          cust_address),
+            ('TEL:',              cust_phone),
+            ('CARCASS COLOUR:',   getattr(quotation, 'carcass_colour', None) or 'N/A'),
+            ('DOOR COLOUR:',      getattr(quotation, 'door_colour', None) or 'N/A'),
             ('PANELWORK COLOUR:', getattr(quotation, 'panelwork_colour', None) or 'N/A'),
-            ('DOOR STYLE:',     getattr(quotation, 'door_style', None) or 'N/A'),
+            ('DOOR STYLE:',       getattr(quotation, 'door_style', None) or 'N/A'),
         ]:
-            pdf.set_font('Arial', 'B', 10)
+            pdf.set_font('Arial', 'B', 9)
             pdf.set_fill_color(*FILL)
-            pdf.cell(35, lh, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(155, lh, value, 1, 1, 'L')
+            pdf.cell(45, lh, label, 1, 0, 'L', 1)
+            pdf.set_font('Arial', '', 9)
+            pdf.cell(145, lh, value, 1, 1, 'L')
 
         pdf.ln(5)
 
@@ -2571,7 +2571,7 @@ def download_quotation_pdf(quotation_id):
             if sec_discount_pct > 0:
                 pdf.set_font('Arial', '', 8)
                 pdf.set_x(sec_tx)
-                pdf.cell(45, 5, f'Section Discount ({sec_discount_pct:.1f}%):', 0, 0, 'R')
+                pdf.cell(45, 5, 'Section Discount:', 0, 0, 'R')
                 pdf.set_text_color(200, 0, 0)
                 pdf.cell(25, 5, f'-£{sec_discount_amt:.2f}', 0, 1, 'R')
                 pdf.set_text_color(0, 0, 0)

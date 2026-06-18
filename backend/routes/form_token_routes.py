@@ -536,3 +536,44 @@ def get_customers_for_forms(tenant_id, employee_id):
         return jsonify({'error': f'Failed to fetch customers: {str(e)}'}), 500
     finally:
         session.close()
+
+@form_token_bp.route('/form-submissions/<int:submission_id>/pdf', methods=['GET'])
+@token_required
+@require_tenant
+def download_submission_pdf(submission_id, tenant_id, employee_id):
+    """Generate PDF for a specific form submission"""
+    from flask import current_app
+    session = SessionLocal()
+    try:
+        submission = session.execute(
+            text("""
+                SELECT form_data FROM "StreemLyne_MT"."Customer_Form_Submissions"
+                WHERE form_submission_id = :id AND tenant_id = :tenant_id
+            """),
+            {'id': submission_id, 'tenant_id': str(tenant_id)}
+        ).fetchone()
+
+        if not submission:
+            return jsonify({'error': 'Submission not found'}), 404
+
+        form_data = submission.form_data
+        if isinstance(form_data, str):
+            form_data = json.loads(form_data)
+
+        # Delegate to the checklist PDF generator
+        from flask import request as flask_request
+        import flask
+        with current_app.test_request_context(
+            '/checklists/download-pdf',
+            method='POST',
+            json={'formData': form_data},
+            content_type='application/json'
+        ):
+            from .checklist_routes import download_checklist_pdf
+            return download_checklist_pdf()
+
+    except Exception as e:
+        current_app.logger.exception(f"Submission PDF failed: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
