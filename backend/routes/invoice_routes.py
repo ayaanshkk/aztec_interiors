@@ -181,33 +181,33 @@ def create_invoice(tenant_id, employee_id):
                 continue
             amt = float(item.get('amount', item.get('line_total', 0)))
             qty = int(item.get('quantity', 1))
-                    session.execute(
-                        text("""
-                            INSERT INTO "StreemLyne_MT"."Invoice_Details"
-                            (invoice_id, item_name, description, color, quantity, amount,
-                             unit_price, service_name, width, height, depth,
-                             discount_percent, discounted_amount, section)
-                            VALUES
-                            (:invoice_id, :item_name, :desc, :color, :qty, :amt,
-                             :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
-                        """),
-                        {
-                            'invoice_id':   invoice_id,
-                            'item_name':    item.get('item', ''),
-                            'desc':         item.get('description', ''),
-                            'color':        item.get('color', item.get('colour', '')),
-                            'qty':          qty,
-                            'amt':          amt,
-                            'unit_price':   amt / qty if qty else 0,
-                            'service_name': item.get('item', ''),
-                            'w':            item.get('width'),
-                            'h':            item.get('height'),
-                            'd':            item.get('depth'),
-                            'dp':           item.get('discount_percent', 0),
-                            'da':           item.get('discounted_total', amt),
-                            'section':      item.get('section', 'Furniture'),
-                        }
-                    )
+            session.execute(
+                text("""
+                    INSERT INTO "StreemLyne_MT"."Invoice_Details"
+                    (invoice_id, item_name, description, color, quantity, amount,
+                     unit_price, service_name, width, height, depth,
+                     discount_percent, discounted_amount, section)
+                    VALUES
+                    (:invoice_id, :item_name, :desc, :color, :qty, :amt,
+                     :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
+                """),
+                {
+                    'invoice_id':   invoice_id,
+                    'item_name':    item.get('item', ''),
+                    'desc':         item.get('description', ''),
+                    'color':        item.get('color', item.get('colour', '')),
+                    'qty':          qty,
+                    'amt':          amt,
+                    'unit_price':   float(item.get('amount', 0)) / qty if qty else 0,
+                    'service_name': item.get('item', ''),
+                    'w':            item.get('width'),
+                    'h':            item.get('height'),
+                    'd':            item.get('depth'),
+                    'dp':           item.get('discount_percent', 0),
+                    'da':           item.get('discounted_total', amt),
+                    'section':      item.get('section', 'Furniture'),
+                }
+            )
 
         session.commit()
         current_app.logger.info(f"Invoice {invoice_number} created for client {client_id}")
