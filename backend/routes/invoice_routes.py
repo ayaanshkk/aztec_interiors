@@ -133,12 +133,16 @@ def create_invoice(tenant_id, employee_id):
                 (tenant_id, client_id, project_id, invoice_number, invoice_date, due_date,
                  status, notes, customer_name, customer_address, customer_phone, customer_email,
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
-                 sub_total, vat, description, tax_id)
+                 sub_total, vat, description, tax_id,
+                 room_name, carcass_colour, door_colour, panelwork_colour, door_style,
+                 deposit_paid, total_remaining)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
-                 :subtotal, :vat_amount, :notes, :tax_id)
+                 :subtotal, :vat_amount, :notes, :tax_id,
+                 :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
+                 :deposit_paid, :total_remaining)
                 RETURNING invoice_id
             """),
             {
@@ -159,7 +163,14 @@ def create_invoice(tenant_id, employee_id):
                 'vat_amount':       vat_amount,
                 'total_amount':     total_amount,
                 'created_by':       employee_id,
-                'tax_id':           1,  # default tax record — update if you have a specific tax_id
+                'tax_id':           1,
+                'room_name':        data.get('room_name', ''),
+                'carcass_colour':   data.get('carcass_colour', ''),
+                'door_colour':      data.get('door_colour', ''),
+                'panelwork_colour': data.get('panelwork_colour', ''),
+                'door_style':       data.get('door_style', ''),
+                'deposit_paid':     float(data.get('deposit_paid', 0)),
+                'total_remaining':  float(data.get('total_remaining', 0)),
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -170,32 +181,33 @@ def create_invoice(tenant_id, employee_id):
                 continue
             amt = float(item.get('amount', item.get('line_total', 0)))
             qty = int(item.get('quantity', 1))
-            session.execute(
-                text("""
-                    INSERT INTO "StreemLyne_MT"."Invoice_Details"
-                    (invoice_id, item_name, description, color, quantity, amount,
-                     unit_price, service_name, width, height, depth,
-                     discount_percent, discounted_amount)
-                    VALUES
-                    (:invoice_id, :item_name, :desc, :color, :qty, :amt,
-                     :unit_price, :service_name, :w, :h, :d, :dp, :da)
-                """),
-                {
-                    'invoice_id':   invoice_id,
-                    'item_name':    item.get('item', ''),
-                    'desc':         item.get('description', ''),
-                    'color':        item.get('color', item.get('colour', '')),
-                    'qty':          qty,
-                    'amt':          amt,
-                    'unit_price':   float(item.get('amount', 0)) / qty if qty else 0,
-                    'service_name': item.get('item', ''),
-                    'w':            item.get('width'),
-                    'h':            item.get('height'),
-                    'd':            item.get('depth'),
-                    'dp':           item.get('discount_percent', 0),
-                    'da':           item.get('discounted_total', amt),
-                }
-            )
+                    session.execute(
+                        text("""
+                            INSERT INTO "StreemLyne_MT"."Invoice_Details"
+                            (invoice_id, item_name, description, color, quantity, amount,
+                             unit_price, service_name, width, height, depth,
+                             discount_percent, discounted_amount, section)
+                            VALUES
+                            (:invoice_id, :item_name, :desc, :color, :qty, :amt,
+                             :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
+                        """),
+                        {
+                            'invoice_id':   invoice_id,
+                            'item_name':    item.get('item', ''),
+                            'desc':         item.get('description', ''),
+                            'color':        item.get('color', item.get('colour', '')),
+                            'qty':          qty,
+                            'amt':          amt,
+                            'unit_price':   amt / qty if qty else 0,
+                            'service_name': item.get('item', ''),
+                            'w':            item.get('width'),
+                            'h':            item.get('height'),
+                            'd':            item.get('depth'),
+                            'dp':           item.get('discount_percent', 0),
+                            'da':           item.get('discounted_total', amt),
+                            'section':      item.get('section', 'Furniture'),
+                        }
+                    )
 
         session.commit()
         current_app.logger.info(f"Invoice {invoice_number} created for client {client_id}")
@@ -266,6 +278,13 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'total':            float(row.total_amount or 0),
                 'status':           row.status,
                 'notes':            row.notes or row.description,
+                'room_name':        row.room_name        or '',
+                'carcass_colour':   row.carcass_colour   or '',
+                'door_colour':      row.door_colour      or '',
+                'panelwork_colour': row.panelwork_colour or '',
+                'door_style':       row.door_style       or '',
+                'deposit_paid':     float(row.deposit_paid    or 0),
+                'total_remaining':  float(row.total_remaining or 0),
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -283,6 +302,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         'discount_percent': float(i.discount_percent or 0),
                         'discounted_total': float(i.discounted_amount or i.amount or 0),
                         'line_total':       float(i.amount or 0) * int(i.quantity or 1),
+                        'section':          i.section or 'Furniture',
+
                     }
                     for i in items
                     if (i.item_name or i.service_name or i.description or (i.amount and float(i.amount) > 0))
@@ -295,7 +316,9 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
             params        = {'id': invoice_id, 't': str(tenant_id)}
 
             for field in ['customer_name', 'customer_address', 'customer_phone',
-                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date']:
+                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date',
+                          'room_name', 'carcass_colour', 'door_colour', 'panelwork_colour',
+                          'door_style', 'deposit_paid', 'total_remaining']:
                 if field in data:
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
@@ -319,11 +342,11 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         text("""
                             INSERT INTO "StreemLyne_MT"."Invoice_Details"
                             (invoice_id, item_name, description, color, quantity, amount,
-                             unit_price, service_name, width, height, depth,
-                             discount_percent, discounted_amount)
+                            unit_price, service_name, width, height, depth,
+                            discount_percent, discounted_amount, section)
                             VALUES
                             (:invoice_id, :item_name, :desc, :color, :qty, :amt,
-                             :unit_price, :service_name, :w, :h, :d, :dp, :da)
+                            :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
                         """),
                         {
                             'invoice_id':   invoice_id,
@@ -339,6 +362,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                             'd':            item.get('depth'),
                             'dp':           item.get('discount_percent', 0),
                             'da':           item.get('discounted_total', amt),
+                            'section':      item.get('section', 'Furniture'),
                         }
                     )
                     total += amt * qty
@@ -728,28 +752,50 @@ def create_proforma(tenant_id, employee_id):
         result = session.execute(
             text("""
                 INSERT INTO "StreemLyne_MT"."Invoice_Master"
-                (tenant_id, client_id, invoice_number, invoice_date, due_date,
+                (tenant_id, client_id, project_id, invoice_number, invoice_date, due_date,
                  status, notes, customer_name, customer_address, customer_phone, customer_email,
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
-                 sub_total, vat, description, tax_id)
+                 sub_total, vat, description, tax_id,
+                 room_name, carcass_colour, door_colour, panelwork_colour, door_style,
+                 deposit_paid, total_remaining)
                 VALUES
-                (:tenant_id, :client_id, :invoice_number, :invoice_date, :due_date,
-                 'Proforma Draft', :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
+                (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
+                 :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
-                 :subtotal, :vat_amount, :notes, 1)
+                 :subtotal, :vat_amount, :notes, :tax_id,
+                 :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
+                 :deposit_paid, :total_remaining)
                 RETURNING invoice_id
             """),
             {
-                'tenant_id': str(tenant_id), 'client_id': int(client_id),
-                'invoice_number': invoice_number, 'invoice_date': invoice_date, 'due_date': due_date,
-                'notes': data.get('notes', ''), 'customer_name': data.get('customer_name', ''),
+                'tenant_id':        str(tenant_id),
+                'client_id':        int(client_id),
+                'project_id':       data.get('project_id'),
+                'invoice_number':   invoice_number,
+                'invoice_date':     invoice_date,
+                'due_date':         due_date,
+                'status':           data.get('status', 'Draft'),
+                'notes':            data.get('notes', ''),
+                'customer_name':    data.get('customer_name', ''),
                 'customer_address': data.get('customer_address', ''),
-                'customer_phone': data.get('customer_phone', ''),
-                'customer_email': data.get('customer_email', ''),
-                'subtotal': subtotal, 'vat_rate': vat_rate, 'vat_amount': vat_amount,
-                'total_amount': total_amount, 'created_by': employee_id,
+                'customer_phone':   data.get('customer_phone', ''),
+                'customer_email':   data.get('customer_email', ''),
+                'subtotal':         subtotal,
+                'vat_rate':         vat_rate,
+                'vat_amount':       vat_amount,
+                'total_amount':     total_amount,
+                'created_by':       employee_id,
+                'tax_id':           1,
+                'room_name':        data.get('room_name', ''),
+                'carcass_colour':   data.get('carcass_colour', ''),
+                'door_colour':      data.get('door_colour', ''),
+                'panelwork_colour': data.get('panelwork_colour', ''),
+                'door_style':       data.get('door_style', ''),
+                'deposit_paid':     float(data.get('deposit_paid', 0)),
+                'total_remaining':  float(data.get('total_remaining', 0)),
             }
         )
+
         invoice_id = result.fetchone().invoice_id
 
         for item in items_data:
@@ -826,13 +872,21 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 'created_at': row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
-                        'id': i.invoice_details_id, 'item': i.item_name or i.service_name or '',
-                        'description': i.description or '', 'color': i.color or '',
-                        'quantity': i.quantity or 1, 'amount': float(i.amount or 0),
-                        'width': i.width, 'height': i.height, 'depth': i.depth,
+                        'id':               i.invoice_details_id,
+                        'item_id':          i.invoice_details_id,
+                        'item':             i.item_name or i.service_name or '',
+                        'item_name':        i.item_name or i.service_name or '',
+                        'description':      i.description or '',
+                        'color':            i.color or '',
+                        'quantity':         i.quantity or 1,
+                        'amount':           float(i.amount or 0),
+                        'width':            i.width,
+                        'height':           i.height,
+                        'depth':            i.depth,
                         'discount_percent': float(i.discount_percent or 0),
                         'discounted_total': float(i.discounted_amount or i.amount or 0),
-                        'line_total': float(i.amount or 0) * int(i.quantity or 1),
+                        'line_total':       float(i.amount or 0) * int(i.quantity or 1),
+                        'section':          i.section or 'Furniture',
                     }
                     for i in items
                     if (i.item_name or i.service_name or i.description or (i.amount and float(i.amount) > 0))
