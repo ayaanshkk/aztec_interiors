@@ -2434,19 +2434,20 @@ def download_quotation_pdf(quotation_id):
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'QUOTATION'
         pdf.alias_nb_pages()
+        pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
         pdf.set_auto_page_break(auto=False, margin=20)
 
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
         pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Registered to England No 5246881   |   VAT Reg No.686 8010 72', 1, 1, 'C', 1)
+        pdf.cell(0, 5, 'Registered to England No 5246881', 1, 1, 'C', 1)
         pdf.ln(1)
 
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
-            'Acc name: Aztec Interiors Leicester LTD  |  Bank: HSBC  |  s/code: 40 28 06  |  acc no: 43820343',
+            'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',
             1, 1, 'C', 1)
         pdf.ln(1)
 
@@ -2485,7 +2486,7 @@ def download_quotation_pdf(quotation_id):
 
         # ── Items table ───────────────────────────────────────────────────
         headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
-        widths  = [25,       128,            22,       15]
+        widths  = [35,       118,            22,       15]
 
         SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles', 'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
@@ -2528,20 +2529,24 @@ def download_quotation_pdf(quotation_id):
             pdf.set_font('Arial', '', 9)
 
         ROW_H = 8
-        PAGE_BOTTOM = pdf.h - pdf.b_margin
+        PAGE_BOTTOM = pdf.h - 25
 
         for section in SECTIONS:
             section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
             if not section_items:
                 continue
 
+            # ✅ If not enough room for header + at least one row, start new page
+            header_h = 7 + 8  # section title + column headers
+            if pdf.get_y() + header_h + ROW_H > PAGE_BOTTOM:
+                pdf.add_page()
+
             draw_section_header(section)
 
             section_subtotal = 0.0
             for item in section_items:
-                if pdf.get_y() + ROW_H > PAGE_BOTTOM:
+                if pdf.get_y() + ROW_H * 2 > PAGE_BOTTOM:
                     pdf.add_page()
-                    draw_section_header(section)
 
                 lt = draw_row(item.item_name or '', item.description or '', item.color, item.quantity, item.amount)
                 section_subtotal += lt
@@ -2550,7 +2555,6 @@ def download_quotation_pdf(quotation_id):
                 for sub in sub_map.get(item.item_id, []):
                     if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                         pdf.add_page()
-                        draw_section_header(section)
                     slt = draw_row(sub.item_name or '', sub.description or '', sub.color, sub.quantity, sub.amount, indent=True)
                     section_subtotal += slt
                     subtotal += slt

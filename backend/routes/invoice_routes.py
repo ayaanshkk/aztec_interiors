@@ -489,7 +489,7 @@ def download_invoice_pdf(invoice_id):
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
-            'Acc name: Aztec Interiors Leicester LTD  |  Bank: HSBC  |  s/code: 40 28 06  |  acc no: 43820343',
+            'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',
             1, 1, 'C', 1)
         pdf.ln(1)
 
@@ -948,7 +948,7 @@ def download_proforma_pdf(invoice_id):
         pdf.set_fill_color(*GREEN); pdf.set_font('Arial','B',9)
         pdf.cell(0,5,'Registered to England No 5246881   |   VAT Reg No.686 8010 72',1,1,'C',1); pdf.ln(1)
         pdf.set_fill_color(*YELLOW); pdf.set_font('Arial','',9)
-        pdf.cell(0,5,'Acc name: Aztec Interiors Leicester LTD  |  Bank: HSBC  |  s/code: 40 28 06  |  acc no: 43820343',1,1,'C',1); pdf.ln(1)
+        pdf.cell(0,5,'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',1,1,'C',1); pdf.ln(1)
         pdf.set_fill_color(*FILL)
         pdf.cell(0,5,'Please use your name and/or road name as reference',1,1,'C',1); pdf.ln(4)
 

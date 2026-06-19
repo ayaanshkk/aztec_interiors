@@ -291,10 +291,10 @@ def download_payment_terms_pdf(pt_id):
         pdf.ln(1)
 
         pdf.set_font('Arial', '', 9)
-        pdf.cell(0, 5, 'Acc name : Aztec Interiors Leicester LTD', 0, 1, 'L')
-        pdf.cell(0, 5, 'Bank : HSBC', 0, 1, 'L')
-        pdf.cell(0, 5, 's/code: 40 28 06', 0, 1, 'L')
-        pdf.cell(0, 5, 'acc no: 43820343', 0, 1, 'L')
+        pdf.cell(0, 5, 'Acc name : Atelier Luxe Interiors LTD', 0, 1, 'L')
+        pdf.cell(0, 5, 'Bank : Tide', 0, 1, 'L')
+        pdf.cell(0, 5, 'Sort Code: 04 06 05', 0, 1, 'L')
+        pdf.cell(0, 5, 'Acc No: 31621197', 0, 1, 'L')
         pdf.ln(5)
 
         # ── Customer info table ────────────────────────────────────────────
