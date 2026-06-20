@@ -81,6 +81,7 @@ def get_invoices(tenant_id, employee_id):
                 'status':         r.status,
                 'notes':          r.notes,
                 'items_count':    r.items_count or 0,
+                'room_name':      r.room_name or '',
                 'invoice_date':   r.invoice_date.isoformat() if r.invoice_date else None,
                 'due_date':       r.due_date.isoformat()     if r.due_date     else None,
                 'created_at':     r.created_at.isoformat()   if r.created_at   else None,
@@ -135,14 +136,14 @@ def create_invoice(tenant_id, employee_id):
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
                  sub_total, vat, description, tax_id,
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
-                 deposit_paid, total_remaining)
+                 deposit_paid, total_remaining, door_type, room_type)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
                  :subtotal, :vat_amount, :notes, :tax_id,
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
-                 :deposit_paid, :total_remaining)
+                 :deposit_paid, :total_remaining, :door_type, :room_type)
                 RETURNING invoice_id
             """),
             {
@@ -171,6 +172,8 @@ def create_invoice(tenant_id, employee_id):
                 'door_style':       data.get('door_style', ''),
                 'deposit_paid':     float(data.get('deposit_paid', 0)),
                 'total_remaining':  float(data.get('total_remaining', 0)),
+                'door_type':        data.get('door_type', 'Carcass Only'),
+                'room_type':        data.get('room_type', 'Kitchen'),
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -186,10 +189,10 @@ def create_invoice(tenant_id, employee_id):
                     INSERT INTO "StreemLyne_MT"."Invoice_Details"
                     (invoice_id, item_name, description, color, quantity, amount,
                      unit_price, service_name, width, height, depth,
-                     discount_percent, discounted_amount, section)
+                     discount_percent, discounted_amount, section, is_sub_item)
                     VALUES
                     (:invoice_id, :item_name, :desc, :color, :qty, :amt,
-                     :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
+                    :unit_price, :service_name, :w, :h, :d, :dp, :da, :section, :is_sub_item)
                 """),
                 {
                     'invoice_id':   invoice_id,
@@ -206,6 +209,7 @@ def create_invoice(tenant_id, employee_id):
                     'dp':           item.get('discount_percent', 0),
                     'da':           item.get('discounted_total', amt),
                     'section':      item.get('section', 'Furniture'),
+                    'is_sub_item':  bool(item.get('is_sub_item', False)),
                 }
             )
 
@@ -283,6 +287,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'door_colour':      row.door_colour      or '',
                 'panelwork_colour': row.panelwork_colour or '',
                 'door_style':       row.door_style       or '',
+                'door_type': row.door_type or 'Carcass Only',
+                'room_type': row.room_type or 'Kitchen',
                 'deposit_paid':     float(row.deposit_paid    or 0),
                 'total_remaining':  float(row.total_remaining or 0),
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
@@ -302,8 +308,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         'discount_percent': float(i.discount_percent or 0),
                         'discounted_total': float(i.discounted_amount or i.amount or 0),
                         'line_total':       float(i.amount or 0) * int(i.quantity or 1),
-                        'section':          i.section or 'Furniture',
-
+                    		'section':          i.section or 'Furniture',
+                        'is_sub_item':      bool(i.is_sub_item) if i.is_sub_item is not None else False,
                     }
                     for i in items
                     if (i.item_name or i.service_name or i.description or (i.amount and float(i.amount) > 0))
@@ -316,9 +322,10 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
             params        = {'id': invoice_id, 't': str(tenant_id)}
 
             for field in ['customer_name', 'customer_address', 'customer_phone',
-                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date',
-                          'room_name', 'carcass_colour', 'door_colour', 'panelwork_colour',
-                          'door_style', 'deposit_paid', 'total_remaining']:
+                        'customer_email', 'status', 'notes', 'invoice_date', 'due_date',
+                        'room_name', 'carcass_colour', 'door_colour', 'panelwork_colour',
+                        'door_style', 'deposit_paid', 'total_remaining',
+                        'door_type', 'room_type']:
                 if field in data:
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
@@ -343,10 +350,10 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                             INSERT INTO "StreemLyne_MT"."Invoice_Details"
                             (invoice_id, item_name, description, color, quantity, amount,
                             unit_price, service_name, width, height, depth,
-                            discount_percent, discounted_amount, section)
+                            discount_percent, discounted_amount, section, is_sub_item)
                             VALUES
                             (:invoice_id, :item_name, :desc, :color, :qty, :amt,
-                            :unit_price, :service_name, :w, :h, :d, :dp, :da, :section)
+                            :unit_price, :service_name, :w, :h, :d, :dp, :da, :section, :is_sub_item)
                         """),
                         {
                             'invoice_id':   invoice_id,
@@ -363,6 +370,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                             'dp':           item.get('discount_percent', 0),
                             'da':           item.get('discounted_total', amt),
                             'section':      item.get('section', 'Furniture'),
+                            'is_sub_item':  bool(item.get('is_sub_item', False)),
                         }
                     )
                     total += amt * qty
@@ -470,6 +478,8 @@ def delete_invoice_item(invoice_id, item_id, tenant_id, employee_id):
 def download_invoice_pdf(invoice_id):
     session = SessionLocal()
     try:
+        import json
+
         row = session.execute(
             text("""
                 SELECT i.*, c.client_company_name, c.address AS client_address, c.client_phone
@@ -491,25 +501,26 @@ def download_invoice_pdf(invoice_id):
             {'id': invoice_id}
         ).fetchall()
 
-        # ── Colours matching quotation ────────────────────────────────────
         FILL   = (230, 230, 230)
         YELLOW = (255, 255, 180)
         GREEN  = (180, 230, 180)
         lh     = 6
 
+        SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles',
+                    'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
+
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'INVOICE'
         pdf.alias_nb_pages()
+        pdf.set_auto_page_break(auto=True, margin=25)
         pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=20)
 
-        # ── Registration bar (green) ──────────────────────────────────────
+        # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
         pdf.set_font('Arial', 'B', 9)
         pdf.cell(0, 5, 'Registered to England No 5246881   |   VAT Reg No.686 8010 72', 1, 1, 'C', 1)
         pdf.ln(1)
 
-        # ── Bank details bar (yellow) ─────────────────────────────────────
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
@@ -517,98 +528,146 @@ def download_invoice_pdf(invoice_id):
             1, 1, 'C', 1)
         pdf.ln(1)
 
-        # ── Reference bar (grey) ──────────────────────────────────────────
         pdf.set_fill_color(*FILL)
         pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
         pdf.ln(4)
 
-        # ── Invoice meta (right-aligned block) ────────────────────────────
-        for label, value in [
-            ('INVOICE NO:', row.invoice_number or 'N/A'),
-            ('DATE:',       row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'),
-            ('DUE DATE:',   row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'),
-        ]:
-            pdf.set_x(110)
-            pdf.set_fill_color(*FILL)
-            pdf.set_font('Arial', 'B', 10)
-            pdf.cell(40, lh, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(40, lh, value, 1, 1, 'R', 0)
-        pdf.ln(5)
+        # ── INVOICE title ─────────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 16)
+        pdf.cell(0, 8, 'INVOICE', 0, 1, 'C')
+        pdf.ln(3)
 
-        # ── Customer info table (same style as quotation) ─────────────────
+        # ── Customer info ─────────────────────────────────────────────────
         cust_name    = row.customer_name    or row.client_company_name or 'N/A'
         cust_address = row.customer_address or row.client_address      or 'N/A'
         cust_phone   = row.customer_phone   or row.client_phone        or 'N/A'
+        inv_date     = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
+        due_date     = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
-        for label, value in [
-            ('NAME:',    cust_name),
-            ('ADDRESS:', cust_address),
-            ('TEL:',     cust_phone),
+        customer_fields = [
+            ('INVOICE NO:',  row.invoice_number or 'N/A'),
+            ('DATE:',        inv_date),
+            ('DUE DATE:',    due_date),
+            ('NAME:',        cust_name),
+            ('ADDRESS:',     cust_address),
+            ('TEL:',         cust_phone),
+        ]
+        for field, label in [
+            ('room_name',        'ROOM NAME:'),
+            ('carcass_colour',   'CARCASS COLOUR:'),
+            ('door_colour',      'DOOR COLOUR:'),
+            ('panelwork_colour', 'PANELWORK COLOUR:'),
+            ('door_style',       'DOOR STYLE:'),
         ]:
-            pdf.set_font('Arial', 'B', 10)
+            v = getattr(row, field, None)
+            if v:
+                customer_fields.append((label, v))
+
+        for label, value in customer_fields:
+            pdf.set_font('Arial', 'B', 9)
             pdf.set_fill_color(*FILL)
-            pdf.cell(35, lh, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(155, lh, value, 1, 1, 'L', 0)
+            pdf.cell(45, lh, label, 1, 0, 'L', 1)
+            pdf.set_font('Arial', '', 9)
+            pdf.cell(145, lh, value, 1, 1, 'L')
 
         pdf.ln(5)
 
-        # ── Items table ───────────────────────────────────────────────────
-        # Total usable = 190mm (A4 210mm - 2×10mm margins)
-        headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY', 'UNIT PRICE', 'AMOUNT']
-        widths  = [22,       86,            22,        12,    24,            24]  # sum = 190
+        # ── Items by section ──────────────────────────────────────────────
+        headers = ['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY']
+        widths  = [35, 118, 22, 15]
 
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 9)
-        for h, w in zip(headers, widths):
-            pdf.cell(w, 8, h, 1, 0, 'C', 1)
-        pdf.ln()
+        valid_items = [
+            i for i in items
+            if (i.item_name or i.service_name or '').strip() or
+               (i.description or '').strip() or
+               (i.amount and float(i.amount) > 0)
+        ]
 
-        pdf.set_font('Arial', '', 9)
-        subtotal = 0.0
+        ROW_H       = 8
+        PAGE_BOTTOM = pdf.h - 30
+        subtotal_after_section_discounts = 0.0
 
-        for item in items:
-            name = item.item_name or item.service_name or ''
-            desc = item.description or ''
-            if not name and not desc and not (item.amount and float(item.amount) > 0):
+        def draw_row(name, desc, color, qty, amount, indent=False):
+            row_h = 8
+            x0, y0 = pdf.get_x(), pdf.get_y()
+            display_name = ('   > ' + name) if indent else name
+            pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
+            pdf.cell(widths[1], row_h, '', 1, 0, 'L')
+            pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
+            pdf.cell(widths[3], row_h, str(qty or 1), 1, 1, 'C')
+            pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            pdf.cell(widths[1] - 2, row_h - 2,
+                     (desc[:100] if len(desc or '') > 100 else (desc or '')), 0, 0, 'L')
+            pdf.set_xy(x0, y0 + row_h)
+            return float(amount or 0) * int(qty or 1)
+
+        def draw_section_header(section_name):
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(0, 7, section_name, 0, 1, 'L')
+            pdf.set_fill_color(*FILL)
+            pdf.set_font('Arial', 'B', 9)
+            for h, w in zip(headers, widths):
+                pdf.cell(w, 8, h, 1, 0, 'C', 1)
+            pdf.ln()
+            pdf.set_font('Arial', '', 9)
+
+        for section in SECTIONS:
+            all_section_items = [i for i in valid_items
+                                 if (getattr(i, 'section', None) or 'Furniture') == section]
+            if not all_section_items:
                 continue
 
-            row_h   = 8
-            x0, y0  = pdf.get_x(), pdf.get_y()
+            header_h = 7 + 8
+            if pdf.get_y() + header_h + ROW_H > PAGE_BOTTOM:
+                pdf.add_page()
 
-            unit = float(item.unit_price or item.amount or 0)
-            lt   = float(item.amount or 0) * int(item.quantity or 1)
+            draw_section_header(section)
 
-            # Draw border cells
-            pdf.cell(widths[0], row_h, name[:20],                  1, 0, 'L')
-            pdf.cell(widths[1], row_h, '',                         1, 0, 'L')  # text written below
-            pdf.cell(widths[2], row_h, item.color or '',           1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(item.quantity or 1),    1, 0, 'C')
-            pdf.cell(widths[4], row_h, f"£{unit:.2f}",            1, 0, 'R')
-            pdf.cell(widths[5], row_h, f"£{lt:.2f}",              1, 1, 'R')
+            section_subtotal = 0.0
+            for item in all_section_items:
+                if pdf.get_y() + ROW_H > PAGE_BOTTOM:
+                    pdf.add_page()
+                is_sub = bool(getattr(item, 'is_sub_item', False))
+                lt = draw_row(
+                    item.item_name or item.service_name or '',
+                    item.description or '',
+                    item.color or '',
+                    item.quantity or 1,
+                    item.amount or 0,
+                    indent=is_sub,
+                )
+                section_subtotal += lt
 
-            # Write description text inside the description cell
-            pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            # Section totals
+            pdf.ln(1)
+            sec_tx = 120
             pdf.set_font('Arial', '', 8)
-            pdf.cell(widths[1] - 2, row_h - 2,
-                     desc[:100] if len(desc) > 100 else desc, 0, 0, 'L')
-            pdf.set_font('Arial', '', 9)
-            pdf.set_xy(x0, y0 + row_h)
+            pdf.set_x(sec_tx)
+            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
+            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
 
-            subtotal += lt
+            pdf.set_font('Arial', 'B', 8)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.set_x(sec_tx)
+            pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
+            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 1, 1, 'R', 1)
+            pdf.ln(4)
+
+            subtotal_after_section_discounts += section_subtotal
 
         # ── Totals ────────────────────────────────────────────────────────
         pdf.ln(3)
-        vat_rate   = float(row.vat_rate   or 20)
-        vat_amount = float(row.vat_amount or row.vat or subtotal * (vat_rate / 100))
-        total      = float(row.total_amount or subtotal + vat_amount)
+        vat_rate   = float(row.vat_rate or 20)
+        vat_amount = subtotal_after_section_discounts * (vat_rate / 100)
+        total      = subtotal_after_section_discounts + vat_amount
+        deposit    = float(row.deposit_paid or 0)
+        remaining  = max(0, float(row.total_remaining or (total - deposit)))
         tx         = 105
 
-        for label, value in [
-            ('SUB TOTAL:',              f"£{subtotal:.2f}"),
-            (f'VAT ({vat_rate:.0f}%):',  f"£{vat_amount:.2f}"),
-        ]:
+        totals_rows = [('SUB TOTAL:', f'£{subtotal_after_section_discounts:.2f}'),
+                       (f'VAT ({vat_rate:.0f}%):', f'£{vat_amount:.2f}')]
+
+        for label, value in totals_rows:
             pdf.set_x(tx)
             pdf.set_font('Arial', '', 10)
             pdf.cell(50, lh, label, 0, 0, 'R')
@@ -618,33 +677,44 @@ def download_invoice_pdf(invoice_id):
         pdf.set_x(tx)
         pdf.set_fill_color(*FILL)
         pdf.set_font('Arial', 'B', 12)
-        pdf.cell(50, 8, 'TOTAL DUE:', 'T', 0, 'R', 1)
-        pdf.cell(35, 8, f"£{total:.2f}", 'T', 1, 'R', 1)
+        pdf.cell(50, 8, 'TOTAL:', 'T', 0, 'R', 1)
+        pdf.cell(35, 8, f'£{total:.2f}', 'T', 1, 'R', 1)
+
+        if deposit > 0:
+            pdf.ln(2)
+            pdf.set_x(tx)
+            pdf.set_font('Arial', '', 10)
+            pdf.cell(50, lh, 'DEPOSIT PAID:', 0, 0, 'R')
+            pdf.set_font('Arial', 'B', 10)
+            pdf.cell(35, lh, f'£{deposit:.2f}', 0, 1, 'R')
+
+            pdf.set_x(tx)
+            pdf.set_font('Arial', 'B', 11)
+            pdf.cell(50, 7, 'TOTAL REMAINING:', 0, 0, 'R')
+            pdf.cell(35, 7, f'£{remaining:.2f}', 0, 1, 'R')
+
         pdf.ln(8)
 
         # ── Payment terms ─────────────────────────────────────────────────
-        pdf.set_x(10)
         pdf.set_font('Arial', 'B', 9)
         pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
-        pdf.set_x(10)
         pdf.cell(0, 5, 'NOTE: Payment is due within 30 days of the invoice date.', 0, 1, 'L')
         pdf.ln(4)
 
-        pdf.set_x(10)
         pdf.set_text_color(200, 0, 0)
         pdf.cell(0, 5, 'Please sign here to confirm.', 0, 1, 'L')
         pdf.set_text_color(0, 0, 0)
         pdf.ln(6)
 
         # ── Signature lines ───────────────────────────────────────────────
+        pdf.set_text_color(0, 0, 0)  # ← add this explicit reset
         pdf.set_font('Arial', '', 9)
         for label in ['Customer Signature:', 'Customer Name:', 'Date:']:
-            pdf.set_x(10)
             pdf.cell(45, 6, label, 0, 0, 'L')
             pdf.cell(145, 6, '', 'B', 1, 'L')
             pdf.ln(2)
 
-        out  = pdf.output(dest='S')
+        out = pdf.output(dest='S')
         if isinstance(out, str):
             out = out.encode('latin-1')
         buf  = BytesIO(bytes(out))
@@ -656,7 +726,6 @@ def download_invoice_pdf(invoice_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 # ============================================================================
 # PROFORMA INVOICE ROUTES

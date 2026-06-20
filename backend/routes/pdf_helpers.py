@@ -13,6 +13,10 @@ class PDF(FPDF):
         if not self.show_header:
             return
 
+        # Reset colours before drawing header
+        self.set_text_color(0, 0, 0)
+        self.set_draw_color(0, 0, 0)
+
         import os
         logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'static', 'images', 'logo3.png')
 
@@ -47,6 +51,10 @@ class PDF(FPDF):
             self.set_font('Arial', 'B', 14)
             self.cell(0, 8, self.doc_title, 0, 1, 'C')
             self.ln(5)
+
+        # Always reset to black after header
+        self.set_text_color(0, 0, 0)
+        self.set_font('Arial', '', 9)
 
     def footer(self):
         self.set_y(-15)
