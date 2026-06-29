@@ -1649,7 +1649,7 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
-        suffix_pattern = r'^([A-Z0-9]+)-(BS|AG|VD|BG|BST|AGT|VDT|BGT|C)$'
+        suffix_pattern = r'^([A-Z0-9]+)-(BS|S|AG|LS|VD|BG|BST|ST|AGT|LST|VDT|BGT|C)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
         print(f"   🔬 DEBUG: description='{description}', suffix_match={bool(suffix_match)}, groups={suffix_match.groups() if suffix_match else None}")
 
@@ -1665,11 +1665,15 @@ def auto_price_lookup(tenant_id, employee_id):
             
             suffix_to_door_type = {
                 'BS':  'Basic Slab',
+                'S':   'Basic Slab',
                 'AG':  'Acrylic Gloss/Matt',
+                'LS':  'Acrylic Gloss/Matt',
                 'VD':  'Vinyl Doors',
                 'BG':  'Black Glass',
                 'BST': 'Basic Slab',
+                'ST':  'Basic Slab',
                 'AGT': 'Acrylic Gloss/Matt',
+                'LST': 'Acrylic Gloss/Matt',
                 'VDT': 'Vinyl Doors',
                 'BGT': 'Black Glass',
                 'C':   'Carcass Only',
@@ -2064,14 +2068,15 @@ def auto_price_lookup(tenant_id, employee_id):
             else:
                 DOOR_TYPE_MAP = {
                     'basic slab': 'Basic Slab',
-                    'slab': 'Basic Slab',                        # ← ADD
-                    'lacquered slab': 'Acrylic Gloss/Matt',       # ← ADD
+                    'slab': 'Basic Slab',
+                    'lacquered slab': 'Acrylic Gloss/Matt',
                     'acrylic gloss/matt': 'Acrylic Gloss/Matt',
                     'acrylic gloss': 'Acrylic Gloss/Matt',
                     'acrylic matt': 'Acrylic Gloss/Matt',
+                    'timber': 'Timber',
                     'vinyl': 'Vinyl Doors',
                     'vinyl doors': 'Vinyl Doors',
-                    'black glass': 'Vinyl Doors',  # no Black Glass pricing for fillers, fall back to Vinyl
+                    'black glass': 'Vinyl Doors',
                 }
                 target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
             
@@ -2092,7 +2097,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 'price': price,
                 'item_code': item_code,
                 'item_name': item_name,
-                'description': f"{item_name} - {target_door_type}",
+                'description': f"{item_name} - {display_door_type(target_door_type)}",
                 'door_type': target_door_type,
                 'category': category,
                 'width': price_row.width,
