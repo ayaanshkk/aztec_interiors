@@ -418,10 +418,16 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         ref_num = f"Q-{timestamp}-{form_submission_id}"
         
         # Create quotation
+        door_colour = (form_data.get('door_color') or '').strip()
+        panelwork_colour = (form_data.get('end_panel_color') or '').strip()
+        door_style_val = (form_data.get('door_style') or '').strip()
+
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
-            (tenant_id, client_id, reference_number, total, status, notes, employee_id)
-            VALUES (:tenant_id, :client_id, :reference_number, 0, 'Draft', :notes, :employee_id)
+            (tenant_id, client_id, reference_number, total, status, notes, employee_id,
+             door_colour, panelwork_colour, door_style, room_type, door_type)
+            VALUES (:tenant_id, :client_id, :reference_number, 0, 'Draft', :notes, :employee_id,
+                    :door_colour, :panelwork_colour, :door_style, :room_type, :door_type)
             RETURNING quotation_id
         """)
         
@@ -430,7 +436,12 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
             'client_id': form.client_id,
             'reference_number': ref_num,
             'notes': f"Auto-generated from {checklist_type} checklist",
-            'employee_id': employee_id
+            'employee_id': employee_id,
+            'door_colour': door_colour,
+            'panelwork_colour': panelwork_colour,
+            'door_style': door_style_val,
+            'room_type': room_type,
+            'door_type': door_type,
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -650,13 +661,18 @@ def extract_checklist_items(form_data, session, tenant_id):
     # =========================================================================
     # 1. FURNITURE — Main door + additional doors
     # =========================================================================
+    door_style = (form_data.get('door_style') or '').strip()
     door_type = form_data.get('door_type', '').strip()
     door_color = form_data.get('door_color', '').strip()
- 
+    panel_color = (form_data.get('end_panel_color') or '').strip()
+    plinth_color = (form_data.get('plinth_filler_color') or '').strip()
+    cabinet_color = (form_data.get('cabinet_color') or '').strip()
+
     if door_type and door_type not in ('N/A', ''):
+        door_label = door_style if door_style and door_style not in ('N/A', '') else door_type
         items.append({
             'item': f'Door - {door_type}',
-            'description': '',
+            'description': door_label,
             'colour': door_color if door_color and door_color != 'N/A' else '',
             'qty': 1,
             'price': 0,
@@ -665,7 +681,49 @@ def extract_checklist_items(form_data, session, tenant_id):
             'needs_manual_pricing': True,
             'section': 'Furniture',
         })
-        print(f"   [Furniture] Main door: {door_type} ({door_color})")
+        print(f"   [Furniture] Main door: {door_type} ({door_style}) — {door_color}")
+
+    if panel_color and panel_color not in ('N/A', ''):
+        items.append({
+            'item': 'End Panel',
+            'description': 'Panel colour',
+            'colour': panel_color,
+            'qty': 1,
+            'price': 0,
+            'amount': 0,
+            'pricelist_id': None,
+            'needs_manual_pricing': True,
+            'section': 'Furniture',
+        })
+        print(f"   [Furniture] Panel colour: {panel_color}")
+
+    if plinth_color and plinth_color not in ('N/A', ''):
+        items.append({
+            'item': 'Plinth/Filler',
+            'description': 'Plinth/filler colour',
+            'colour': plinth_color,
+            'qty': 1,
+            'price': 0,
+            'amount': 0,
+            'pricelist_id': None,
+            'needs_manual_pricing': True,
+            'section': 'Furniture',
+        })
+        print(f"   [Furniture] Plinth/Filler colour: {plinth_color}")
+
+    if cabinet_color and cabinet_color not in ('N/A', ''):
+        items.append({
+            'item': 'Cabinet',
+            'description': 'Cabinet colour',
+            'colour': cabinet_color,
+            'qty': 1,
+            'price': 0,
+            'amount': 0,
+            'pricelist_id': None,
+            'needs_manual_pricing': True,
+            'section': 'Furniture',
+        })
+        print(f"   [Furniture] Cabinet colour: {cabinet_color}")
  
     additional_doors = form_data.get('additional_doors', [])
     if isinstance(additional_doors, list):
