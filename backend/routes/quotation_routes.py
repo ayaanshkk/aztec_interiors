@@ -618,7 +618,7 @@ def _lookup_appliance_price(session, tenant_id, model_code):
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
               AND category = 'Appliances'
-              AND UPPER(item_code) = UPPER(:model_code)
+              AND UPPER(TRIM(item_code)) = UPPER(TRIM(:model_code))
             LIMIT 1
         """)
 
@@ -630,6 +630,25 @@ def _lookup_appliance_price(session, tenant_id, model_code):
         if result and result.base_price:
             desc = result.description or result.item_name or ''
             print(f"✅ Appliance match: '{model_code}' → £{result.base_price} | {desc}")
+            return (float(result.base_price), result.pricelist_id, desc, False)
+
+        # ── Alias fallback ──────────────────────────────────────────────
+        alias_query = text("""
+            SELECT pricelist_id, base_price, item_name, description, door_type
+            FROM "StreemLyne_MT"."PriceList_Master"
+            WHERE tenant_id = :tenant_id
+              AND category = 'Appliances'
+              AND alias_codes ILIKE :pattern
+            LIMIT 1
+        """)
+        result = session.execute(alias_query, {
+            'tenant_id': str(tenant_id),
+            'pattern': f'%{model_code.strip()}%',
+        }).fetchone()
+
+        if result and result.base_price:
+            desc = result.description or result.item_name or ''
+            print(f"✅ Appliance alias match: '{model_code}' → £{result.base_price} | {desc}")
             return (float(result.base_price), result.pricelist_id, desc, False)
 
         print(f"⚠️  No appliance found for '{model_code}'")
@@ -1036,7 +1055,7 @@ def find_price_for_item(session, tenant_id, item_type, category, search_term):
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
               AND category = :category
-              AND UPPER(item_code) = UPPER(:search_term)
+              AND UPPER(TRIM(item_code)) = UPPER(TRIM(:search_term))
               AND (door_type = 'Standard' OR door_type IS NULL)
             LIMIT 1
         """)
@@ -1780,7 +1799,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 description as item_description
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
-                AND UPPER(item_code) = UPPER(:item_code)
+                AND UPPER(TRIM(item_code)) = UPPER(:item_code)
         """)
         
         results = db_session.execute(direct_query, {
@@ -2373,19 +2392,19 @@ def lookup_appliance(session, tenant_id, description, brand=None):
     print(f"\n🔥 APPLIANCE LOOKUP")
     print(f"   Description: {description}")
     
-    model_pattern = r'\b([A-Z]{2,}[0-9]{2,}[A-Z0-9]{2,})\b'
+    model_pattern = r'\b([A-Z]{1,}[0-9]{2,}[A-Z0-9]{2,})\b'
     model_match = re.search(model_pattern, description, re.IGNORECASE)
     model_code = model_match.group(1).upper() if model_match else description.strip().upper()
     
     # ✅ Try exact item_code match first
     query = text("""
-        SELECT 
+        SELECT  
             pricelist_id, item_code, item_name, description,
             base_price, brand, door_type, category
         FROM "StreemLyne_MT"."PriceList_Master"
         WHERE tenant_id = :tenant_id
           AND category = 'Appliances'
-          AND UPPER(item_code) = :model_code
+          AND UPPER(TRIM(item_code)) = :model_code
         LIMIT 1
     """)
     
