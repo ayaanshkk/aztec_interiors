@@ -418,6 +418,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         ref_num = f"Q-{timestamp}-{form_submission_id}"
         
         # Create quotation
+        carcass_colour = (form_data.get('cabinet_color') or '').strip()
         door_colour = (form_data.get('door_color') or '').strip()
         panelwork_colour = (form_data.get('end_panel_color') or '').strip()
         door_style_val = (form_data.get('door_style') or '').strip()
@@ -425,9 +426,9 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, reference_number, total, status, notes, employee_id,
-             door_colour, panelwork_colour, door_style, room_type, door_type)
+             carcass_colour, door_colour, panelwork_colour, door_style, room_type, door_type)
             VALUES (:tenant_id, :client_id, :reference_number, 0, 'Draft', :notes, :employee_id,
-                    :door_colour, :panelwork_colour, :door_style, :room_type, :door_type)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_type, :door_type)
             RETURNING quotation_id
         """)
         
@@ -437,6 +438,7 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
             'reference_number': ref_num,
             'notes': f"Auto-generated from {checklist_type} checklist",
             'employee_id': employee_id,
+            'carcass_colour': carcass_colour,
             'door_colour': door_colour,
             'panelwork_colour': panelwork_colour,
             'door_style': door_style_val,
