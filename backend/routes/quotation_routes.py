@@ -997,21 +997,23 @@ def extract_checklist_items(form_data, session, tenant_id):
             sink_lookup = sink_model if sink_model and sink_model != 'N/A' else sink_details
  
             if sink_lookup and sink_lookup != 'N/A':
-                sink_price, sink_pid, _, sink_needs, sink_desc = find_price_for_item(
-                    session, tenant_id, 'sink', 'Sink and Tap', sink_lookup
-                )
-                items.append({
-                    'item': sink_lookup,
-                    'description': sink_desc,
-                    'colour': '',
-                    'qty': 1,
-                    'price': sink_price,
-                    'amount': sink_price,
-                    'pricelist_id': sink_pid,
-                    'needs_manual_pricing': sink_needs,
-                    'section': 'Sink and Tap',
-                })
-                print(f"   [Sink and Tap] Sink: {sink_lookup} → £{sink_price}")
+                sink_codes = [s.strip() for s in sink_lookup.split(',') if s.strip() and s.strip() != 'N/A']
+                for sink_code in sink_codes:
+                    sink_price, sink_pid, _, sink_needs, sink_desc = find_price_for_item(
+                        session, tenant_id, 'sink', 'Sink and Tap', sink_code
+                    )
+                    items.append({
+                        'item': sink_code,
+                        'description': sink_desc,
+                        'colour': '',
+                        'qty': 1,
+                        'price': sink_price,
+                        'amount': sink_price,
+                        'pricelist_id': sink_pid,
+                        'needs_manual_pricing': sink_needs,
+                        'section': 'Sink and Tap',
+                    })
+                    print(f"   [Sink and Tap] Sink: {sink_code} → £{sink_price}")
  
             # Tap: prefer model code, fall back to details text
             tap_model = form_data.get('tap_model', '').strip()
@@ -1019,21 +1021,23 @@ def extract_checklist_items(form_data, session, tenant_id):
             tap_lookup = tap_model if tap_model and tap_model != 'N/A' else tap_details
  
             if tap_lookup and tap_lookup != 'N/A':
-                tap_price, tap_pid, _, tap_needs, tap_desc = find_price_for_item(
-                    session, tenant_id, 'tap', 'Sink and Tap', tap_lookup
-                )
-                items.append({
-                    'item': tap_lookup,
-                    'description': tap_desc,
-                    'colour': '',
-                    'qty': 1,
-                    'price': tap_price,
-                    'amount': tap_price,
-                    'pricelist_id': tap_pid,
-                    'needs_manual_pricing': tap_needs,
-                    'section': 'Sink and Tap',
-                })
-                print(f"   [Sink and Tap] Tap: {tap_lookup} → £{tap_price}")
+                tap_codes = [t.strip() for t in tap_lookup.split(',') if t.strip() and t.strip() != 'N/A']
+                for tap_code in tap_codes:
+                    tap_price, tap_pid, _, tap_needs, tap_desc = find_price_for_item(
+                        session, tenant_id, 'tap', 'Sink and Tap', tap_code
+                    )
+                    items.append({
+                        'item': tap_code,
+                        'description': tap_desc,
+                        'colour': '',
+                        'qty': 1,
+                        'price': tap_price,
+                        'amount': tap_price,
+                        'pricelist_id': tap_pid,
+                        'needs_manual_pricing': tap_needs,
+                        'section': 'Sink and Tap',
+                    })
+                    print(f"   [Sink and Tap] Tap: {tap_code} → £{tap_price}")
  
     print(f"📊 Total items extracted: {len(items)}")
     return items
