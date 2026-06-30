@@ -1649,7 +1649,7 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
-        suffix_pattern = r'^([A-Z0-9]+)-(BS|S|AG|LS|VD|BG|BST|ST|AGT|LST|VDT|BGT|C)$'
+        suffix_pattern = r'^([A-Z0-9]+)-(BS|S|AG|LS|T|VD|BG|BST|ST|AGT|LST|TT|VDT|BGT|C)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
         print(f"   🔬 DEBUG: description='{description}', suffix_match={bool(suffix_match)}, groups={suffix_match.groups() if suffix_match else None}")
 
@@ -1668,12 +1668,14 @@ def auto_price_lookup(tenant_id, employee_id):
                 'S':   'Basic Slab',
                 'AG':  'Acrylic Gloss/Matt',
                 'LS':  'Acrylic Gloss/Matt',
+                'T':   'Timber',
                 'VD':  'Vinyl Doors',
                 'BG':  'Black Glass',
                 'BST': 'Basic Slab',
                 'ST':  'Basic Slab',
                 'AGT': 'Acrylic Gloss/Matt',
                 'LST': 'Acrylic Gloss/Matt',
+                'TT':  'Timber',
                 'VDT': 'Vinyl Doors',
                 'BGT': 'Black Glass',
                 'C':   'Carcass Only',
@@ -1685,6 +1687,10 @@ def auto_price_lookup(tenant_id, employee_id):
                 door_component_only = False
                 door_total_mode = False
                 component_door_type = None
+            elif suffix == 'T':
+                # Single 'T' = Timber component only, not total mode
+                door_component_only = True
+                door_total_mode = False
             elif suffix.endswith('T'):
                 door_total_mode = True
                 door_component_only = False
