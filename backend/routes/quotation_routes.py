@@ -373,18 +373,17 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
             'pattern': f'%{form_submission_id}%'
         }).fetchone()
 
+        existing_quotation_id = None
         if existing:
-            # Delete old items then old quote so we regenerate fresh from updated checklist
+            existing_quotation_id = existing.quotation_id
+            # Only delete items that came from the checklist auto-extraction.
+            # Manually added items are preserved.
             session.execute(text("""
                 DELETE FROM "StreemLyne_MT"."Quotation_Items"
-                WHERE quotation_id = :qid
-            """), {'qid': existing.quotation_id})
-            session.execute(text("""
-                DELETE FROM "StreemLyne_MT"."Quotations"
-                WHERE quotation_id = :qid AND tenant_id = :tenant_id
-            """), {'qid': existing.quotation_id, 'tenant_id': str(tenant_id)})
+                WHERE quotation_id = :qid AND source = 'checklist'
+            """), {'qid': existing_quotation_id})
             session.flush()
-            print(f"🗑️  Deleted old quote {existing.quotation_id} to regenerate from updated checklist")
+            print(f"🔄 Cleared checklist-sourced items from quote {existing_quotation_id}, keeping manual items")
         
         # Parse form data
         form_data = json.loads(form.form_data) if isinstance(form.form_data, str) else form.form_data
