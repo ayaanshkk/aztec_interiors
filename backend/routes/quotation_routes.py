@@ -713,9 +713,9 @@ def extract_checklist_items(form_data, session, tenant_id):
             'amount': 0,
             'pricelist_id': None,
             'needs_manual_pricing': True,
-            'section': 'Furniture',
+            'section': 'Fillers and End Panels',
         })
-        print(f"   [Furniture] Panel colour: {panel_color}")
+        print(f"   [Fillers and End Panels] Panel colour: {panel_color}")
 
     if plinth_color and plinth_color not in ('N/A', ''):
         items.append({
@@ -727,9 +727,9 @@ def extract_checklist_items(form_data, session, tenant_id):
             'amount': 0,
             'pricelist_id': None,
             'needs_manual_pricing': True,
-            'section': 'Furniture',
+            'section': 'Fillers and End Panels',
         })
-        print(f"   [Furniture] Plinth/Filler colour: {plinth_color}")
+        print(f"   [Fillers and End Panels] Plinth/Filler colour: {plinth_color}")
 
     if cabinet_color and cabinet_color not in ('N/A', ''):
         items.append({
@@ -983,6 +983,25 @@ def extract_checklist_items(form_data, session, tenant_id):
                     'section': 'Appliances',
                 })
                 print(f"   [Appliances] INTG Freezer: {integ_freezer_make} x{freezer_qty} → £{fz_price}")
+
+            # Other / Misc Appliances
+            other_appliances = form_data.get('other_appliances', '').strip()
+            if other_appliances and other_appliances not in ('N/A', ''):
+                other_codes = [c.strip() for c in other_appliances.split(',') if c.strip() and c.strip() != 'N/A']
+                for code in other_codes:
+                    o_price, o_pid, o_desc, o_needs = _lookup_appliance_price(session, tenant_id, code)
+                    items.append({
+                        'item': code,
+                        'description': o_desc,
+                        'colour': '',
+                        'qty': 1,
+                        'price': o_price,
+                        'amount': o_price,
+                        'pricelist_id': o_pid,
+                        'needs_manual_pricing': o_needs,
+                        'section': 'Appliances',
+                    })
+                    print(f"   [Appliances] Other/Misc: {code} → £{o_price}")
  
     # =========================================================================
     # 6. SINK AND TAP — Kitchen only
