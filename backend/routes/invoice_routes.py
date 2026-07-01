@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app, send_file
+from flask import Blueprint, json, request, jsonify, current_app, send_file
 from sqlalchemy import text
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -136,14 +136,14 @@ def create_invoice(tenant_id, employee_id):
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
                  sub_total, vat, description, tax_id,
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
-                 deposit_paid, total_remaining, door_type, room_type)
+                 deposit_paid, total_remaining, door_type, room_type, section_discounts)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
                  :subtotal, :vat_amount, :notes, :tax_id,
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
-                 :deposit_paid, :total_remaining, :door_type, :room_type)
+                 :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts)
                 RETURNING invoice_id
             """),
             {
@@ -174,6 +174,7 @@ def create_invoice(tenant_id, employee_id):
                 'total_remaining':  float(data.get('total_remaining', 0)),
                 'door_type':        data.get('door_type', 'Carcass Only'),
                 'room_type':        data.get('room_type', 'Kitchen'),
+                'section_discounts': json.dumps(data.get('section_discounts', {})),
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -291,6 +292,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'room_type': row.room_type or 'Kitchen',
                 'deposit_paid':     float(row.deposit_paid    or 0),
                 'total_remaining':  float(row.total_remaining or 0),
+                'section_discounts': (json.loads(row.section_discounts) if isinstance(row.section_discounts, str) else row.section_discounts) if getattr(row, 'section_discounts', None) else {},
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -329,6 +331,12 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 if field in data:
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
+
+            if 'section_discounts' in data:
+                import json as _json
+                update_fields.append("section_discounts = :section_discounts")
+                sd = data['section_discounts']
+                params['section_discounts'] = _json.dumps(sd) if isinstance(sd, dict) else sd
 
             if 'vat_rate' in data:
                 update_fields.append("vat_rate = :vat_rate")
@@ -501,6 +509,10 @@ def download_invoice_pdf(invoice_id):
             {'id': invoice_id}
         ).fetchall()
 
+        # ── Parse section discounts ───────────────────────────────────────
+        section_discounts_raw = getattr(row, 'section_discounts', None)
+        section_discounts = (json.loads(section_discounts_raw) if isinstance(section_discounts_raw, str) else section_discounts_raw) if section_discounts_raw else {}
+
         FILL   = (230, 230, 230)
         YELLOW = (255, 255, 180)
         GREEN  = (180, 230, 180)
@@ -512,8 +524,9 @@ def download_invoice_pdf(invoice_id):
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'INVOICE'
         pdf.alias_nb_pages()
-        pdf.set_auto_page_break(auto=True, margin=25)
+        pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
+        pdf.set_auto_page_break(auto=False, margin=20)
 
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
@@ -524,18 +537,13 @@ def download_invoice_pdf(invoice_id):
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
-            'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',
+            'Acc name: Atelier Luxe Interiors LTD  |  Bank: ClearBank  |  Sort Code: 04 06 05  |  Acc No: 31621197',
             1, 1, 'C', 1)
         pdf.ln(1)
 
         pdf.set_fill_color(*FILL)
         pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
         pdf.ln(4)
-
-        # ── INVOICE title ─────────────────────────────────────────────────
-        pdf.set_font('Arial', 'B', 16)
-        pdf.cell(0, 8, 'INVOICE', 0, 1, 'C')
-        pdf.ln(3)
 
         # ── Customer info ─────────────────────────────────────────────────
         cust_name    = row.customer_name    or row.client_company_name or 'N/A'
@@ -545,7 +553,6 @@ def download_invoice_pdf(invoice_id):
         due_date     = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
         customer_fields = [
-            ('INVOICE NO:',  row.invoice_number or 'N/A'),
             ('DATE:',        inv_date),
             ('DUE DATE:',    due_date),
             ('NAME:',        cust_name),
@@ -584,22 +591,30 @@ def download_invoice_pdf(invoice_id):
         ]
 
         ROW_H       = 8
-        PAGE_BOTTOM = pdf.h - 30
+        PAGE_BOTTOM = pdf.h - 35
         subtotal_after_section_discounts = 0.0
 
-        def draw_row(name, desc, color, qty, amount, indent=False):
+        def draw_row(name, desc, color, qty, amount, indent=False, discounted_amount=None, discount_pct=0):
             row_h = 8
             x0, y0 = pdf.get_x(), pdf.get_y()
-            display_name = ('   > ' + name) if indent else name
+            clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
+            display_name = (' - ' + clean_name) if indent else clean_name
             pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
             pdf.cell(widths[1], row_h, '', 1, 0, 'L')
             pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(qty or 1), 1, 1, 'C')
+            pdf.cell(widths[3], row_h, str(int(qty or 1)), 1, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            clean_desc = (desc or '').encode('latin-1', errors='ignore').decode('latin-1')
             pdf.cell(widths[1] - 2, row_h - 2,
-                     (desc[:100] if len(desc or '') > 100 else (desc or '')), 0, 0, 'L')
+                     (clean_desc[:100] if len(clean_desc) > 100 else clean_desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
-            return float(amount or 0) * int(qty or 1)
+            # Return discounted line total if discount applied
+            base = float(amount or 0) * int(qty or 1)
+            if discounted_amount is not None:
+                return float(discounted_amount)
+            if discount_pct and discount_pct > 0:
+                return base * (1 - float(discount_pct) / 100)
+            return base
 
         def draw_section_header(section_name):
             pdf.set_font('Arial', 'B', 10)
@@ -612,9 +627,9 @@ def download_invoice_pdf(invoice_id):
             pdf.set_font('Arial', '', 9)
 
         for section in SECTIONS:
-            all_section_items = [i for i in valid_items
-                                 if (getattr(i, 'section', None) or 'Furniture') == section]
-            if not all_section_items:
+            section_items = [i for i in valid_items
+                             if (getattr(i, 'section', None) or 'Furniture') == section]
+            if not section_items:
                 continue
 
             header_h = 7 + 8
@@ -624,21 +639,29 @@ def download_invoice_pdf(invoice_id):
             draw_section_header(section)
 
             section_subtotal = 0.0
-            for item in all_section_items:
+            for item in section_items:
                 if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                     pdf.add_page()
+
                 is_sub = bool(getattr(item, 'is_sub_item', False))
                 lt = draw_row(
-                    item.item_name or item.service_name or '',
+                    item.item_name or getattr(item, 'service_name', '') or '',
                     item.description or '',
                     item.color or '',
                     item.quantity or 1,
                     item.amount or 0,
                     indent=is_sub,
+                    discounted_amount=float(item.discounted_amount) if (item.discounted_amount and float(getattr(item, 'discount_percent', 0) or 0) > 0) else None,
+                    discount_pct=float(getattr(item, 'discount_percent', 0) or 0),
                 )
                 section_subtotal += lt
 
-            # Section totals
+            # ── Section totals with optional section discount ─────────────
+            sec_discount_pct = float(section_discounts.get(section, 0) or 0)
+            sec_discount_amt = section_subtotal * (sec_discount_pct / 100)
+            sec_total = section_subtotal - sec_discount_amt
+            subtotal_after_section_discounts += sec_total
+
             pdf.ln(1)
             sec_tx = 120
             pdf.set_font('Arial', '', 8)
@@ -646,14 +669,20 @@ def download_invoice_pdf(invoice_id):
             pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
             pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
 
+            if sec_discount_pct > 0:
+                pdf.set_font('Arial', '', 8)
+                pdf.set_x(sec_tx)
+                pdf.cell(45, 5, 'Section Discount:', 0, 0, 'R')
+                pdf.set_text_color(200, 0, 0)
+                pdf.cell(25, 5, f'-£{sec_discount_amt:.2f}', 0, 1, 'R')
+                pdf.set_text_color(0, 0, 0)
+
             pdf.set_font('Arial', 'B', 8)
             pdf.set_fill_color(220, 220, 220)
             pdf.set_x(sec_tx)
             pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
-            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 1, 1, 'R', 1)
+            pdf.cell(25, 5, f'£{sec_total:.2f}', 1, 1, 'R', 1)
             pdf.ln(4)
-
-            subtotal_after_section_discounts += section_subtotal
 
         # ── Totals ────────────────────────────────────────────────────────
         pdf.ln(3)
@@ -696,6 +725,9 @@ def download_invoice_pdf(invoice_id):
         pdf.ln(8)
 
         # ── Payment terms ─────────────────────────────────────────────────
+        if pdf.get_y() + 60 > pdf.h - 20:
+            pdf.add_page()
+
         pdf.set_font('Arial', 'B', 9)
         pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
         pdf.cell(0, 5, 'NOTE: Payment is due within 30 days of the invoice date.', 0, 1, 'L')
@@ -707,7 +739,6 @@ def download_invoice_pdf(invoice_id):
         pdf.ln(6)
 
         # ── Signature lines ───────────────────────────────────────────────
-        pdf.set_text_color(0, 0, 0)  # ← add this explicit reset
         pdf.set_font('Arial', '', 9)
         for label in ['Customer Signature:', 'Customer Name:', 'Date:']:
             pdf.cell(45, 6, label, 0, 0, 'L')
@@ -1066,12 +1097,13 @@ def download_proforma_pdf(invoice_id):
 
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title = 'PROFORMA INVOICE'
-        pdf.alias_nb_pages(); pdf.add_page(); pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.alias_nb_pages(); pdf.add_page(); 
+        pdf.set_auto_page_break(auto=True, margin=20)
 
         pdf.set_fill_color(*GREEN); pdf.set_font('Arial','B',9)
         pdf.cell(0,5,'Registered to England No 5246881   |   VAT Reg No.686 8010 72',1,1,'C',1); pdf.ln(1)
         pdf.set_fill_color(*YELLOW); pdf.set_font('Arial','',9)
-        pdf.cell(0,5,'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',1,1,'C',1); pdf.ln(1)
+        pdf.cell(0,5,'Acc name: Atelier Luxe Interiors LTD  |  Bank: ClearBank  |  Sort Code: 04 06 05  |  Acc No: 31621197',1,1,'C',1); pdf.ln(1)
         pdf.set_fill_color(*FILL)
         pdf.cell(0,5,'Please use your name and/or road name as reference',1,1,'C',1); pdf.ln(4)
 
@@ -1118,6 +1150,7 @@ def download_proforma_pdf(invoice_id):
             pdf.cell(widths[1]-2,row_h-2,desc[:100] if len(desc)>100 else desc,0,0,'L')
             pdf.set_font('Arial','',9); pdf.set_xy(x0,y0+row_h); subtotal+=lt
 
+        pdf.set_auto_page_break(auto=True, margin=40)
         pdf.ln(3)
         vat_rate=float(row.vat_rate or 20)
         vat_amount=float(row.vat_amount or row.vat or subtotal*(vat_rate/100))

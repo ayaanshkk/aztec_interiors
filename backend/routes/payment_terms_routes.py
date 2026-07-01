@@ -292,7 +292,7 @@ def download_payment_terms_pdf(pt_id):
 
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5, 'Acc name : Atelier Luxe Interiors LTD', 0, 1, 'L')
-        pdf.cell(0, 5, 'Bank : Tide', 0, 1, 'L')
+        pdf.cell(0, 5, 'Bank : ClearBank', 0, 1, 'L')
         pdf.cell(0, 5, 'Sort Code: 04 06 05', 0, 1, 'L')
         pdf.cell(0, 5, 'Acc No: 31621197', 0, 1, 'L')
         pdf.ln(5)

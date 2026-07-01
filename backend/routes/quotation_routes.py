@@ -2589,7 +2589,7 @@ def download_quotation_pdf(quotation_id):
         pdf.set_fill_color(*YELLOW)
         pdf.set_font('Arial', '', 9)
         pdf.cell(0, 5,
-            'Acc name: Atelier Luxe Interiors LTD  |  Bank: Tide  |  Sort Code: 04 06 05  |  Acc No: 31621197',
+            'Acc name: Atelier Luxe Interiors LTD  |  Bank: ClearBank  |  Sort Code: 04 06 05  |  Acc No: 31621197',
             1, 1, 'C', 1)
         pdf.ln(1)
 
@@ -2650,11 +2650,11 @@ def download_quotation_pdf(quotation_id):
         def draw_row(name, desc, color, qty, amount, indent=False):
             row_h = 8
             x0, y0 = pdf.get_x(), pdf.get_y()
-            display_name = ('   > ' + name) if indent else name
+            display_name = ('   - ' + name) if indent else name
             pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
             pdf.cell(widths[1], row_h, '', 1, 0, 'L')
             pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(qty or 1), 1, 1, 'C')
+            pdf.cell(widths[3], row_h, str(int(qty or 1)), 1, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
             pdf.cell(widths[1] - 2, row_h - 2, (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
@@ -2671,7 +2671,7 @@ def download_quotation_pdf(quotation_id):
             pdf.set_font('Arial', '', 9)
 
         ROW_H = 8
-        PAGE_BOTTOM = pdf.h - 25
+        PAGE_BOTTOM = pdf.h - 35
 
         for section in SECTIONS:
             section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
