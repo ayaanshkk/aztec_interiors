@@ -902,6 +902,7 @@ def extract_checklist_items(form_data, session, tenant_id):
     # =========================================================================
     if checklist_type == 'kitchen':
         appliances_owned = form_data.get('appliances_customer_owned', '').strip()
+        print(f"🔍 All form_data keys: {list(form_data.keys())}")
  
         if appliances_owned and appliances_owned.lower() not in ('n/a', ''):
             standard_appliance_names = [
@@ -936,6 +937,33 @@ def extract_checklist_items(form_data, session, tenant_id):
                         'section': 'Appliances',
                     })
                     print(f"   [Appliances] {appliance_name}: {make} {model} → £{app_price}")
+
+            additional_appliances = form_data.get('additional_appliances', [])
+            if isinstance(additional_appliances, list):
+                for add_app in additional_appliances:
+                    if not isinstance(add_app, dict):
+                        continue
+                    add_label = (add_app.get('label') or '').strip()
+                    add_make  = (add_app.get('make') or '').strip()
+                    add_model = (add_app.get('model') or '').strip()
+                    if (not add_make or add_make == 'N/A') and (not add_model or add_model == 'N/A'):
+                        continue
+                    lookup_code = add_model if add_model and add_model != 'N/A' else add_label
+                    app_price, app_pricelist_id, app_desc, app_needs = _lookup_appliance_price(
+                        session, tenant_id, lookup_code
+                    )
+                    items.append({
+                        'item': add_model if add_model and add_model != 'N/A' else add_label,
+                        'description': app_desc,
+                        'colour': '',
+                        'qty': 1,
+                        'price': app_price,
+                        'amount': app_price,
+                        'pricelist_id': app_pricelist_id,
+                        'needs_manual_pricing': app_needs,
+                        'section': 'Appliances',
+                    })
+                    print(f"   [Appliances] Additional {add_label}: {add_make} {add_model} → £{app_price}")
  
             # INTG Fridge
             integ_fridge_make = form_data.get('integ_fridge_make', '').strip()
@@ -983,6 +1011,8 @@ def extract_checklist_items(form_data, session, tenant_id):
                     'section': 'Appliances',
                 })
                 print(f"   [Appliances] INTG Freezer: {integ_freezer_make} x{freezer_qty} → £{fz_price}")
+
+
 
             # Other / Misc Appliances
             other_appliances = form_data.get('other_appliances', '').strip()
@@ -1066,7 +1096,7 @@ def find_price_for_item(session, tenant_id, item_type, category, search_term):
     from sqlalchemy import text
 
     try:
-        if not search_term or len(search_term.strip()) < 4:
+        if not search_term or len(search_term.strip()) < 2:
             print(f"⚠️  Skipping lookup for '{search_term}' (too short)")
             return (0.0, None, None, True, '')
 

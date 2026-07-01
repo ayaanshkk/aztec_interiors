@@ -213,6 +213,18 @@ def download_checklist_pdf():
                 two_col('INTG Freezer Make:', form_data.get('integ_freezer_make', ''),
                         'Model:', form_data.get('integ_freezer_model', ''))
 
+            additional_appliances = form_data.get('additional_appliances', [])
+            if additional_appliances:
+                sub_header('Additional Appliances')
+                for add_app in additional_appliances:
+                    if not isinstance(add_app, dict):
+                        continue
+                    label = add_app.get('label', 'Appliance')
+                    make  = add_app.get('make', '')
+                    model = add_app.get('model', '')
+                    if make or model:
+                        two_col(f'{label} Make:', make, 'Model:', model)
+
             full_row('Sink & Tap Customer Owned:', form_data.get('sink_tap_customer_owned', ''))
             if form_data.get('sink_details'):
                 two_col('Sink Details:', form_data.get('sink_details', ''),
