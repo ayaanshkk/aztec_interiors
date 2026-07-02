@@ -68,8 +68,37 @@ def get_invoices(tenant_id, employee_id):
             {'tenant_id': str(tenant_id), 'client_id': int(client_id)}
         ).fetchall()
 
-        return jsonify([
-            {
+        import json as _json
+
+        result_list = []
+        for r in rows:
+            # Parse section discounts
+            section_discounts = {}
+            sd_raw = getattr(r, 'section_discounts', None)
+            if sd_raw:
+                try:
+                    section_discounts = _json.loads(sd_raw) if isinstance(sd_raw, str) else sd_raw
+                except:
+                    pass
+
+            # Get per-section item totals
+            section_rows = session.execute(text("""
+                SELECT COALESCE(section, 'Furniture') as section,
+                       SUM(COALESCE(amount, 0) * COALESCE(quantity, 1)) as section_total
+                FROM "StreemLyne_MT"."Invoice_Details"
+                WHERE invoice_id = :iid
+                GROUP BY COALESCE(section, 'Furniture')
+            """), {'iid': r.invoice_id}).fetchall()
+
+            subtotal_after_section_discounts = 0.0
+            for sr in section_rows:
+                disc_pct = float(section_discounts.get(sr.section, 0) or 0)
+                subtotal_after_section_discounts += float(sr.section_total or 0) * (1 - disc_pct / 100)
+
+            vat_pct = float(getattr(r, 'vat_rate', 20) or 20)
+            computed_total = subtotal_after_section_discounts * (1 + vat_pct / 100)
+
+            result_list.append({
                 'id':             r.invoice_id,
                 'invoice_id':     r.invoice_id,
                 'invoice_number': r.invoice_number,
@@ -77,7 +106,7 @@ def get_invoices(tenant_id, employee_id):
                 'customer_id':    r.client_id,
                 'customer_name':  r.customer_name or r.client_company_name,
                 'project_id':     r.project_id,
-                'total':          float(r.total_amount) if r.total_amount else 0.0,
+                'total':          round(computed_total, 2),
                 'status':         r.status,
                 'notes':          r.notes,
                 'items_count':    r.items_count or 0,
@@ -85,9 +114,9 @@ def get_invoices(tenant_id, employee_id):
                 'invoice_date':   r.invoice_date.isoformat() if r.invoice_date else None,
                 'due_date':       r.due_date.isoformat()     if r.due_date     else None,
                 'created_at':     r.created_at.isoformat()   if r.created_at   else None,
-            }
-            for r in rows
-        ]), 200
+            })
+
+        return jsonify(result_list), 200
 
     except Exception as e:
         current_app.logger.exception(f"Error fetching invoices: {e}")

@@ -1,3 +1,4 @@
+from email.quoprimime import quote
 from unicodedata import category
 
 from flask import Blueprint, request, jsonify, current_app, send_file
@@ -129,12 +130,16 @@ def get_quotations(tenant_id, employee_id):
                  WHERE quotation_id = q.quotation_id) as items_count,
                 (SELECT COALESCE(SUM(amount * quantity), 0) FROM "StreemLyne_MT"."Quotation_Items"
                  WHERE quotation_id = q.quotation_id
-                 AND (
-                     (item_name IS NOT NULL AND item_name != '')
-                     OR (description IS NOT NULL AND description != '')
-                     OR (amount > 0)
-                 )
-                ) as computed_subtotal
+                ) as computed_subtotal,
+                (
+                    SELECT json_agg(json_build_object('section', section, 'total', section_total))
+                    FROM (
+                        SELECT section, SUM(amount * quantity) as section_total
+                        FROM "StreemLyne_MT"."Quotation_Items"
+                        WHERE quotation_id = q.quotation_id
+                        GROUP BY section
+                    ) s
+                ) as section_totals_json
             FROM "StreemLyne_MT"."Quotations" q
             INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
             WHERE {where_clause}
@@ -149,7 +154,36 @@ def get_quotations(tenant_id, employee_id):
             discount_pct = float(getattr(q, 'global_discount_percent', 0) or 0)
             vat_pct = float(getattr(q, 'vat_percentage', 20) or 20)
 
-            subtotal_after_discount = subtotal - (subtotal * discount_pct / 100)
+            # Parse section discounts
+            section_discounts_raw = getattr(q, 'section_discounts', None)
+            section_discounts = {}
+            if section_discounts_raw:
+                try:
+                    section_discounts = json.loads(section_discounts_raw) if isinstance(section_discounts_raw, str) else section_discounts_raw
+                except:
+                    section_discounts = {}
+
+            # Apply section discounts using pre-aggregated section totals from SQL
+            section_totals_raw = getattr(q, 'section_totals_json', None)
+            if section_discounts and section_totals_raw:
+                try:
+                    section_totals_list = json.loads(section_totals_raw) if isinstance(section_totals_raw, str) else section_totals_raw
+                    subtotal_after_section_discounts = 0.0
+                    if section_totals_list:
+                        for st in section_totals_list:
+                            sec = st.get('section') or 'Furniture'
+                            sec_total = float(st.get('total') or 0)
+                            sec_disc_pct = float(section_discounts.get(sec, 0) or 0)
+                            subtotal_after_section_discounts += sec_total - (sec_total * sec_disc_pct / 100)
+                    else:
+                        subtotal_after_section_discounts = subtotal
+                except Exception as e:
+                    print(f"Error parsing section totals: {e}")
+                    subtotal_after_section_discounts = subtotal
+            else:
+                subtotal_after_section_discounts = subtotal
+
+            subtotal_after_discount = subtotal_after_section_discounts - (subtotal_after_section_discounts * discount_pct / 100)
             vat_amount = subtotal_after_discount * (vat_pct / 100)
             computed_total = subtotal_after_discount + vat_amount
 
