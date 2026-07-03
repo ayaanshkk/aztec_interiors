@@ -293,6 +293,32 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 {'id': invoice_id}
             ).fetchall()
 
+            import json as _json
+            section_discounts = {}
+            sd_raw = getattr(row, 'section_discounts', None)
+            if sd_raw:
+                try:
+                    section_discounts = _json.loads(sd_raw) if isinstance(sd_raw, str) else sd_raw
+                except:
+                    pass
+
+            section_rows = session.execute(text("""
+                SELECT COALESCE(section, 'Furniture') as section,
+                       SUM(COALESCE(amount, 0) * COALESCE(quantity, 1)) as section_total
+                FROM "StreemLyne_MT"."Invoice_Details"
+                WHERE invoice_id = :iid
+                GROUP BY COALESCE(section, 'Furniture')
+            """), {'iid': invoice_id}).fetchall()
+
+            subtotal_after_section_discounts = 0.0
+            for sr in section_rows:
+                disc_pct = float(section_discounts.get(sr.section, 0) or 0)
+                subtotal_after_section_discounts += float(sr.section_total or 0) * (1 - disc_pct / 100)
+
+            vat_rate_val = float(row.vat_rate or 20)
+            computed_total = round(subtotal_after_section_discounts * (1 + vat_rate_val / 100), 2)
+            computed_vat = round(subtotal_after_section_discounts * (vat_rate_val / 100), 2)
+
             return jsonify({
                 'id':               row.invoice_id,
                 'invoice_id':       row.invoice_id,
@@ -306,22 +332,23 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'project_id':       row.project_id,
                 'invoice_date':     row.invoice_date.isoformat() if row.invoice_date else None,
                 'due_date':         row.due_date.isoformat()     if row.due_date     else None,
-                'subtotal':         float(row.subtotal    or row.sub_total or 0),
-                'vat_rate':         float(row.vat_rate    or 20),
-                'vat_amount':       float(row.vat_amount  or row.vat or 0),
-                'total':            float(row.total_amount or 0),
+                'subtotal':         round(subtotal_after_section_discounts, 2),
+                'vat_rate':         vat_rate_val,
+                'vat_amount':       computed_vat,
+                'total':            computed_total,
+                'global_discount_percent': float(getattr(row, 'global_discount_percent', 0) or 0),
                 'status':           row.status,
                 'notes':            row.notes or row.description,
                 'room_name':        row.room_name        or '',
                 'carcass_colour':   row.carcass_colour   or '',
-                'door_colour':      row.door_colour      or '',
+                'door_colour':      row.door_colour       or '',
                 'panelwork_colour': row.panelwork_colour or '',
                 'door_style':       row.door_style       or '',
-                'door_type': row.door_type or 'Carcass Only',
-                'room_type': row.room_type or 'Kitchen',
+                'door_type':        row.door_type        or 'Carcass Only',
+                'room_type':        row.room_type        or 'Kitchen',
                 'deposit_paid':     float(row.deposit_paid    or 0),
                 'total_remaining':  float(row.total_remaining or 0),
-                'section_discounts': (json.loads(row.section_discounts) if isinstance(row.section_discounts, str) else row.section_discounts) if getattr(row, 'section_discounts', None) else {},
+                'section_discounts': (_json.loads(row.section_discounts) if isinstance(row.section_discounts, str) else row.section_discounts) if getattr(row, 'section_discounts', None) else {},
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -339,7 +366,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         'discount_percent': float(i.discount_percent or 0),
                         'discounted_total': float(i.discounted_amount or i.amount or 0),
                         'line_total':       float(i.amount or 0) * int(i.quantity or 1),
-                    		'section':          i.section or 'Furniture',
+                        'section':          i.section or 'Furniture',
                         'is_sub_item':      bool(i.is_sub_item) if i.is_sub_item is not None else False,
                     }
                     for i in items
@@ -362,10 +389,10 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     params[field] = data[field]
 
             if 'section_discounts' in data:
-                import json as _json
+                import json as _json2
                 update_fields.append("section_discounts = :section_discounts")
                 sd = data['section_discounts']
-                params['section_discounts'] = _json.dumps(sd) if isinstance(sd, dict) else sd
+                params['section_discounts'] = _json2.dumps(sd) if isinstance(sd, dict) else sd
 
             if 'vat_rate' in data:
                 update_fields.append("vat_rate = :vat_rate")
@@ -376,7 +403,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     text('DELETE FROM "StreemLyne_MT"."Invoice_Details" WHERE invoice_id = :id'),
                     {'id': invoice_id}
                 )
-                total = 0.0
+
                 for item in data['items']:
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
@@ -410,11 +437,30 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                             'is_sub_item':  bool(item.get('is_sub_item', False)),
                         }
                     )
-                    total += amt * qty
+
+                # ✅ Recompute subtotal with section discounts applied before storing
+                import json as _json3
+                section_discounts_for_save = {}
+                if 'section_discounts' in data:
+                    sd = data['section_discounts']
+                    section_discounts_for_save = sd if isinstance(sd, dict) else _json3.loads(sd)
+
+                section_totals: dict = {}
+                for item in data['items']:
+                    if not item.get('item') and not item.get('description') and not item.get('amount'):
+                        continue
+                    sec = item.get('section', 'Furniture')
+                    amt = float(item.get('amount', 0)) * int(item.get('quantity', 1))
+                    section_totals[sec] = section_totals.get(sec, 0) + amt
+
+                subtotal_after_sd = sum(
+                    v * (1 - float(section_discounts_for_save.get(k, 0)) / 100)
+                    for k, v in section_totals.items()
+                )
 
                 vat_rate   = float(data.get('vat_rate', 20))
-                vat_amount = total * (vat_rate / 100)
-                total_amt  = total + vat_amount
+                vat_amount = subtotal_after_sd * (vat_rate / 100)
+                total_amt  = subtotal_after_sd + vat_amount
 
                 update_fields += [
                     "subtotal = :subtotal", "sub_total = :subtotal",
@@ -422,12 +468,11 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     "total_amount = :total_amount",
                 ]
                 params.update({
-                    'subtotal':     total,
-                    'vat_amount':   vat_amount,
-                    'total_amount': total_amt,
+                    'subtotal':     round(subtotal_after_sd, 2),
+                    'vat_amount':   round(vat_amount, 2),
+                    'total_amount': round(total_amt, 2),
                     'vat_rate':     vat_rate,
                 })
-                # Ensure vat_rate is in update_fields exactly once
                 if 'vat_rate = :vat_rate' not in update_fields:
                     update_fields.append("vat_rate = :vat_rate")
 
@@ -464,7 +509,6 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
         return jsonify({'error': str(e)}), 500
     finally:
         session.close()
-
 
 # ============================================================================
 # DELETE SINGLE ITEM
@@ -623,7 +667,7 @@ def download_invoice_pdf(invoice_id):
         PAGE_BOTTOM = pdf.h - 35
         subtotal_after_section_discounts = 0.0
 
-        def draw_row(name, desc, color, qty, amount, indent=False, discounted_amount=None, discount_pct=0):
+        def draw_row(name, desc, color, qty, amount, indent=False):
             row_h = 8
             x0, y0 = pdf.get_x(), pdf.get_y()
             clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
@@ -637,13 +681,8 @@ def download_invoice_pdf(invoice_id):
             pdf.cell(widths[1] - 2, row_h - 2,
                      (clean_desc[:100] if len(clean_desc) > 100 else clean_desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
-            # Return discounted line total if discount applied
-            base = float(amount or 0) * int(qty or 1)
-            if discounted_amount is not None:
-                return float(discounted_amount)
-            if discount_pct and discount_pct > 0:
-                return base * (1 - float(discount_pct) / 100)
-            return base
+            # ✅ Always return raw amount × qty
+            return float(amount or 0) * int(qty or 1)
 
         def draw_section_header(section_name):
             pdf.set_font('Arial', 'B', 10)
@@ -680,23 +719,18 @@ def download_invoice_pdf(invoice_id):
                     item.quantity or 1,
                     item.amount or 0,
                     indent=is_sub,
-                    discounted_amount=float(item.discounted_amount) if (item.discounted_amount and float(getattr(item, 'discount_percent', 0) or 0) > 0) else None,
-                    discount_pct=float(getattr(item, 'discount_percent', 0) or 0),
                 )
-                section_subtotal += lt
+                section_subtotal += lt  # ✅ raw amount × qty
 
-            # ── Section totals with optional section discount ─────────────
+            # ✅ Apply section discount ONCE at section level
             sec_discount_pct = float(section_discounts.get(section, 0) or 0)
             sec_discount_amt = section_subtotal * (sec_discount_pct / 100)
-            sec_total = section_subtotal - sec_discount_amt
-            subtotal_after_section_discounts += sec_total
+            sec_after_discount = section_subtotal - sec_discount_amt
+            subtotal_after_section_discounts += sec_after_discount  # ✅ accumulate
 
+            # ✅ Show total only (no subtotal row)
             pdf.ln(1)
             sec_tx = 120
-            pdf.set_font('Arial', '', 8)
-            pdf.set_x(sec_tx)
-            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
-            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
 
             if sec_discount_pct > 0:
                 pdf.set_font('Arial', '', 8)
@@ -710,7 +744,7 @@ def download_invoice_pdf(invoice_id):
             pdf.set_fill_color(220, 220, 220)
             pdf.set_x(sec_tx)
             pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
-            pdf.cell(25, 5, f'£{sec_total:.2f}', 1, 1, 'R', 1)
+            pdf.cell(25, 5, f'£{sec_after_discount:.2f}', 1, 1, 'R', 1)
             pdf.ln(4)
 
         # ── Totals ────────────────────────────────────────────────────────

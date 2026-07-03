@@ -1383,15 +1383,31 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 items_result.append(d)
 
             # ✅ NEW: Compute subtotal/total from items (source of truth — matches PDF)
-            subtotal = sum(
-                float(i.amount or 0) * (i.quantity or 1)
-                for i in valid_items
-            )
+            section_discounts_raw = getattr(quote, 'section_discounts', None)
+            section_discounts = {}
+            if section_discounts_raw:
+                try:
+                    section_discounts = json.loads(section_discounts_raw) if isinstance(section_discounts_raw, str) else section_discounts_raw
+                except:
+                    pass
+
+            # Compute subtotal per section, apply section discounts
+            SECTIONS_ORDER = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles', 'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
+            subtotal_after_section_discounts = 0.0
+            raw_subtotal = 0.0
+            for sec in SECTIONS_ORDER:
+                sec_items = [i for i in valid_items if (getattr(i, 'section', None) or 'Furniture') == sec]
+                sec_total = sum(float(i.amount or 0) * (i.quantity or 1) for i in sec_items)
+                raw_subtotal += sec_total
+                disc_pct = float(section_discounts.get(sec, 0) or 0)
+                subtotal_after_section_discounts += sec_total * (1 - disc_pct / 100)
+
             vat_pct_val = float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0
             discount_pct_val = float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0
-            subtotal_after_discount = subtotal - (subtotal * discount_pct_val / 100)
-            vat_amount_val = subtotal_after_discount * (vat_pct_val / 100)
-            computed_total = subtotal_after_discount + vat_amount_val
+            subtotal_after_global_discount = subtotal_after_section_discounts - (subtotal_after_section_discounts * discount_pct_val / 100)
+            vat_amount_val = subtotal_after_global_discount * (vat_pct_val / 100)
+            computed_total = subtotal_after_global_discount + vat_amount_val
+            subtotal = raw_subtotal
             
             result = {
                 'id': quote.quotation_id,
@@ -1416,10 +1432,11 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'client_address': quote.client_address,
                 'client_phone': quote.client_phone,
                 'project_id': quote.project_id,
-                'subtotal': subtotal,
+                'subtotal': subtotal_after_section_discounts,
                 'vat_amount': vat_amount_val,
-                'discount_amount': subtotal * (discount_pct_val / 100),
+                'discount_amount': subtotal_after_section_discounts * (discount_pct_val / 100),
                 'total': computed_total,
+                'section_discounts': section_discounts,
                 'status': quote.status,
                 'notes': quote.notes,
                 'section_discounts': (json.loads(quote.section_discounts) if isinstance(quote.section_discounts, str) else quote.section_discounts) if getattr(quote, 'section_discounts', None) else {},
@@ -2591,7 +2608,8 @@ def download_quotation_pdf(quotation_id):
         # ── Fetch items ───────────────────────────────────────────────────
         items = db_session.execute(
             text("""
-                SELECT item_id, item_name, description, color, quantity, amount, parent_item_id, section
+                SELECT item_id, item_name, description, color, quantity, amount, 
+                       parent_item_id, section, discount_percent, discounted_amount
                 FROM "StreemLyne_MT"."Quotation_Items"
                 WHERE quotation_id = :qid
                 ORDER BY item_id
@@ -2630,11 +2648,6 @@ def download_quotation_pdf(quotation_id):
         pdf.set_fill_color(*FILL)
         pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
         pdf.ln(4)
-
-        # ── QUOTATION title ───────────────────────────────────────────────
-        pdf.set_font('Arial', 'B', 16)
-        pdf.cell(0, 8, 'QUOTATION', 0, 1, 'C')
-        pdf.ln(3)
 
         # ── Customer info ─────────────────────────────────────────────────
         cust_name    = quotation.customer_name    or quotation.client_company_name or 'N/A'
@@ -2678,7 +2691,6 @@ def download_quotation_pdf(quotation_id):
                 sub_map.setdefault(pid, []).append(i)
 
         pdf.set_font('Arial', '', 9)
-        subtotal = 0.0
         subtotal_after_section_discounts = 0.0
 
         def draw_row(name, desc, color, qty, amount, indent=False):
@@ -2692,6 +2704,7 @@ def download_quotation_pdf(quotation_id):
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
             pdf.cell(widths[1] - 2, row_h - 2, (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
+            # Always return raw amount × qty — section discount applied at section level
             return float(amount or 0) * int(qty or 1)
 
         def draw_section_header(section_name):
@@ -2712,8 +2725,7 @@ def download_quotation_pdf(quotation_id):
             if not section_items:
                 continue
 
-            # ✅ If not enough room for header + at least one row, start new page
-            header_h = 7 + 8  # section title + column headers
+            header_h = 7 + 8
             if pdf.get_y() + header_h + ROW_H > PAGE_BOTTOM:
                 pdf.add_page()
 
@@ -2724,29 +2736,37 @@ def download_quotation_pdf(quotation_id):
                 if pdf.get_y() + ROW_H * 2 > PAGE_BOTTOM:
                     pdf.add_page()
 
-                lt = draw_row(item.item_name or '', item.description or '', item.color, item.quantity, item.amount)
-                section_subtotal += lt
-                subtotal += lt
+                lt = draw_row(
+                    item.item_name or '',
+                    item.description or '',
+                    item.color,
+                    item.quantity,
+                    item.amount,
+                )
+                section_subtotal += lt  # parent item
 
                 for sub in sub_map.get(item.item_id, []):
                     if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                         pdf.add_page()
-                    slt = draw_row(sub.item_name or '', sub.description or '', sub.color, sub.quantity, sub.amount, indent=True)
-                    section_subtotal += slt
-                    subtotal += slt
+                    slt = draw_row(
+                        sub.item_name or '',
+                        sub.description or '',
+                        sub.color,
+                        sub.quantity,
+                        sub.amount,
+                        indent=True,
+                    )
+                    section_subtotal += slt  # sub-item
 
-            # ✅ Section totals with optional section discount
+            # Apply section discount once at section level
             sec_discount_pct = float(section_discounts.get(section, 0) or 0)
             sec_discount_amt = section_subtotal * (sec_discount_pct / 100)
-            sec_total = section_subtotal - sec_discount_amt
-            subtotal_after_section_discounts += sec_total
+            sec_after_discount = section_subtotal - sec_discount_amt
+            subtotal_after_section_discounts += sec_after_discount  # ✅ accumulate
 
+            # Show section totals row
             pdf.ln(1)
             sec_tx = 120
-            pdf.set_font('Arial', '', 8)
-            pdf.set_x(sec_tx)
-            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
-            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
 
             if sec_discount_pct > 0:
                 pdf.set_font('Arial', '', 8)
@@ -2760,7 +2780,7 @@ def download_quotation_pdf(quotation_id):
             pdf.set_fill_color(220, 220, 220)
             pdf.set_x(sec_tx)
             pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
-            pdf.cell(25, 5, f'£{sec_total:.2f}', 1, 1, 'R', 1)
+            pdf.cell(25, 5, f'£{sec_after_discount:.2f}', 1, 1, 'R', 1)
             pdf.ln(4)
 
         # ── Totals ────────────────────────────────────────────────────────
