@@ -2768,6 +2768,12 @@ def download_quotation_pdf(quotation_id):
             pdf.ln(1)
             sec_tx = 120
 
+            # Section Subtotal
+            pdf.set_font('Arial', '', 8)
+            pdf.set_x(sec_tx)
+            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
+            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
+
             if sec_discount_pct > 0:
                 pdf.set_font('Arial', '', 8)
                 pdf.set_x(sec_tx)
