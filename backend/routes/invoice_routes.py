@@ -1,4 +1,4 @@
-from flask import Blueprint, json, request, jsonify, current_app, send_file
+from flask import Blueprint, json, request, jsonify, current_app, send_file, session
 from sqlalchemy import text
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -84,19 +84,19 @@ def get_invoices(tenant_id, employee_id):
             # Get per-section item totals
             section_rows = session.execute(text("""
                 SELECT COALESCE(section, 'Furniture') as section,
-                       SUM(COALESCE(amount, 0) * COALESCE(quantity, 1)) as section_total
+                    SUM(COALESCE(discounted_amount, amount * quantity)) as section_total
                 FROM "StreemLyne_MT"."Invoice_Details"
                 WHERE invoice_id = :iid
+                AND (is_sub_item = false OR is_sub_item IS NULL)
                 GROUP BY COALESCE(section, 'Furniture')
             """), {'iid': r.invoice_id}).fetchall()
 
-            subtotal_after_section_discounts = 0.0
-            for sr in section_rows:
-                disc_pct = float(section_discounts.get(sr.section, 0) or 0)
-                subtotal_after_section_discounts += float(sr.section_total or 0) * (1 - disc_pct / 100)
+            subtotal_after_section_discounts = sum(
+                float(sr.section_total or 0) for sr in section_rows
+            )
 
             vat_pct = float(getattr(r, 'vat_rate', 20) or 20)
-            computed_total = subtotal_after_section_discounts * (1 + vat_pct / 100)
+            computed_total = round(subtotal_after_section_discounts * (1 + vat_pct / 100), 2)
 
             result_list.append({
                 'id':             r.invoice_id,
@@ -212,14 +212,14 @@ def create_invoice(tenant_id, employee_id):
         for item in items_data:
             if not item.get('item') and not item.get('description') and not item.get('amount'):
                 continue
-            amt = float(item.get('amount', item.get('line_total', 0)))
+            unit_price = float(item.get('amount', 0))
             qty = int(item.get('quantity', 1))
             session.execute(
                 text("""
                     INSERT INTO "StreemLyne_MT"."Invoice_Details"
                     (invoice_id, item_name, description, color, quantity, amount,
-                     unit_price, service_name, width, height, depth,
-                     discount_percent, discounted_amount, section, is_sub_item)
+                    unit_price, service_name, width, height, depth,
+                    discount_percent, discounted_amount, section, is_sub_item)
                     VALUES
                     (:invoice_id, :item_name, :desc, :color, :qty, :amt,
                     :unit_price, :service_name, :w, :h, :d, :dp, :da, :section, :is_sub_item)
@@ -230,14 +230,14 @@ def create_invoice(tenant_id, employee_id):
                     'desc':         item.get('description', ''),
                     'color':        item.get('color', item.get('colour', '')),
                     'qty':          qty,
-                    'amt':          amt,
-                    'unit_price':   float(item.get('amount', 0)) / qty if qty else 0,
+                    'amt':          unit_price,   # ← unit price stored in amount column
+                    'unit_price':   unit_price,   # ← same
                     'service_name': item.get('item', ''),
                     'w':            item.get('width'),
                     'h':            item.get('height'),
                     'd':            item.get('depth'),
                     'dp':           item.get('discount_percent', 0),
-                    'da':           item.get('discounted_total', amt),
+                    'da':           item.get('discounted_total', unit_price * qty),
                     'section':      item.get('section', 'Furniture'),
                     'is_sub_item':  bool(item.get('is_sub_item', False)),
                 }
@@ -304,20 +304,21 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
 
             section_rows = session.execute(text("""
                 SELECT COALESCE(section, 'Furniture') as section,
-                       SUM(COALESCE(amount, 0) * COALESCE(quantity, 1)) as section_total
+                    SUM(COALESCE(discounted_amount, amount * quantity)) as section_total
                 FROM "StreemLyne_MT"."Invoice_Details"
                 WHERE invoice_id = :iid
+                AND (is_sub_item = false OR is_sub_item IS NULL)
                 GROUP BY COALESCE(section, 'Furniture')
             """), {'iid': invoice_id}).fetchall()
 
-            subtotal_after_section_discounts = 0.0
-            for sr in section_rows:
-                disc_pct = float(section_discounts.get(sr.section, 0) or 0)
-                subtotal_after_section_discounts += float(sr.section_total or 0) * (1 - disc_pct / 100)
+            subtotal_after_section_discounts = sum(
+                float(sr.section_total or 0) for sr in section_rows
+            )
 
             vat_rate_val = float(row.vat_rate or 20)
-            computed_total = round(subtotal_after_section_discounts * (1 + vat_rate_val / 100), 2)
             computed_vat = round(subtotal_after_section_discounts * (vat_rate_val / 100), 2)
+            computed_total = round(subtotal_after_section_discounts + computed_vat, 2)
+
 
             return jsonify({
                 'id':               row.invoice_id,
@@ -407,7 +408,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 for item in data['items']:
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
-                    amt = float(item.get('amount', item.get('line_total', 0)))
+                    unit_price = float(item.get('amount', 0))
                     qty = int(item.get('quantity', 1))
                     session.execute(
                         text("""
@@ -425,14 +426,14 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                             'desc':         item.get('description', ''),
                             'color':        item.get('color', item.get('colour', '')),
                             'qty':          qty,
-                            'amt':          amt,
-                            'unit_price':   amt / qty if qty else 0,
+                            'amt':          unit_price,
+                            'unit_price':   unit_price,
                             'service_name': item.get('item', ''),
                             'w':            item.get('width'),
                             'h':            item.get('height'),
                             'd':            item.get('depth'),
                             'dp':           item.get('discount_percent', 0),
-                            'da':           item.get('discounted_total', amt),
+                            'da':           item.get('discounted_total', unit_price * qty),
                             'section':      item.get('section', 'Furniture'),
                             'is_sub_item':  bool(item.get('is_sub_item', False)),
                         }
@@ -450,8 +451,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
                     sec = item.get('section', 'Furniture')
-                    amt = float(item.get('amount', 0)) * int(item.get('quantity', 1))
-                    section_totals[sec] = section_totals.get(sec, 0) + amt
+                    line = float(item.get('amount', 0)) * int(item.get('quantity', 1))
+                    section_totals[sec] = section_totals.get(sec, 0) + line
 
                 subtotal_after_sd = sum(
                     v * (1 - float(section_discounts_for_save.get(k, 0)) / 100)
@@ -679,7 +680,7 @@ def download_invoice_pdf(invoice_id):
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
             clean_desc = (desc or '').encode('latin-1', errors='ignore').decode('latin-1')
             pdf.cell(widths[1] - 2, row_h - 2,
-                     (clean_desc[:100] if len(clean_desc) > 100 else clean_desc), 0, 0, 'L')
+                    (clean_desc[:100] if len(clean_desc) > 100 else clean_desc), 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
             # ✅ Always return raw amount × qty
             return float(amount or 0) * int(qty or 1)
@@ -696,7 +697,7 @@ def download_invoice_pdf(invoice_id):
 
         for section in SECTIONS:
             section_items = [i for i in valid_items
-                             if (getattr(i, 'section', None) or 'Furniture') == section]
+                            if (getattr(i, 'section', None) or 'Furniture') == section]
             if not section_items:
                 continue
 
@@ -706,13 +707,23 @@ def download_invoice_pdf(invoice_id):
 
             draw_section_header(section)
 
-            section_subtotal = 0.0
+            section_raw = 0.0
+            section_subtotal = 0.0  # after per-item discounts
+
             for item in section_items:
                 if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                     pdf.add_page()
 
                 is_sub = bool(getattr(item, 'is_sub_item', False))
-                lt = draw_row(
+                raw = float(item.amount or 0) * int(item.quantity or 1)
+                section_raw += raw
+
+                # Use saved discounted_total if available, else raw
+                disc_amt = getattr(item, 'discounted_total', None) or getattr(item, 'discounted_amount', None)
+                effective = float(disc_amt) if disc_amt is not None and float(disc_amt) > 0 else raw
+                section_subtotal += effective
+
+                draw_row(
                     item.item_name or getattr(item, 'service_name', '') or '',
                     item.description or '',
                     item.color or '',
@@ -720,28 +731,24 @@ def download_invoice_pdf(invoice_id):
                     item.amount or 0,
                     indent=is_sub,
                 )
-                section_subtotal += lt  # ✅ raw amount × qty
 
-            # ✅ Apply section discount ONCE at section level
-            sec_discount_pct = float(section_discounts.get(section, 0) or 0)
-            sec_discount_amt = section_subtotal * (sec_discount_pct / 100)
-            sec_after_discount = section_subtotal - sec_discount_amt
-            subtotal_after_section_discounts += sec_after_discount  # ✅ accumulate
+            sec_discount_amt = section_raw - section_subtotal
+            sec_discount_pct = (sec_discount_amt / section_raw * 100) if section_raw > 0 else 0
+            subtotal_after_section_discounts += section_subtotal
 
-            # ✅ Show total only (no subtotal row)
+            # ── Section totals display ────────────────────────────────────
             pdf.ln(1)
             sec_tx = 120
 
-            # Section Subtotal
             pdf.set_font('Arial', '', 8)
             pdf.set_x(sec_tx)
             pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
-            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 0, 1, 'R')
+            pdf.cell(25, 5, f'£{section_raw:.2f}', 0, 1, 'R')
 
-            if sec_discount_pct > 0:
+            if sec_discount_amt > 0.005:
                 pdf.set_font('Arial', '', 8)
                 pdf.set_x(sec_tx)
-                pdf.cell(45, 5, 'Section Discount:', 0, 0, 'R')
+                pdf.cell(45, 5, f'Section Discount ({sec_discount_pct:.1f}%):', 0, 0, 'R')
                 pdf.set_text_color(200, 0, 0)
                 pdf.cell(25, 5, f'-£{sec_discount_amt:.2f}', 0, 1, 'R')
                 pdf.set_text_color(0, 0, 0)
@@ -750,7 +757,7 @@ def download_invoice_pdf(invoice_id):
             pdf.set_fill_color(220, 220, 220)
             pdf.set_x(sec_tx)
             pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
-            pdf.cell(25, 5, f'£{sec_after_discount:.2f}', 1, 1, 'R', 1)
+            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 1, 1, 'R', 1)
             pdf.ln(4)
 
         # ── Totals ────────────────────────────────────────────────────────
@@ -970,7 +977,7 @@ def create_proforma(tenant_id, employee_id):
         for item in items_data:
             if not item.get('item') and not item.get('description') and not item.get('amount'):
                 continue
-            amt = float(item.get('amount', item.get('line_total', 0)))
+            unit_price = float(item.get('amount', 0))
             qty = int(item.get('quantity', 1))
             session.execute(
                 text("""
@@ -981,10 +988,10 @@ def create_proforma(tenant_id, employee_id):
                 """),
                 {
                     'iid': invoice_id, 'name': item.get('item', ''), 'desc': item.get('description', ''),
-                    'color': item.get('color', item.get('colour', '')), 'qty': qty, 'amt': amt,
-                    'up': amt / qty if qty else 0, 'w': item.get('width'), 'h': item.get('height'),
+                    'color': item.get('color', item.get('colour', '')), 'qty': qty, 'amt': unit_price,
+                    'up': unit_price, 'w': item.get('width'), 'h': item.get('height'),
                     'd': item.get('depth'), 'dp': item.get('discount_percent', 0),
-                    'da': item.get('discounted_total', amt),
+                    'da': item.get('discounted_total', unit_price * qty),
                 }
             )
 
@@ -1086,7 +1093,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 for item in data['items']:
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
-                    amt = float(item.get('amount', item.get('line_total', 0)))
+                    unit_price = float(item.get('amount', 0))
                     qty = int(item.get('quantity', 1))
                     session.execute(
                         text("""
@@ -1098,12 +1105,12 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                         {
                             'iid': invoice_id, 'name': item.get('item', ''), 'desc': item.get('description', ''),
                             'color': item.get('color', item.get('colour', '')), 'qty': qty, 'amt': amt,
-                            'up': amt / qty if qty else 0, 'w': item.get('width'),
+                            'up': unit_price, 'w': item.get('width'),
                             'h': item.get('height'), 'd': item.get('depth'),
-                            'dp': item.get('discount_percent', 0), 'da': item.get('discounted_total', amt),
+                            'dp': item.get('discount_percent', 0), 'da': item.get('discounted_total', unit_price * qty),
                         }
                     )
-                    total += amt * qty
+                    total += unit_price * qty
 
                 vat_rate = float(data.get('vat_rate', 20))
                 vat_amount = total * (vat_rate / 100)
