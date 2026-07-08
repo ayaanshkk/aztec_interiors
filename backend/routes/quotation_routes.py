@@ -152,7 +152,7 @@ def get_quotations(tenant_id, employee_id):
         for q in quotations:
             subtotal = float(q.computed_subtotal or 0)
             discount_pct = float(getattr(q, 'global_discount_percent', 0) or 0)
-            vat_pct = float(getattr(q, 'vat_percentage', 20) or 20)
+            vat_pct = float(getattr(q, 'vat_percentage', 20)) if getattr(q, 'vat_percentage', None) is not None else 20.0
 
             # Parse section discounts
             section_discounts_raw = getattr(q, 'section_discounts', None)
@@ -1390,8 +1390,8 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 for i in valid_items
             )
 
-            vat_pct_val = float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage else 20.0
-            discount_pct_val = float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent else 0.0
+            vat_pct_val = float(quote.vat_percentage) if hasattr(quote, 'vat_percentage') and quote.vat_percentage is not None else 20.0
+            discount_pct_val = float(quote.global_discount_percent) if hasattr(quote, 'global_discount_percent') and quote.global_discount_percent is not None else 0.0
             subtotal_after_global_discount = subtotal_after_section_discounts - (subtotal_after_section_discounts * discount_pct_val / 100)
             vat_amount_val = subtotal_after_global_discount * (vat_pct_val / 100)
             computed_total = subtotal_after_global_discount + vat_amount_val
@@ -2157,12 +2157,16 @@ def auto_price_lookup(tenant_id, employee_id):
                     )
 
                 elif code_upper == 'FITDR':
-                    calculated_qty = sum(
-                        int(i.get('quantity', 1))
-                        for i in current_items
-                        if 'door' in (i.get('description') or '').lower()
-                        and not kitchen_larder_pattern.match((i.get('item') or '').strip().upper())
-                    )
+                    DOOR_ITEM_CODES = {'FITDR', 'DR', 'DOOR'}
+                    DOOR_CATEGORIES = {'Doors', 'Internal Doors', 'External Doors'}
+                    calculated_qty = 0
+                    for i in current_items:
+                        item_c = (i.get('item') or '').strip().upper()
+                        cat = get_item_category(item_c)
+                        # Only match items explicitly categorised as doors
+                        if cat in DOOR_CATEGORIES or item_c in DOOR_ITEM_CODES:
+                            calculated_qty += int(i.get('quantity', 1))
+                            print(f"   ✅ FITDR match: {item_c} ({cat})")
 
                 elif code_upper == 'PANW':
                     panel_codes = {
@@ -2618,7 +2622,6 @@ def download_quotation_pdf(quotation_id):
         pdf.alias_nb_pages()
         pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
-        pdf.set_auto_page_break(auto=False, margin=20)
 
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
@@ -2717,7 +2720,7 @@ def download_quotation_pdf(quotation_id):
                 continue
 
             header_h = 7 + 8
-            if pdf.get_y() + header_h + ROW_H > PAGE_BOTTOM:
+            if pdf.get_y() + header_h + ROW_H > pdf.h - 35:
                 pdf.add_page()
 
             draw_section_header(section)
@@ -2738,9 +2741,8 @@ def download_quotation_pdf(quotation_id):
                     discount_pct=float(item.discount_percent or 0),
                     discounted_amt=item.discounted_amount,
                 )
-                section_raw += float(item.amount or 0) * int(item.quantity or 1)
-                section_subtotal += lt
-
+                section_raw += round(float(item.amount or 0) * int(item.quantity or 1), 2)
+                section_subtotal += round(lt, 2)
                 for sub in sub_map.get(item.item_id, []):
                     if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                         pdf.add_page()
@@ -2754,12 +2756,13 @@ def download_quotation_pdf(quotation_id):
                         discounted_amt=sub.discounted_amount,
                         indent=True,
                     )
-                    section_raw += float(sub.amount or 0) * int(sub.quantity or 1)
-                    section_subtotal += slt
+                    section_raw += round(float(sub.amount or 0) * int(sub.quantity or 1), 2)
+                    section_subtotal += round(slt, 2)
+            sec_discount_amt = round(section_raw - section_subtotal, 2)
 
             sec_discount_amt = section_raw - section_subtotal
             sec_discount_pct = (sec_discount_amt / section_raw * 100) if section_raw > 0 else 0
-            subtotal_after_section_discounts += section_subtotal
+            subtotal_after_section_discounts = round(subtotal_after_section_discounts + round(section_subtotal, 2), 2)
 
             # ── Section totals display ────────────────────────────────────
             pdf.ln(1)
@@ -2786,11 +2789,13 @@ def download_quotation_pdf(quotation_id):
             pdf.ln(4)
 
         # ── Totals ────────────────────────────────────────────────────────
+        if pdf.get_y() > pdf.h - 100:
+            pdf.add_page()
         pdf.ln(3)
-        discount_pct    = float(getattr(quotation, 'global_discount_percent', 0) or 0)
+        discount_pct    = float(quotation.global_discount_percent) if quotation.global_discount_percent is not None else 0.0
         discount_amount = subtotal_after_section_discounts * (discount_pct / 100)
         subtotal_after_discount = subtotal_after_section_discounts - discount_amount
-        vat_pct    = float(quotation.vat_percentage or 20)
+        vat_pct    = float(quotation.vat_percentage) if quotation.vat_percentage is not None else 20.0
         vat_amount = subtotal_after_discount * (vat_pct / 100)
         total      = subtotal_after_discount + vat_amount
         tx         = 105

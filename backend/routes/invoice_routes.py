@@ -95,7 +95,7 @@ def get_invoices(tenant_id, employee_id):
                 float(sr.section_total or 0) for sr in section_rows
             )
 
-            vat_pct = float(getattr(r, 'vat_rate', 20) or 20)
+            vat_pct = float(r.vat_rate) if getattr(r, 'vat_rate', None) is not None else 20.0
             computed_total = round(subtotal_after_section_discounts * (1 + vat_pct / 100), 2)
 
             result_list.append({
@@ -165,14 +165,14 @@ def create_invoice(tenant_id, employee_id):
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
                  sub_total, vat, description, tax_id,
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
-                 deposit_paid, total_remaining, door_type, room_type, section_discounts)
+                 deposit_paid, total_remaining, door_type, room_type, section_discounts, global_discount_percent)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
                  :subtotal, :vat_amount, :notes, :tax_id,
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
-                 :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts)
+                 :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts, :global_discount_percent)
                 RETURNING invoice_id
             """),
             {
@@ -203,7 +203,8 @@ def create_invoice(tenant_id, employee_id):
                 'total_remaining':  float(data.get('total_remaining', 0)),
                 'door_type':        data.get('door_type', 'Carcass Only'),
                 'room_type':        data.get('room_type', 'Kitchen'),
-                'section_discounts': json.dumps(data.get('section_discounts', {})),
+                'section_discounts':       json.dumps(data.get('section_discounts', {})),
+                'global_discount_percent': float(data.get('global_discount_percent', 0)),
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -315,7 +316,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 float(sr.section_total or 0) for sr in section_rows
             )
 
-            vat_rate_val = float(row.vat_rate or 20)
+            vat_rate_val = float(row.vat_rate) if row.vat_rate is not None else 20.0    
             computed_vat = round(subtotal_after_section_discounts * (vat_rate_val / 100), 2)
             computed_total = round(subtotal_after_section_discounts + computed_vat, 2)
 
@@ -337,7 +338,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'vat_rate':         vat_rate_val,
                 'vat_amount':       computed_vat,
                 'total':            computed_total,
-                'global_discount_percent': float(getattr(row, 'global_discount_percent', 0) or 0),
+                'global_discount_percent': float(row.global_discount_percent) if getattr(row, 'global_discount_percent', None) is not None else 0.0,
                 'status':           row.status,
                 'notes':            row.notes or row.description,
                 'room_name':        row.room_name        or '',
@@ -347,8 +348,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'door_style':       row.door_style       or '',
                 'door_type':        row.door_type        or 'Carcass Only',
                 'room_type':        row.room_type        or 'Kitchen',
-                'deposit_paid':     float(row.deposit_paid    or 0),
-                'total_remaining':  float(row.total_remaining or 0),
+                'deposit_paid':     float(row.deposit_paid or 0),
+                'total_remaining':  max(0, round(computed_total - float(row.deposit_paid or 0), 2)),
                 'section_discounts': (_json.loads(row.section_discounts) if isinstance(row.section_discounts, str) else row.section_discounts) if getattr(row, 'section_discounts', None) else {},
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
                 'items': [
@@ -600,7 +601,6 @@ def download_invoice_pdf(invoice_id):
         pdf.alias_nb_pages()
         pdf.set_auto_page_break(auto=True, margin=20)
         pdf.add_page()
-        pdf.set_auto_page_break(auto=False, margin=20)
 
         # ── Registration + bank details ───────────────────────────────────
         pdf.set_fill_color(*GREEN)
@@ -715,12 +715,10 @@ def download_invoice_pdf(invoice_id):
                     pdf.add_page()
 
                 is_sub = bool(getattr(item, 'is_sub_item', False))
-                raw = float(item.amount or 0) * int(item.quantity or 1)
+                raw = round(float(item.amount or 0) * int(item.quantity or 1), 2)
                 section_raw += raw
-
-                # Use saved discounted_total if available, else raw
                 disc_amt = getattr(item, 'discounted_total', None) or getattr(item, 'discounted_amount', None)
-                effective = float(disc_amt) if disc_amt is not None and float(disc_amt) > 0 else raw
+                effective = round(float(disc_amt), 2) if disc_amt is not None and float(disc_amt) > 0 else raw
                 section_subtotal += effective
 
                 draw_row(
@@ -732,9 +730,9 @@ def download_invoice_pdf(invoice_id):
                     indent=is_sub,
                 )
 
-            sec_discount_amt = section_raw - section_subtotal
+            sec_discount_amt = round(section_raw - section_subtotal, 2)
             sec_discount_pct = (sec_discount_amt / section_raw * 100) if section_raw > 0 else 0
-            subtotal_after_section_discounts += section_subtotal
+            subtotal_after_section_discounts = round(subtotal_after_section_discounts + round(section_subtotal, 2), 2)
 
             # ── Section totals display ────────────────────────────────────
             pdf.ln(1)
@@ -761,12 +759,14 @@ def download_invoice_pdf(invoice_id):
             pdf.ln(4)
 
         # ── Totals ────────────────────────────────────────────────────────
+        if pdf.get_y() > pdf.h - 100:
+            pdf.add_page()
         pdf.ln(3)
-        vat_rate   = float(row.vat_rate or 20)
-        vat_amount = subtotal_after_section_discounts * (vat_rate / 100)
-        total      = subtotal_after_section_discounts + vat_amount
+        vat_rate   = float(row.vat_rate) if row.vat_rate is not None else 20.0
+        vat_amount = round(subtotal_after_section_discounts * (vat_rate / 100), 2)
+        total      = round(subtotal_after_section_discounts + vat_amount, 2)
         deposit    = float(row.deposit_paid or 0)
-        remaining  = max(0, float(row.total_remaining or (total - deposit)))
+        remaining  = max(0, round(total - deposit, 2))
         tx         = 105
 
         totals_rows = [('SUB TOTAL:', f'£{subtotal_after_section_discounts:.2f}'),
@@ -1041,7 +1041,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 'invoice_date': row.invoice_date.isoformat() if row.invoice_date else None,
                 'due_date': row.due_date.isoformat() if row.due_date else None,
                 'subtotal': float(row.subtotal or row.sub_total or 0),
-                'vat_rate': float(row.vat_rate or 20),
+                'vat_rate': float(row.vat_rate) if row.vat_rate is not None else 20.0,
                 'vat_amount': float(row.vat_amount or row.vat or 0),
                 'total': float(row.total_amount or 0),
                 'status': row.status, 'notes': row.notes,
@@ -1104,7 +1104,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                         """),
                         {
                             'iid': invoice_id, 'name': item.get('item', ''), 'desc': item.get('description', ''),
-                            'color': item.get('color', item.get('colour', '')), 'qty': qty, 'amt': amt,
+                            'color': item.get('color', item.get('colour', '')), 'qty': qty, 'amt': unit_price,
                             'up': unit_price, 'w': item.get('width'),
                             'h': item.get('height'), 'd': item.get('depth'),
                             'dp': item.get('discount_percent', 0), 'da': item.get('discounted_total', unit_price * qty),
@@ -1228,7 +1228,7 @@ def download_proforma_pdf(invoice_id):
 
         pdf.set_auto_page_break(auto=True, margin=40)
         pdf.ln(3)
-        vat_rate=float(row.vat_rate or 20)
+        vat_rate = float(row.vat_rate) if row.vat_rate is not None else 20.0
         vat_amount=float(row.vat_amount or row.vat or subtotal*(vat_rate/100))
         total=float(row.total_amount or subtotal+vat_amount); tx=105
 
