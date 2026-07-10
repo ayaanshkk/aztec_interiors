@@ -1803,6 +1803,7 @@ def auto_price_lookup(tenant_id, employee_id):
         data = request.get_json()
         description = data.get('description', '').strip().upper()
         door_type = data.get('door_type', '').strip()
+        filler_door_type = data.get('filler_door_type', '').strip() or door_type  # fallback to door_type
         room_type = data.get('room_type', 'Kitchen').strip()
         brand = data.get('brand', '').strip()
         current_items = data.get('current_items', [])
@@ -1839,6 +1840,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 'AG':  'Acrylic Gloss/Matt',
                 'LS':  'Acrylic Gloss/Matt',
                 'T':   'Timber',
+                'V':   'Vinyl Doors',
                 'VD':  'Vinyl Doors',
                 'BG':  'Black Glass',
                 'BST': 'Basic Slab',
@@ -2258,7 +2260,7 @@ def auto_price_lookup(tenant_id, employee_id):
                     'vinyl doors': 'Vinyl Doors',
                     'black glass': 'Vinyl Doors',
                 }
-                target_door_type = DOOR_TYPE_MAP.get(door_type.lower() if door_type else '', 'Basic Slab')
+                target_door_type = DOOR_TYPE_MAP.get(filler_door_type.lower() if filler_door_type else '', 'Basic Slab')
             
             price_row = next((r for r in results if r.door_type == target_door_type), None)
             
