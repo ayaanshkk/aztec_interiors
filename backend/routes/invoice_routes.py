@@ -669,20 +669,27 @@ def download_invoice_pdf(invoice_id):
         subtotal_after_section_discounts = 0.0
 
         def draw_row(name, desc, color, qty, amount, indent=False):
-            row_h = 8
-            x0, y0 = pdf.get_x(), pdf.get_y()
             clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
             display_name = (' - ' + clean_name) if indent else clean_name
+            clean_desc = (desc or '').strip()
+            for suffix in [' - Standard', '- Standard', ' - Carcass Only', '- Carcass Only']:
+                if clean_desc.endswith(suffix):
+                    clean_desc = clean_desc[:-len(suffix)].strip()
+            clean_desc = clean_desc.encode('latin-1', errors='ignore').decode('latin-1')
+            pdf.set_font('Arial', '', 9)
+            line_h = 5
+            desc_width = widths[1] - 2
+            chars_per_line = int(desc_width / 2.1)
+            num_lines = max(1, -(-len(clean_desc) // chars_per_line))
+            row_h = max(8, num_lines * line_h + 2)
+            x0, y0 = pdf.get_x(), pdf.get_y()
             pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
             pdf.cell(widths[1], row_h, '', 1, 0, 'L')
             pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
             pdf.cell(widths[3], row_h, str(int(qty or 1)), 1, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
-            clean_desc = (desc or '').encode('latin-1', errors='ignore').decode('latin-1')
-            pdf.cell(widths[1] - 2, row_h - 2,
-                    (clean_desc[:100] if len(clean_desc) > 100 else clean_desc), 0, 0, 'L')
+            pdf.multi_cell(desc_width, line_h, clean_desc, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
-            # ✅ Always return raw amount × qty
             return float(amount or 0) * int(qty or 1)
 
         def draw_section_header(section_name):

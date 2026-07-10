@@ -2685,17 +2685,31 @@ def download_quotation_pdf(quotation_id):
         subtotal_after_section_discounts = 0.0
 
         def draw_row(name, desc, color, qty, amount, discount_pct=0, discounted_amt=None, indent=False):
-            row_h = 8
+            clean_desc = (desc or '').strip()
+            for suffix in [' - Standard', ' - Carcass Only', '- Standard', '- Carcass Only']:
+                if clean_desc.endswith(suffix):
+                    clean_desc = clean_desc[:-len(suffix)].strip()
+            clean_desc = clean_desc.encode('latin-1', errors='ignore').decode('latin-1')
+            clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
+            display_name = ('   - ' + clean_name) if indent else clean_name
+            line_h = 5
+            # Calculate how many lines the description needs
+            pdf.set_font('Arial', '', 9)
+            desc_width = widths[1] - 2
+            # Estimate lines needed
+            chars_per_line = int(desc_width / 2.1)
+            num_lines = max(1, -(-len(clean_desc) // chars_per_line))  # ceiling division
+            row_h = max(8, num_lines * line_h + 2)
             x0, y0 = pdf.get_x(), pdf.get_y()
-            display_name = ('   - ' + name) if indent else name
+            # Draw border cells at fixed height
             pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
             pdf.cell(widths[1], row_h, '', 1, 0, 'L')
             pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
             pdf.cell(widths[3], row_h, str(int(qty or 1)), 1, 1, 'C')
+            # Write description with multi_cell inside the description box
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
-            pdf.cell(widths[1] - 2, row_h - 2, (desc[:100] if len(desc) > 100 else desc), 0, 0, 'L')
+            pdf.multi_cell(desc_width, line_h, clean_desc, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
-            # Use saved discounted_amount if available, else raw
             raw = float(amount or 0) * int(qty or 1)
             if discounted_amt is not None and float(discounted_amt) > 0:
                 return float(discounted_amt)
