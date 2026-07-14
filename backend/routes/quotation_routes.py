@@ -252,10 +252,10 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
-             carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts)
+             carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts, filler_type)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
-                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts, :filler_type)
             RETURNING quotation_id
         """)
         
@@ -281,6 +281,8 @@ def create_quotation(tenant_id, employee_id):
             'door_style': data.get('door_style', ''),
             'room_name': data.get('room_name', ''),
             'section_discounts': json.dumps(data.get('section_discounts', {})),
+            'filler_type': data.get('filler_type') or data.get('filler_door_type', 'Basic Slab'),
+
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -1430,7 +1432,8 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'section_discounts': (json.loads(quote.section_discounts) if isinstance(quote.section_discounts, str) else quote.section_discounts) if getattr(quote, 'section_discounts', None) else {},
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
                 'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
-                'items': items_result
+                'items': items_result,
+                'filler_type': getattr(quote, 'filler_type', None) or 'Basic Slab',
             }
             
             return jsonify(result), 200
@@ -1473,6 +1476,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'room_type' in data:
                 update_fields.append("room_type = :room_type")
                 params['room_type'] = data['room_type']
+            if 'filler_type' in data or 'filler_door_type' in data:
+                update_fields.append("filler_type = :filler_type")
+                params['filler_type'] = data.get('filler_type') or data.get('filler_door_type', 'Basic Slab')
             if 'carcass_colour' in data:
                 update_fields.append("carcass_colour = :carcass_colour")
                 params['carcass_colour'] = data['carcass_colour']
