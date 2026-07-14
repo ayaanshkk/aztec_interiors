@@ -104,8 +104,7 @@ def download_checklist_pdf():
         full_row('Address:', form_data.get('customer_address', ''))
         postcode = form_data.get('customer_postcode') or form_data.get('postcode', '')
         full_row('Postcode:', postcode)
-        if not is_kitchen:
-            full_row('Room:', form_data.get('room', ''))
+        full_row('Room:', form_data.get('room', '')) 
         two_col('Survey Date:', form_data.get('survey_date', ''),
                 'Installation Date:', form_data.get('installation_date', ''))
         pdf.ln(4)
