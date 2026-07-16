@@ -1896,10 +1896,19 @@ def auto_price_lookup(tenant_id, employee_id):
                 depth, 
                 category,
                 pricelist_id,
-                description as item_description
+                description as item_description,
+                CASE category
+                    WHEN 'Fillers & End Panels' THEN 1
+                    WHEN 'Base Units' THEN 2
+                    WHEN 'Wall Units' THEN 2
+                    WHEN 'Larder Units' THEN 2
+                    WHEN 'Finishing' THEN 3
+                    ELSE 4
+                END as cat_priority
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
                 AND UPPER(TRIM(item_code)) = UPPER(:item_code)
+            ORDER BY cat_priority ASC
         """)
         
         results = db_session.execute(direct_query, {
@@ -1913,10 +1922,17 @@ def auto_price_lookup(tenant_id, employee_id):
                 SELECT 
                     item_code, item_name, door_type, base_price,
                     width, height, depth, category, pricelist_id,
-                    description as item_description
+                    description as item_description,
+                    CASE category
+                        WHEN 'Fillers & End Panels' THEN 1
+                        WHEN 'Base Units' THEN 2
+                        WHEN 'Finishing' THEN 3
+                        ELSE 4
+                    END as cat_priority
                 FROM "StreemLyne_MT"."PriceList_Master"
                 WHERE tenant_id = :tenant_id
                     AND alias_codes ILIKE :pattern
+                ORDER BY cat_priority ASC
             """)
             results = db_session.execute(alias_query, {
                 'tenant_id': str(tenant_id),
