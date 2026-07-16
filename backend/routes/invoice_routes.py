@@ -165,14 +165,14 @@ def create_invoice(tenant_id, employee_id):
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
                  sub_total, vat, description, tax_id,
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
-                 deposit_paid, total_remaining, door_type, room_type, section_discounts, global_discount_percent)
+                 deposit_paid, total_remaining, door_type, room_type, section_discounts, global_discount_percent, filler_type)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
                  :subtotal, :vat_amount, :notes, :tax_id,
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
-                 :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts, :global_discount_percent)
+                 :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts, :global_discount_percent, :filler_type)
                 RETURNING invoice_id
             """),
             {
@@ -203,6 +203,7 @@ def create_invoice(tenant_id, employee_id):
                 'total_remaining':  float(data.get('total_remaining', 0)),
                 'door_type':        data.get('door_type', 'Carcass Only'),
                 'room_type':        data.get('room_type', 'Kitchen'),
+                'filler_type':      data.get('filler_type') or data.get('filler_door_type', 'Basic Slab'),
                 'section_discounts':       json.dumps(data.get('section_discounts', {})),
                 'global_discount_percent': float(data.get('global_discount_percent', 0)),
             }
@@ -348,6 +349,8 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'door_style':       row.door_style       or '',
                 'door_type':        row.door_type        or 'Carcass Only',
                 'room_type':        row.room_type        or 'Kitchen',
+                'filler_type':      getattr(row, 'filler_type', None) or 'Basic Slab',
+                'filler_door_type': getattr(row, 'filler_type', None) or 'Basic Slab',
                 'deposit_paid':     float(row.deposit_paid or 0),
                 'total_remaining':  max(0, round(computed_total - float(row.deposit_paid or 0), 2)),
                 'section_discounts': (_json.loads(row.section_discounts) if isinstance(row.section_discounts, str) else row.section_discounts) if getattr(row, 'section_discounts', None) else {},
@@ -385,13 +388,14 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         'customer_email', 'status', 'notes', 'invoice_date', 'due_date',
                         'room_name', 'carcass_colour', 'door_colour', 'panelwork_colour',
                         'door_style', 'deposit_paid', 'total_remaining',
-                        'door_type', 'room_type']:
+                        'door_type', 'room_type', 'filler_type']:
                 if field in data:
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
 
-            if 'section_discounts' in data:
-                import json as _json2
+            if 'filler_door_type' in data and 'filler_type' not in data:
+                update_fields.append("filler_type = :filler_type")
+                params['filler_type'] = data['filler_door_type']
                 update_fields.append("section_discounts = :section_discounts")
                 sd = data['section_discounts']
                 params['section_discounts'] = _json2.dumps(sd) if isinstance(sd, dict) else sd
@@ -940,14 +944,14 @@ def create_proforma(tenant_id, employee_id):
                  subtotal, vat_rate, vat_amount, total_amount, created_by_employee_id,
                  sub_total, vat, description, tax_id,
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
-                 deposit_paid, total_remaining)
+                 deposit_paid, total_remaining, door_type, room_type, filler_type)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
                  :subtotal, :vat_rate, :vat_amount, :total_amount, :created_by,
                  :subtotal, :vat_amount, :notes, :tax_id,
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
-                 :deposit_paid, :total_remaining)
+                 :deposit_paid, :total_remaining, :door_type, :room_type, :filler_type)
                 RETURNING invoice_id
             """),
             {
@@ -976,6 +980,9 @@ def create_proforma(tenant_id, employee_id):
                 'door_style':       data.get('door_style', ''),
                 'deposit_paid':     float(data.get('deposit_paid', 0)),
                 'total_remaining':  float(data.get('total_remaining', 0)),
+                'door_type':        data.get('door_type', 'Carcass Only'),
+                'room_type':        data.get('room_type', 'Kitchen'),
+                'filler_type':      data.get('filler_type') or data.get('filler_door_type', 'Basic Slab'),
             }
         )
 
@@ -1052,6 +1059,10 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 'vat_amount': float(row.vat_amount or row.vat or 0),
                 'total': float(row.total_amount or 0),
                 'status': row.status, 'notes': row.notes,
+                'filler_type':      getattr(row, 'filler_type', None) or 'Basic Slab',
+                'filler_door_type': getattr(row, 'filler_type', None) or 'Basic Slab',
+                'door_type':        getattr(row, 'door_type', None) or 'Carcass Only',
+                'room_type':        getattr(row, 'room_type', None) or 'Kitchen',
                 'created_at': row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -1082,7 +1093,10 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
             params = {'id': invoice_id, 't': str(tenant_id)}
 
             for field in ['customer_name', 'customer_address', 'customer_phone',
-                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date']:
+                          'customer_email', 'status', 'notes', 'invoice_date', 'due_date',
+                          'door_type', 'room_type', 'filler_type',
+                          'room_name', 'carcass_colour', 'door_colour', 'panelwork_colour', 'door_style',
+                          'deposit_paid', 'total_remaining']:
                 if field in data:
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
@@ -1090,6 +1104,10 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
             if 'vat_rate' in data:
                 update_fields.append("vat_rate = :vat_rate")
                 params['vat_rate'] = data['vat_rate']
+
+            if 'filler_door_type' in data and 'filler_type' not in data:
+                update_fields.append("filler_type = :filler_type")
+                params['filler_type'] = data['filler_door_type']
 
             if 'items' in data:
                 session.execute(
