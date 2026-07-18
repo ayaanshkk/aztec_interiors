@@ -15,11 +15,18 @@ invoice_bp = Blueprint("invoice", __name__)
 # ============================================================================
 
 def generate_invoice_number(session, tenant_id):
-    count = session.execute(
-        text('SELECT COUNT(*) as c FROM "StreemLyne_MT"."Invoice_Master" WHERE tenant_id = :t'),
-        {'t': str(tenant_id)}
-    ).fetchone().c
-    return f"INV-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+    today_str = datetime.utcnow().strftime('%Y%m%d')
+    result = session.execute(
+        text("""
+            SELECT COALESCE(MAX(
+                CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^INV-\\d{8}-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
+            ), 0) as max_seq
+            FROM "StreemLyne_MT"."Invoice_Master"
+            WHERE tenant_id = :t AND invoice_number LIKE :pattern
+        """),
+        {'t': str(tenant_id), 'pattern': f'INV-{today_str}-%'}
+    ).fetchone()
+    return f"INV-{today_str}-{result.max_seq + 1:03d}"
 
 
 def calculate_invoice_total(session, invoice_id):
@@ -919,11 +926,18 @@ def create_proforma(tenant_id, employee_id):
         if not client:
             return jsonify({'error': 'Client not found'}), 404
 
-        count = session.execute(
-            text("SELECT COUNT(*) as c FROM \"StreemLyne_MT\".\"Invoice_Master\" WHERE tenant_id = :t AND status LIKE 'Proforma%'"),
-            {'t': str(tenant_id)}
-        ).fetchone().c
-        invoice_number = data.get('invoice_number') or f"PRO-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+        today_str = datetime.utcnow().strftime('%Y%m%d')
+        pro_seq = session.execute(
+            text("""
+                SELECT COALESCE(MAX(
+                    CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^PRO-\\d{8}-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
+                ), 0) as max_seq
+                FROM "StreemLyne_MT"."Invoice_Master"
+                WHERE tenant_id = :t AND invoice_number LIKE :pattern
+            """),
+            {'t': str(tenant_id), 'pattern': f'PRO-{today_str}-%'}
+        ).fetchone()
+        invoice_number = data.get('invoice_number') or f"PRO-{today_str}-{pro_seq.max_seq + 1:03d}"
 
         items_data   = data.get('items', [])
         subtotal     = float(data.get('subtotal', 0))

@@ -233,12 +233,20 @@ def create_quotation(tenant_id, employee_id):
             return jsonify({'error': 'Client not found'}), 404
         
         # Generate reference number
-        count_query = text("""
-            SELECT COUNT(*) as count FROM "StreemLyne_MT"."Quotations"
+        today_str = datetime.utcnow().strftime('%Y%m%d')
+        seq_query = text("""
+            SELECT COALESCE(MAX(
+                CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-\\d{8}-(\\d+)$', '\\1'), reference_number) AS INTEGER)
+            ), 0) as max_seq
+            FROM "StreemLyne_MT"."Quotations"
             WHERE tenant_id = :tenant_id
+              AND reference_number LIKE :pattern
         """)
-        count = session.execute(count_query, {'tenant_id': str(tenant_id)}).fetchone().count
-        ref_num = f"Q-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+        max_seq = session.execute(seq_query, {
+            'tenant_id': str(tenant_id),
+            'pattern': f'Q-{today_str}-%'
+        }).fetchone().max_seq
+        ref_num = f"Q-{today_str}-{max_seq + 1:03d}"
         
         # Calculate total from items
         items_data = data.get('items', [])
