@@ -125,7 +125,7 @@ def create_pricelist_item(tenant_id, employee_id):
         if not data.get('item_code'):
             return jsonify({'error': 'item_code is required'}), 400
         if not data.get('door_type'):
-            return jsonify({'error': 'door_type is required'}), 400
+            data['door_type'] = 'Standard'
 
         # ✅ For Appliances: upsert by item_name + brand + door_type
         # This prevents duplicate rows when editing empty levels
@@ -181,8 +181,8 @@ def create_pricelist_item(tenant_id, employee_id):
             'item_code': data['item_code'],
             'item_name': data.get('item_name', ''),
             'description': data.get('description', ''),
-            'base_price': data.get('base_price'),
-            'door_type': data['door_type'],
+            'base_price': data.get('base_price') or data.get('price_each'),
+            'door_type': data.get('door_type', 'Standard'),
             'width': data.get('width'),
             'height': data.get('height'),
             'depth': data.get('depth'),
