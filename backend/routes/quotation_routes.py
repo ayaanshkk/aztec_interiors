@@ -2612,6 +2612,7 @@ def download_quotation_pdf(quotation_id):
                     q.door_style,
                     q.panelwork_colour,
                     q.section_discounts,
+                    q.room_name,
                     c.client_company_name,
                     c.address        AS client_address,
                     c.client_phone   AS client_phone_num
@@ -2678,16 +2679,23 @@ def download_quotation_pdf(quotation_id):
         cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or 'N/A'
         date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
 
-        for label, value in [
+
+        room_name_val = getattr(quotation, 'room_name', None) or ''
+        header_rows = [
             ('DATE:',             date_str),
             ('NAME:',             cust_name),
             ('ADDRESS:',          cust_address),
             ('TEL:',              cust_phone),
+        ]
+        if room_name_val:
+            header_rows.append(('ROOM NAME:', room_name_val))
+        header_rows += [
             ('CARCASS COLOUR:',   getattr(quotation, 'carcass_colour', None) or 'N/A'),
             ('DOOR COLOUR:',      getattr(quotation, 'door_colour', None) or 'N/A'),
             ('PANELWORK COLOUR:', getattr(quotation, 'panelwork_colour', None) or 'N/A'),
             ('DOOR STYLE:',       getattr(quotation, 'door_style', None) or 'N/A'),
-        ]:
+        ]
+        for label, value in header_rows:
             pdf.set_font('Arial', 'B', 9)
             pdf.set_fill_color(*FILL)
             pdf.cell(45, lh, label, 1, 0, 'L', 1)
@@ -2766,9 +2774,11 @@ def download_quotation_pdf(quotation_id):
                 continue
 
             header_h = 7 + 8
-            if pdf.get_y() + header_h + ROW_H > pdf.h - 35:
+            # Estimate space needed: header + at least 3 rows (or all items if fewer)
+            min_rows_to_keep_together = min(len(section_items), 3)
+            space_needed = header_h + (ROW_H * min_rows_to_keep_together)
+            if pdf.get_y() + space_needed > pdf.h - 35:
                 pdf.add_page()
-
             draw_section_header(section)
 
             section_raw = 0.0
