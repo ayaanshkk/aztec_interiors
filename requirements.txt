@@ -51,3 +51,4 @@ annotated-types==0.7.0
 cachelib==0.13.0
 PyYAML==6.0.2
 six==1.17.0
+pandas
