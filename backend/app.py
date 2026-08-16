@@ -55,6 +55,7 @@ def create_app():
         r"http://127\.0\.0\.1:3000",
         r"https://streemlyne\.vercel\.app",
         r"https://streemlyne\.techmynt\.com",
+        r"https://aztec\.techmynt\.com",
         r"https://[a-zA-Z0-9-]+\.vercel\.app",
     ]
 
