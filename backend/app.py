@@ -33,23 +33,6 @@ def create_app():
         import traceback
         traceback.print_exc()
 
-    # ============================================
-    # CORS
-    # ============================================
-    #
-    # Keep CORS configuration in ONE place.
-    #
-    # Explicitly allowed production/local origins:
-    # - localhost development
-    # - Vercel production deployment
-    # - custom StreemLyne domain
-    #
-    # The regex also allows Vercel preview deployments:
-    # https://anything.vercel.app
-    #
-    # Credentials are enabled because the frontend may
-    # send authentication credentials/cookies.
-    #
     allowed_origins = [
         r"http://localhost:3000",
         r"http://127\.0\.0\.1:3000",
