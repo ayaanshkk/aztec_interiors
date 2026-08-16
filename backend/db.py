@@ -7,33 +7,45 @@ from sqlalchemy.exc import SQLAlchemyError
 
 load_dotenv()
 
-# Load DATABASE_URL from environment variable
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Fallback to local SQLite database if DATABASE_URL not set
 if not DATABASE_URL:
     DATABASE_URL = "sqlite:///./local.db"
     print("⚠️ Using local SQLite database (DATABASE_URL not found in environment).")
 else:
-    print("✅ Using hosted PostgreSQL database.")
+    # ✅ Force transaction mode (port 6543) — prevents session mode connection exhaustion
+    DATABASE_URL = DATABASE_URL.replace(
+        "pooler.supabase.com:5432",
+        "pooler.supabase.com:6543"
+    )
+    print("✅ Using hosted PostgreSQL database (transaction mode, port 6543).")
 
-# Create SQLAlchemy engine
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    future=True
-)
+# ✅ Detect SQLite to skip PostgreSQL-specific pool args
+is_sqlite = DATABASE_URL.startswith("sqlite")
 
-# Create a configured "Session" class
+engine_kwargs = {
+    "pool_pre_ping": True,   # Test connection health before use
+    "future": True,
+}
+
+if not is_sqlite:
+    engine_kwargs.update({
+        "pool_size": 5,        # Max persistent connections in pool
+        "max_overflow": 10,    # Extra connections allowed under burst load
+        "pool_timeout": 30,    # Wait up to 30s for a free connection
+        "pool_recycle": 300,   # Recycle connections every 5 minutes
+    })
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
+
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
     bind=engine,
     future=True,
-    expire_on_commit=False  # ✅ ADD THIS LINE - Prevents attributes from expiring after commit
+    expire_on_commit=False,
 )
 
-# Base class for declarative models
 Base = declarative_base()
 
 
@@ -55,11 +67,10 @@ def test_connection():
         print("❌ Database connection failed:", e)
 
 
-# 👇 Legacy compatibility function for routes still using get_db_connection()
 def get_db_connection():
     """
     Legacy wrapper for backward compatibility with old code expecting
-    a raw connection (like SQLite). Now returns an SQLAlchemy connection.
+    a raw connection. Now returns an SQLAlchemy connection.
     """
     try:
         conn = engine.connect()
@@ -68,14 +79,14 @@ def get_db_connection():
         print(f"❌ Error creating database connection: {e}")
         raise
 
+
 def init_db():
     """Initialize database tables - only creates if they don't exist"""
     from backend.models import (
-        User, Customer, Project, Job, Assignment, 
+        User, Customer, Project, Job, Assignment,
         CustomerFormData, DrawingDocument, FormDocument,
         MaterialOrder, ProductionNotification, Quotation, QuotationItem, Fitter
     )
-    
-    # ✅ CRITICAL: checkfirst=True ensures existing data is NOT dropped
+
     Base.metadata.create_all(bind=engine, checkfirst=True)
     print("✅ Database tables initialized")
