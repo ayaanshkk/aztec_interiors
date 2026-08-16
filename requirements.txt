@@ -52,3 +52,4 @@ cachelib==0.13.0
 PyYAML==6.0.2
 six==1.17.0
 pandas
+numpy
