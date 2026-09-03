@@ -581,14 +581,14 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
                     door_type
                 FROM "StreemLyne_MT"."PriceList_Master"
                 WHERE tenant_id = :tenant_id
-                    AND item_code = :item_code
+                    AND UPPER(TRIM(item_code)) = UPPER(TRIM(:item_code))
                     AND door_type = :door_type
                 LIMIT 1
             """)
             
             result = session.execute(query, {
                 'tenant_id': str(tenant_id),
-                'item_code': item_code.strip().upper(),
+                'item_code': item_code.strip(),
                 'door_type': door_type
             }).fetchone()
         else:
@@ -605,7 +605,7 @@ def find_price_by_code_and_door(session, tenant_id, item_code, door_type=None):
                     door_type
                 FROM "StreemLyne_MT"."PriceList_Master"
                 WHERE tenant_id = :tenant_id
-                    AND item_code = :item_code
+                    AND UPPER(TRIM(item_code)) = UPPER(TRIM(:item_code))
                     AND (door_type IS NULL OR door_type = 'Base Cabinet Only')
                 LIMIT 1
             """)
@@ -1141,8 +1141,7 @@ def find_price_for_item(session, tenant_id, item_type, category, search_term):
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
               AND category = :category
-              AND UPPER(TRIM(item_code)) = UPPER(TRIM(:search_term))
-              AND (door_type = 'Standard' OR door_type IS NULL)
+							AND UPPER(TRIM(item_code)) = UPPER(TRIM(:search_term))
             LIMIT 1
         """)
 
@@ -1222,7 +1221,7 @@ def search_pricelist(tenant_id, employee_id):
                     category
                 FROM "StreemLyne_MT"."PriceList_Master"
                 WHERE tenant_id = :tenant_id
-                    AND item_code = :item_code
+                    AND UPPER(TRIM(item_code)) = UPPER(TRIM(:item_code))
                     AND door_type = :door_type
             """)
             
@@ -1247,7 +1246,7 @@ def search_pricelist(tenant_id, employee_id):
                     category
                 FROM "StreemLyne_MT"."PriceList_Master"
                 WHERE tenant_id = :tenant_id
-                    AND item_code = :item_code
+                    AND UPPER(TRIM(item_code)) = UPPER(TRIM(:item_code))
                 ORDER BY 
                     CASE door_type
                         WHEN 'Base Cabinet Only' THEN 1
@@ -1915,7 +1914,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 END as cat_priority
             FROM "StreemLyne_MT"."PriceList_Master"
             WHERE tenant_id = :tenant_id
-                AND UPPER(TRIM(item_code)) = UPPER(:item_code)
+                AND UPPER(REPLACE(TRIM(item_code), 'x', 'X')) = UPPER(REPLACE(TRIM(:item_code), 'x', 'X'))
             ORDER BY cat_priority ASC
         """)
         
@@ -1963,6 +1962,51 @@ def auto_price_lookup(tenant_id, employee_id):
         item_name = first_result.item_name
         
         print(f"✅ Found {len(results)} rows for '{item_code}' in category '{category}'")
+
+        if re.match(r'^\d', search_code):
+            print(f"   📐 Dimension code detected: {search_code}")
+
+            # Try Standard door_type first (worktops/panels)
+            price_row = next((r for r in results if r.door_type == 'Standard'), None)
+
+            # Then try the selected door type
+            if not price_row and door_type:
+                DOOR_TYPE_MAP_DIM = {
+                    'basic slab': 'Basic Slab',
+                    'slab': 'Basic Slab',
+                    'lacquered slab': 'Acrylic Gloss/Matt',
+                    'acrylic gloss/matt': 'Acrylic Gloss/Matt',
+                    'timber': 'Timber',
+                    'vinyl': 'Vinyl Doors',
+                    'vinyl doors': 'Vinyl Doors',
+                    'black glass': 'Black Glass',
+                }
+                mapped = DOOR_TYPE_MAP_DIM.get(door_type.lower(), door_type)
+                price_row = next((r for r in results if r.door_type == mapped), None)
+
+            # Finally take any result
+            if not price_row:
+                price_row = results[0] if results else None
+
+            if not price_row or not price_row.base_price:
+                return jsonify({'found': False, 'error': f'No price found for {search_code}'}), 404
+
+            price = float(price_row.base_price)
+            print(f"   💰 Dimension item {price_row.door_type}: £{price:.2f}")
+
+            return jsonify({
+                'found': True,
+                'price': price,
+                'item_code': item_code,
+                'item_name': item_name,
+                'description': price_row.item_description or item_name,
+                'door_type': price_row.door_type,
+                'category': category,
+                'width': first_result.width,
+                'height': first_result.height,
+                'depth': first_result.depth,
+                'pricelist_id': price_row.pricelist_id
+            }), 200
 
         # ========================================================================
         # DRAWER FRONTS - Component-only pricing, no carcass required
