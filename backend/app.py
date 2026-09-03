@@ -1,6 +1,6 @@
 # backend/app.py - CORRECTED for StreemLyne_MT schema
 
-from flask import Flask, request, jsonify
+from flask import Flask, app, request, jsonify
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
@@ -46,7 +46,12 @@ def create_app():
         app,
         resources={
             r"/*": {
-                "origins": allowed_origins,
+                "origins": [
+                    "http://localhost:3000",
+                    "http://127.0.0.1:3000",
+                    "https://streemlyne.techmynt.com",
+                    "https://aztec.techmynt.com",
+                ],
                 "methods": [
                     "GET",
                     "POST",
@@ -173,6 +178,22 @@ def create_app():
         payment_terms_bp,
         url_prefix="/api/form"
     )
+
+    @app.after_request
+    def add_cors_headers(response):
+        origin = request.headers.get('Origin', '')
+        allowed = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://streemlyne.techmynt.com",
+            "https://aztec.techmynt.com",
+        ]
+        if origin in allowed:
+            response.headers['Access-Control-Allow-Origin'] = origin
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Tenant-ID, X-Requested-With'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+        return response
 
     # ============================================
     # HEALTH CHECK
