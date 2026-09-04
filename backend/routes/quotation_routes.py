@@ -1957,13 +1957,15 @@ def auto_price_lookup(tenant_id, employee_id):
         
         # Get first result to determine category
         first_result = results[0]
+        print(f"   🔍 first_result: code={first_result.item_code}, category={first_result.category}, door_type={first_result.door_type}")
+        print(f"   🔍 All rows: {[(r.door_type, r.category, float(r.base_price) if r.base_price else None) for r in results]}")
         category = first_result.category
         item_code = first_result.item_code
         item_name = first_result.item_name
         
         print(f"✅ Found {len(results)} rows for '{item_code}' in category '{category}'")
 
-        if re.match(r'^\d', search_code):
+        if re.match(r'^\d+[Xx]\d+', search_code):
             print(f"   📐 Dimension code detected: {search_code}")
 
             # Try Standard door_type first (worktops/panels)
@@ -2416,50 +2418,74 @@ def auto_price_lookup(tenant_id, employee_id):
             if door_total_mode:
                 # Carcass + door combined total
                 carcass_row = next((r for r in results if r.door_type == 'Carcass Only'), None)
-                carcass_price = float(carcass_row.base_price) if carcass_row and carcass_row.base_price else 0.0
-                final_price = carcass_price + door_price
-                
-                print(f"   💰 TOTAL MODE: Carcass £{carcass_price:.2f} + {component_door_type} £{door_price:.2f} = £{final_price:.2f}")
-                
+
+                if not carcass_row or not carcass_row.base_price:
+                    return jsonify({'found': False, 'error': f'No carcass price found for {item_code}'}), 404
+
+                carcass_price = float(carcass_row.base_price)
+
+                # No door type selected OR explicitly Carcass Only → return carcass only
+                valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Timber', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
+                if not db_door_type or db_door_type == 'Carcass Only' or db_door_type not in valid_door_types:
+                    print(f"   🏗️ MODE: Carcass ONLY for {item_code} — £{carcass_price:.2f}")
+
+                    return jsonify({
+                        'found': True,
+                        'price': carcass_price,
+                        'item_code': item_code,
+                        'item_name': item_name,
+                        'description': f"{item_name} - Carcass Only",
+                        'door_type': 'Carcass Only',
+                        'category': category,
+                        'width': first_result.width,
+                        'height': first_result.height,
+                        'depth': first_result.depth,
+                        'pricelist_id': carcass_row.pricelist_id,
+                        'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
+                    }), 200
+
+                # Door type IS selected → Carcass + Door component total
+                print(f"   🏗️ MODE: Carcass + Door — {item_code} + {db_door_type}")
+
+                door_row = next((r for r in results if r.door_type == db_door_type), None)
+
+                if not door_row or not door_row.base_price:
+                    # Door component not found — return carcass only with a warning
+                    print(f"   ⚠️ No door component for {item_code} + {db_door_type}, falling back to carcass only")
+                    return jsonify({
+                        'found': True,
+                        'price': carcass_price,
+                        'item_code': item_code,
+                        'item_name': item_name,
+                        'description': f"{item_name} - Carcass Only (no {display_door_type(db_door_type)} price found)",
+                        'door_type': 'Carcass Only',
+                        'category': category,
+                        'width': first_result.width,
+                        'height': first_result.height,
+                        'depth': first_result.depth,
+                        'pricelist_id': carcass_row.pricelist_id,
+                        'warning': f'No door component price found for {db_door_type}',
+                        'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
+                    }), 200
+
+                door_component_price = float(door_row.base_price)
+                final_price = carcass_price + door_component_price
+
+                print(f"   💰 Carcass £{carcass_price:.2f} + {display_door_type(db_door_type)} £{door_component_price:.2f} = £{final_price:.2f}")
+
                 return jsonify({
                     'found': True,
                     'price': final_price,
                     'item_code': item_code,
                     'item_name': item_name,
-                    'description': f"{item_name} - {display_door_type(component_door_type)} (Total)",
-                    'door_type': component_door_type,
+                    'description': f"{item_name} - {display_door_type(db_door_type)}",
+                    'door_type': db_door_type,
                     'category': category,
                     'width': first_result.width,
                     'height': first_result.height,
                     'depth': first_result.depth,
                     'pricelist_id': door_row.pricelist_id,
-                    'component_only': False,
-                    'breakdown': {
-                        'carcass': carcass_price,
-                        'door_component': door_price
-                    }
-                }), 200
-            else:
-                # Door component only
-                print(f"   💰 {component_door_type} Door ONLY: £{door_price:.2f}")
-                
-                return jsonify({
-                    'found': True,
-                    'price': door_price,
-                    'item_code': item_code,
-                    'item_name': item_name,
-                    'description': f"{display_door_type(component_door_type)} Door for {item_name}",
-                    'door_type': component_door_type,
-                    'category': category,
-                    'width': first_result.width,
-                    'height': first_result.height,
-                    'depth': first_result.depth,
-                    'pricelist_id': door_row.pricelist_id,
-                    'component_only': True,
-                    'breakdown': {
-                        'carcass': 0.0,
-                        'door_component': door_price
-                    }
+                    'breakdown': {'carcass': carcass_price, 'door_component': door_component_price}
                 }), 200
         
         # ========================================================================
@@ -2468,18 +2494,16 @@ def auto_price_lookup(tenant_id, employee_id):
         
         # Get carcass price
         carcass_row = next((r for r in results if r.door_type == 'Carcass Only'), None)
-        
+
         if not carcass_row or not carcass_row.base_price:
             return jsonify({'found': False, 'error': f'No carcass price found for {item_code}'}), 404
-        
+
         carcass_price = float(carcass_row.base_price)
-        
-        # CASE 1: No door type specified OR "Carcass Only" selected
+
         valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Timber', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
+
         if not db_door_type or db_door_type == 'Carcass Only' or db_door_type not in valid_door_types:
-            print(f"   🏗️ MODE: Carcass ONLY for {item_code}")
-            print(f"   💰 Price: £{carcass_price:.2f}")
-            
+            print(f"   🏗️ STANDARD MODE: Carcass ONLY — £{carcass_price:.2f}")
             return jsonify({
                 'found': True,
                 'price': carcass_price,
@@ -2492,45 +2516,34 @@ def auto_price_lookup(tenant_id, employee_id):
                 'height': first_result.height,
                 'depth': first_result.depth,
                 'pricelist_id': carcass_row.pricelist_id,
-                'breakdown': {
-                    'carcass': carcass_price,
-                    'door_component': 0.0
-                }
+                'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
             }), 200
-        
-        # CASE 2: Door type specified → Return carcass + door
-        print(f"   🏗️ MODE: Auto-total - {item_code} + {db_door_type}")
-        
+
+        # Door type selected — return carcass + door component total
         door_row = next((r for r in results if r.door_type == db_door_type), None)
-        
+
         if not door_row or not door_row.base_price:
-            print(f"   ⚠️ No door price found for {item_code} + {db_door_type}, returning carcass only")
-            
+            print(f"   ⚠️ No door component for {db_door_type}, returning carcass only")
             return jsonify({
                 'found': True,
                 'price': carcass_price,
                 'item_code': item_code,
                 'item_name': item_name,
-                'description': f"{item_name} - {display_door_type(db_door_type)} (door price not found)",
-                'door_type': db_door_type,
-                'door_type': db_door_type,
+                'description': f"{item_name} - Carcass Only (no {display_door_type(db_door_type)} price found)",
+                'door_type': 'Carcass Only',
                 'category': category,
                 'width': first_result.width,
                 'height': first_result.height,
                 'depth': first_result.depth,
                 'pricelist_id': carcass_row.pricelist_id,
-                'warning': f'No door component price found for {db_door_type}',
-                'breakdown': {
-                    'carcass': carcass_price,
-                    'door_component': 0.0
-                }
+                'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
             }), 200
-        
+
         door_component_price = float(door_row.base_price)
         final_price = carcass_price + door_component_price
-        
-        print(f"   💰 Complete: Carcass £{carcass_price:.2f} + Door £{door_component_price:.2f} = £{final_price:.2f}")
-        
+
+        print(f"   💰 STANDARD MODE: Carcass £{carcass_price:.2f} + {display_door_type(db_door_type)} £{door_component_price:.2f} = £{final_price:.2f}")
+
         return jsonify({
             'found': True,
             'price': final_price,
@@ -2543,10 +2556,7 @@ def auto_price_lookup(tenant_id, employee_id):
             'height': first_result.height,
             'depth': first_result.depth,
             'pricelist_id': door_row.pricelist_id,
-            'breakdown': {
-                'carcass': carcass_price,
-                'door_component': door_component_price
-            }
+            'breakdown': {'carcass': carcass_price, 'door_component': door_component_price}
         }), 200
         
     except Exception as e:
