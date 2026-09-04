@@ -1,6 +1,6 @@
 # backend/app.py - CORRECTED for StreemLyne_MT schema
 
-from flask import Flask, app, request, jsonify
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 from dotenv import load_dotenv
@@ -32,15 +32,6 @@ def create_app():
         print(f"Database connection failed: {e}")
         import traceback
         traceback.print_exc()
-
-    allowed_origins = [
-        r"http://localhost:3000",
-        r"http://127\.0\.0\.1:3000",
-        r"https://streemlyne\.vercel\.app",
-        r"https://streemlyne\.techmynt\.com",
-        r"https://aztec\.techmynt\.com",
-        r"https://[a-zA-Z0-9-]+\.vercel\.app",
-    ]
 
     CORS(
         app,
@@ -75,6 +66,28 @@ def create_app():
             }
         },
     )
+
+    # ============================================
+    # CORS PREFLIGHT HANDLER
+    # ============================================
+    @app.before_request
+    def handle_options():
+        if request.method == 'OPTIONS':
+            response = app.make_default_options_response()
+            origin = request.headers.get('Origin', '')
+            allowed_origins = [
+                'https://streemlyne.techmynt.com',
+                'https://aztec.techmynt.com',
+                'http://localhost:3000',
+                'http://127.0.0.1:3000',
+            ]
+            if origin in allowed_origins:
+                response.headers['Access-Control-Allow-Origin'] = origin
+                response.headers['Access-Control-Allow-Credentials'] = 'true'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, PATCH, DELETE, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Tenant-ID, X-Requested-With'
+                response.headers['Access-Control-Max-Age'] = '3600'
+            return response
 
     # ============================================
     # BLUEPRINTS - Direct imports
