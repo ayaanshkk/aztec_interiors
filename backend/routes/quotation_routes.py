@@ -2001,7 +2001,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 'price': price,
                 'item_code': item_code,
                 'item_name': item_name,
-                'description': price_row.item_description or item_name,
+                'description': (price_row.item_description or item_name or '').replace('Acrylic Gloss/Matt', 'Lacquered Slab').replace('Basic Slab', 'Slab'),
                 'door_type': price_row.door_type,
                 'category': category,
                 'width': first_result.width,
