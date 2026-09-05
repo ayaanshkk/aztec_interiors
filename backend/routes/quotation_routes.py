@@ -1833,7 +1833,7 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         # Check for suffix like "50B-BS", "PL-AG", "CF-BS", etc.
-        suffix_pattern = r'^([A-Z0-9]+)-(BS|S|AG|LS|T|VD|BG|BST|ST|AGT|LST|TT|VDT|BGT|C)$'
+        suffix_pattern = r'^([A-Z0-9]+?)-(BST|AGT|LST|VDT|BGT|TT|ST|BS|AG|LS|VD|BG|T|S|C)$'
         suffix_match = re.match(suffix_pattern, description, re.IGNORECASE)
         print(f"   🔬 DEBUG: description='{description}', suffix_match={bool(suffix_match)}, groups={suffix_match.groups() if suffix_match else None}")
 
@@ -1883,6 +1883,7 @@ def auto_price_lookup(tenant_id, employee_id):
                 door_component_only = True
             
             print(f"🎯 SUFFIX DETECTED: '{description}' → Base: '{base_code}', Component: '{component_door_type}'")
+            print(f"   🔬 SUFFIX PARSE: base='{base_code}', suffix='{suffix}', component='{component_door_type}', total_mode={door_total_mode}, component_only={door_component_only}")
         
         # ========================================================================
         # CATEGORY-SPECIFIC HANDLING
@@ -2405,15 +2406,6 @@ def auto_price_lookup(tenant_id, employee_id):
         # ========================================================================
         
         if (door_component_only or door_total_mode) and component_door_type:
-            door_row = next((r for r in results if r.door_type == component_door_type), None)
-            
-            if not door_row or not door_row.base_price:
-                return jsonify({
-                    'found': False,
-                    'error': f'No {component_door_type} door component found for {item_code}'
-                }), 404
-            
-            door_price = float(door_row.base_price)
 
             if door_total_mode:
                 # Carcass + door combined total
@@ -2424,7 +2416,7 @@ def auto_price_lookup(tenant_id, employee_id):
 
                 carcass_price = float(carcass_row.base_price)
 
-                # ✅ FIXED: use component_door_type from suffix, NOT db_door_type from dropdown
+                # ✅ use component_door_type from suffix, NOT db_door_type from dropdown
                 target_door_type = component_door_type
 
                 door_row = next((r for r in results if r.door_type == target_door_type), None)
@@ -2465,6 +2457,34 @@ def auto_price_lookup(tenant_id, employee_id):
                     'depth': first_result.depth,
                     'pricelist_id': door_row.pricelist_id,
                     'breakdown': {'carcass': carcass_price, 'door_component': door_component_price}
+                }), 200
+
+            else:
+                # door_component_only — return door component price ONLY
+                door_row = next((r for r in results if r.door_type == component_door_type), None)
+
+                if not door_row or not door_row.base_price:
+                    return jsonify({
+                        'found': False,
+                        'error': f'No {component_door_type} door component found for {item_code}'
+                    }), 404
+
+                door_price = float(door_row.base_price)
+                print(f"   💰 Door component ONLY {component_door_type}: £{door_price:.2f}")
+
+                return jsonify({
+                    'found': True,
+                    'price': door_price,
+                    'item_code': item_code,
+                    'item_name': item_name,
+                    'description': f"{item_name} - {display_door_type(component_door_type)}",
+                    'door_type': component_door_type,
+                    'category': category,
+                    'width': first_result.width,
+                    'height': first_result.height,
+                    'depth': first_result.depth,
+                    'pricelist_id': door_row.pricelist_id,
+                    'breakdown': {'carcass': 0.0, 'door_component': door_price}
                 }), 200
         
         # ========================================================================
