@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.gzip.compress=true"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.routers.http-0-sa9lg2zvpxiz3beaphkvmht8.entryPoints=http"
+      - "traefik.http.routers.http-0-sa9lg2zvpxiz3beaphkvmht8.middlewares=redirect-to-https"
+      - "traefik.http.routers.http-0-sa9lg2zvpxiz3beaphkvmht8.rule=Host(`api.aztec.techmynt.com`) && PathPrefix(`/`)"
+      - "traefik.http.routers.http-0-sa9lg2zvpxiz3beaphkvmht8.service=http-0-sa9lg2zvpxiz3beaphkvmht8"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.entryPoints=https"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.rule=Host(`api.aztec.techmynt.com`) && PathPrefix(`/`)"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.tls=true"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.service=https-0-sa9lg2zvpxiz3beaphkvmht8"
+      - "traefik.http.services.http-0-sa9lg2zvpxiz3beaphkvmht8.loadbalancer.server.port=5000"
+      - "traefik.http.services.https-0-sa9lg2zvpxiz3beaphkvmht8.loadbalancer.server.port=5000"
+      # CORS middleware
+      - "traefik.http.middlewares.cors-aztec.headers.accessControlAllowOriginList=https://streemlyne.techmynt.com,https://aztec.techmynt.com,http://localhost:3000"
+      - "traefik.http.middlewares.cors-aztec.headers.accessControlAllowMethods=GET,POST,PUT,PATCH,DELETE,OPTIONS"
+      - "traefik.http.middlewares.cors-aztec.headers.accessControlAllowHeaders=Content-Type,Authorization,X-Tenant-ID,X-Requested-With"
+      - "traefik.http.middlewares.cors-aztec.headers.accessControlAllowCredentials=true"
+      - "traefik.http.middlewares.cors-aztec.headers.accessControlMaxAge=3600"
+      - "traefik.http.routers.https-0-sa9lg2zvpxiz3beaphkvmht8.middlewares=gzip,cors-aztec"
