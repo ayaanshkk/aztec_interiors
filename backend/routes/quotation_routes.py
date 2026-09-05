@@ -2424,62 +2424,41 @@ def auto_price_lookup(tenant_id, employee_id):
 
                 carcass_price = float(carcass_row.base_price)
 
-                # No door type selected OR explicitly Carcass Only → return carcass only
-                valid_door_types = {'Basic Slab', 'Acrylic Gloss/Matt', 'Timber', 'Vinyl Doors', 'Black Glass', 'Base Cabinet Only'}
-                if not db_door_type or db_door_type == 'Carcass Only' or db_door_type not in valid_door_types:
-                    print(f"   🏗️ MODE: Carcass ONLY for {item_code} — £{carcass_price:.2f}")
+                # ✅ FIXED: use component_door_type from suffix, NOT db_door_type from dropdown
+                target_door_type = component_door_type
 
-                    return jsonify({
-                        'found': True,
-                        'price': carcass_price,
-                        'item_code': item_code,
-                        'item_name': item_name,
-                        'description': f"{item_name} - Carcass Only",
-                        'door_type': 'Carcass Only',
-                        'category': category,
-                        'width': first_result.width,
-                        'height': first_result.height,
-                        'depth': first_result.depth,
-                        'pricelist_id': carcass_row.pricelist_id,
-                        'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
-                    }), 200
-
-                # Door type IS selected → Carcass + Door component total
-                print(f"   🏗️ MODE: Carcass + Door — {item_code} + {db_door_type}")
-
-                door_row = next((r for r in results if r.door_type == db_door_type), None)
+                door_row = next((r for r in results if r.door_type == target_door_type), None)
 
                 if not door_row or not door_row.base_price:
-                    # Door component not found — return carcass only with a warning
-                    print(f"   ⚠️ No door component for {item_code} + {db_door_type}, falling back to carcass only")
+                    print(f"   ⚠️ No door component for {item_code} + {target_door_type}, falling back to carcass only")
                     return jsonify({
                         'found': True,
                         'price': carcass_price,
                         'item_code': item_code,
                         'item_name': item_name,
-                        'description': f"{item_name} - Carcass Only (no {display_door_type(db_door_type)} price found)",
+                        'description': f"{item_name} - Carcass Only (no {display_door_type(target_door_type)} price found)",
                         'door_type': 'Carcass Only',
                         'category': category,
                         'width': first_result.width,
                         'height': first_result.height,
                         'depth': first_result.depth,
                         'pricelist_id': carcass_row.pricelist_id,
-                        'warning': f'No door component price found for {db_door_type}',
+                        'warning': f'No door component price found for {target_door_type}',
                         'breakdown': {'carcass': carcass_price, 'door_component': 0.0}
                     }), 200
 
                 door_component_price = float(door_row.base_price)
                 final_price = carcass_price + door_component_price
 
-                print(f"   💰 Carcass £{carcass_price:.2f} + {display_door_type(db_door_type)} £{door_component_price:.2f} = £{final_price:.2f}")
+                print(f"   💰 Carcass £{carcass_price:.2f} + {display_door_type(target_door_type)} £{door_component_price:.2f} = £{final_price:.2f}")
 
                 return jsonify({
                     'found': True,
                     'price': final_price,
                     'item_code': item_code,
                     'item_name': item_name,
-                    'description': f"{item_name} - {display_door_type(db_door_type)}",
-                    'door_type': db_door_type,
+                    'description': f"{item_name} - {display_door_type(target_door_type)}",
+                    'door_type': target_door_type,
                     'category': category,
                     'width': first_result.width,
                     'height': first_result.height,
