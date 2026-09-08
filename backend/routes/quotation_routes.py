@@ -2749,12 +2749,25 @@ def download_quotation_pdf(quotation_id):
             ('DOOR STYLE:',       getattr(quotation, 'door_style', None) or 'N/A'),
         ]
         for label, value in header_rows:
+            value = (value or '').encode('latin-1', errors='ignore').decode('latin-1')
+            # Calculate lines needed for value
+            pdf.set_font('Arial', '', 9)
+            chars_per_line = int(143 / 2.1)
+            num_lines = max(1, -(-len(value) // chars_per_line))
+            row_h = max(lh, num_lines * lh)
+
+            x0, y0 = pdf.get_x(), pdf.get_y()
             pdf.set_font('Arial', 'B', 9)
             pdf.set_fill_color(*FILL)
-            pdf.cell(45, lh, label, 1, 0, 'L', 1)
+            pdf.cell(45, row_h, label, 1, 0, 'L', 1)
             pdf.set_font('Arial', '', 9)
-            pdf.cell(145, lh, value, 1, 1, 'L')
-
+            # Draw border cell at full height
+            pdf.cell(145, row_h, '', 1, 1, 'L')
+            # Write value with multi_cell inside the value box
+            pdf.set_xy(x0 + 46, y0 + 1)
+            pdf.multi_cell(143, lh, value, 0, 'L')
+            pdf.set_xy(x0, y0 + row_h)
+            
         pdf.ln(5)
 
         # ── Items table ───────────────────────────────────────────────────

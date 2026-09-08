@@ -656,11 +656,21 @@ def download_invoice_pdf(invoice_id):
                 customer_fields.append((label, v))
 
         for label, value in customer_fields:
+            value_clean = (value or '').encode('latin-1', errors='ignore').decode('latin-1')
+            pdf.set_font('Arial', '', 9)
+            chars_per_line = int(143 / 2.1)
+            num_lines = max(1, -(-len(value_clean) // chars_per_line))
+            row_h = max(lh, num_lines * lh)
+
+            x0, y0 = pdf.get_x(), pdf.get_y()
             pdf.set_font('Arial', 'B', 9)
             pdf.set_fill_color(*FILL)
-            pdf.cell(45, lh, label, 1, 0, 'L', 1)
+            pdf.cell(45, row_h, label, 1, 0, 'L', 1)
+            pdf.cell(145, row_h, '', 1, 1, 'L')
             pdf.set_font('Arial', '', 9)
-            pdf.cell(145, lh, value, 1, 1, 'L')
+            pdf.set_xy(x0 + 46, y0 + 1)
+            pdf.multi_cell(143, lh, value_clean, 0, 'L')
+            pdf.set_xy(x0, y0 + row_h)
 
         pdf.ln(5)
 
@@ -780,15 +790,20 @@ def download_invoice_pdf(invoice_id):
         if pdf.get_y() > pdf.h - 100:
             pdf.add_page()
         pdf.ln(3)
-        vat_rate   = float(row.vat_rate) if row.vat_rate is not None else 20.0
-        vat_amount = round(subtotal_after_section_discounts * (vat_rate / 100), 2)
-        total      = round(subtotal_after_section_discounts + vat_amount, 2)
+        vat_rate = float(row.vat_rate) if row.vat_rate is not None else 20.0
+        global_discount_pct = float(getattr(row, 'global_discount_percent', 0) or 0)
+        global_discount_amt = round(subtotal_after_section_discounts * (global_discount_pct / 100), 2)
+        subtotal_after_global_discount = round(subtotal_after_section_discounts - global_discount_amt, 2)
+        vat_amount = round(subtotal_after_global_discount * (vat_rate / 100), 2)
+        total      = round(subtotal_after_global_discount + vat_amount, 2)
         deposit    = float(row.deposit_paid or 0)
         remaining  = max(0, round(total - deposit, 2))
         tx         = 105
 
-        totals_rows = [('SUB TOTAL:', f'£{subtotal_after_section_discounts:.2f}'),
-                       (f'VAT ({vat_rate:.0f}%):', f'£{vat_amount:.2f}')]
+        totals_rows = [('SUB TOTAL:', f'£{subtotal_after_section_discounts:.2f}')]
+        if global_discount_pct > 0:
+            totals_rows.append((f'DISCOUNT ({global_discount_pct:.2f}%):', f'-£{global_discount_amt:.2f}'))
+        totals_rows.append((f'VAT ({vat_rate:.0f}%):', f'£{vat_amount:.2f}'))
 
         for label, value in totals_rows:
             pdf.set_x(tx)
@@ -1236,10 +1251,23 @@ def download_proforma_pdf(invoice_id):
         cust_address = row.customer_address or row.client_address      or 'N/A'
         cust_phone   = row.customer_phone   or row.client_phone        or 'N/A'
 
-        for label, value in [('NAME:',cust_name),('ADDRESS:',cust_address),('TEL:',cust_phone)]:
-            pdf.set_font('Arial','B',10); pdf.set_fill_color(*FILL)
-            pdf.cell(35,lh,label,1,0,'L',1); pdf.set_font('Arial','',10)
-            pdf.cell(155,lh,value,1,1,'L',0)
+        for label, value in [('NAME:', cust_name), ('ADDRESS:', cust_address), ('TEL:', cust_phone)]:
+            value_clean = (value or '').encode('latin-1', errors='ignore').decode('latin-1')
+            pdf.set_font('Arial', '', 10)
+            chars_per_line = int(153 / 2.1)
+            num_lines = max(1, -(-len(value_clean) // chars_per_line))
+            row_h = max(lh, num_lines * lh)
+
+            x0, y0 = pdf.get_x(), pdf.get_y()
+            pdf.set_font('Arial', 'B', 10)
+            pdf.set_fill_color(*FILL)
+            pdf.cell(35, row_h, label, 1, 0, 'L', 1)
+            pdf.cell(155, row_h, '', 1, 1, 'L')
+            pdf.set_font('Arial', '', 10)
+            pdf.set_xy(x0 + 36, y0 + 1)
+            pdf.multi_cell(153, lh, value_clean, 0, 'L')
+            pdf.set_xy(x0, y0 + row_h)
+
         pdf.ln(5)
 
         headers=['ITEM','DESCRIPTION','COLOUR','QTY','UNIT PRICE','AMOUNT']
