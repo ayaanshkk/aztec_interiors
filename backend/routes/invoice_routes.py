@@ -103,7 +103,10 @@ def get_invoices(tenant_id, employee_id):
             )
 
             vat_pct = float(r.vat_rate) if getattr(r, 'vat_rate', None) is not None else 20.0
-            computed_total = round(subtotal_after_section_discounts * (1 + vat_pct / 100), 2)
+            global_disc = float(r.global_discount_percent) if getattr(r, 'global_discount_percent', None) is not None else 0.0
+            global_disc_amt = round(subtotal_after_section_discounts * (global_disc / 100), 2)
+            after_global_disc = subtotal_after_section_discounts - global_disc_amt
+            computed_total = round(after_global_disc * (1 + vat_pct / 100), 2)
 
             result_list.append({
                 'id':             r.invoice_id,
