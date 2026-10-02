@@ -87,100 +87,107 @@ def download_receipt_pdf():
         if not data:
             return jsonify({'error': 'Missing receipt data'}), 400
 
-        FILL   = (230, 230, 230)
-        DARK   = (50, 50, 50)
-        RED    = (200, 50, 50)
-        lh     = 6
-
         pdf = PDF('P', 'mm', 'A4')
         receipt_type = data.get('receiptType', 'receipt').lower()
         if receipt_type == 'deposit':
-            pdf.doc_title = 'DEPOSIT RECEIPT'
+            pdf.doc_title = 'Deposit Receipt'
         elif receipt_type == 'final':
-            pdf.doc_title = 'FINAL RECEIPT'
+            pdf.doc_title = 'Final Receipt'
         else:
-            pdf.doc_title = 'RECEIPT'
+            pdf.doc_title = 'Receipt'
 
         pdf.alias_nb_pages()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=25)
 
-        cust_name    = data.get('customerName',    'N/A')
-        cust_address = data.get('customerAddress', 'N/A')
-        cust_phone   = data.get('customerPhone',   'N/A')
-        receipt_date = data.get('receiptDate',     datetime.now().strftime('%d/%m/%Y'))
-        pay_method   = data.get('paymentMethod',   'BACS')
-        pay_desc     = data.get('paymentDescription', 'your Kitchen/Bedroom Cabinetry')
-        paid         = float(data.get('paidAmount',      0) or 0)
-        paid_to_date = float(data.get('totalPaidToDate', 0) or 0)
-        balance      = float(data.get('balanceToPay',    0) or 0)
+        cust_name      = data.get('customerName',    'N/A')
+        cust_address   = data.get('customerAddress', '')
+        cust_phone     = data.get('customerPhone',   '')
+        receipt_date   = data.get('receiptDate',     datetime.now().strftime('%d/%m/%Y'))
+        receipt_number = data.get('receiptNumber',   '')
+        pay_method     = data.get('paymentMethod',   'BACS')
+        pay_desc       = data.get('paymentDescription', 'your Kitchen/Bedroom Cabinetry')
+        paid           = float(data.get('paidAmount',      0) or 0)
+        paid_to_date   = float(data.get('totalPaidToDate', 0) or 0)
+        balance        = float(data.get('balanceToPay',    0) or 0)
 
-        # ── Customer + Date table ──────────────────────────────────────
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Customer Details', 'T', 1, 'L', 1)
+        # ── Customer section (2-column) ────────────────────────────────
+        left_rows  = [cust_name]
+        if cust_address:
+            left_rows.append(cust_address)
+        if cust_phone:
+            left_rows.append(cust_phone)
 
-        for label, value in [
-            ('Name:',    cust_name),
-            ('Address:', cust_address),
-            ('Phone:',   cust_phone),
-        ]:
-            pdf.set_font('Arial', 'B', 10)
-            pdf.set_fill_color(*FILL)
-            pdf.cell(35, lh, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(155, lh, value, 1, 1, 'L', 0)
+        right_rows = [('Date', receipt_date)]
+        if receipt_number:
+            right_rows.insert(0, ('Receipt No', receipt_number))
+        right_rows.append(('Method', pay_method))
 
-        # Date row
-        pdf.set_font('Arial', 'B', 10)
-        pdf.set_fill_color(*FILL)
-        pdf.cell(35, lh, 'Date:', 1, 0, 'L', 1)
-        pdf.set_font('Arial', '', 10)
-        pdf.cell(155, lh, receipt_date, 1, 1, 'L', 0)
-
-        pdf.ln(6)
+        pdf.draw_two_col_customer('Received From', left_rows, 'Receipt Details', right_rows)
 
         # ── Confirmation sentence ──────────────────────────────────────
         pdf.set_font('Arial', '', 10)
-        pdf.set_x(10)
-        pdf.cell(0, 6,
-            f"Confirmation of payment received by {pay_method} for {pay_desc}.",
-            0, 1, 'L')
-        pdf.ln(5)
-
-        # ── Paid amount (prominent dark box) ──────────────────────────
-        pdf.set_fill_color(*DARK)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font('Arial', 'B', 14)
-        pdf.cell(95, 12, 'AMOUNT PAID', 1, 0, 'L', 1)
-        pdf.set_font('Arial', 'B', 16)
-        pdf.cell(95, 12, f"£{paid:,.2f}", 1, 1, 'R', 1)
+        pdf.set_text_color(50, 50, 50)
+        pdf.cell(0, 6, f"Confirmation of payment received by {pay_method} for {pay_desc}.", 0, 1, 'L')
         pdf.set_text_color(0, 0, 0)
-        pdf.ln(4)
+        pdf.ln(8)
+
+        # ── Amount paid (prominent) ────────────────────────────────────
+        lw = 95
+        # Label + value row with thick rule
+        pdf.set_draw_color(0, 0, 0)
+        pdf.set_line_width(0.5)
+        pdf.line(10, pdf.get_y(), 10 + lw * 2, pdf.get_y())
+        pdf.set_line_width(0.2)
+        pdf.ln(3)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(lw, 10, 'AMOUNT PAID', 0, 0, 'L')
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(lw, 10, f'\xa3{paid:,.2f}', 0, 1, 'R')
+
+        # thin rule
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_line_width(0.2)
+        pdf.line(10, pdf.get_y(), 10 + lw * 2, pdf.get_y())
+        pdf.ln(2)
 
         # ── Paid to date ───────────────────────────────────────────────
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 11)
-        pdf.cell(95, 9, 'Total Paid to Date:', 'T', 0, 'L', 1)
-        pdf.set_font('Arial', 'B', 11)
-        pdf.cell(95, 9, f"£{paid_to_date:,.2f}", 'T', 1, 'R', 1)
-
-        # ── Balance to pay (red) ───────────────────────────────────────
-        pdf.set_text_color(*RED)
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell(95, 10, 'Balance to Pay:', 'T', 0, 'L')
-        pdf.cell(95, 10, f"£{balance:,.2f}", 'T', 1, 'R')
+        pdf.set_font('Arial', '', 10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(lw, 7, 'Total Paid to Date', 0, 0, 'L')
+        pdf.set_font('Arial', 'B', 10)
         pdf.set_text_color(0, 0, 0)
+        pdf.cell(lw, 7, f'\xa3{paid_to_date:,.2f}', 0, 1, 'R')
 
-        pdf.ln(10)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(10, pdf.get_y(), 10 + lw * 2, pdf.get_y())
+        pdf.ln(2)
 
-        # ── Signature ──────────────────────────────────────────────────
-        pdf.set_font('Arial', '', 11)
-        pdf.set_x(10)
+        # ── Balance to pay ─────────────────────────────────────────────
+        pdf.set_font('Arial', '', 10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(lw, 7, 'Balance to Pay', 0, 0, 'L')
+        pdf.set_font('Arial', 'B', 10)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(lw, 7, f'\xa3{balance:,.2f}', 0, 1, 'R')
+
+        # thick rule below
+        pdf.set_draw_color(0, 0, 0)
+        pdf.set_line_width(0.5)
+        pdf.line(10, pdf.get_y(), 10 + lw * 2, pdf.get_y())
+        pdf.set_line_width(0.2)
+        pdf.set_draw_color(200, 200, 200)
+
+        pdf.ln(12)
+
+        # ── Sign-off ────────────────────────────────────────────────────
+        pdf.set_font('Arial', '', 10)
+        pdf.set_text_color(60, 60, 60)
         pdf.cell(0, 6, 'Many Thanks,', 0, 1, 'L')
-        pdf.ln(3)
-        pdf.set_font('Arial', 'BI', 13)
-        pdf.set_x(10)
+        pdf.ln(2)
+        pdf.set_font('Arial', 'BI', 12)
+        pdf.set_text_color(0, 0, 0)
         pdf.cell(0, 6, 'Tanvir Shaikh', 0, 1, 'L')
 
         pdf_output = pdf.output(dest='S')

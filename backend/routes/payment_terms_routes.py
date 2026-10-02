@@ -16,11 +16,17 @@ payment_terms_bp = Blueprint("payment_terms", __name__)
 # ============================================================================
 
 def generate_pt_number(session, tenant_id):
-    count = session.execute(
-        text('SELECT COUNT(*) as c FROM "StreemLyne_MT"."Payment_Terms_Master" WHERE tenant_id = :t'),
+    result = session.execute(
+        text("""
+            SELECT COALESCE(MAX(
+                CAST(NULLIF(REGEXP_REPLACE(pt_number, '^PT-(\\d+)$', '\\1'), pt_number) AS INTEGER)
+            ), 0) as max_seq
+            FROM "StreemLyne_MT"."Payment_Terms_Master"
+            WHERE tenant_id = :t
+        """),
         {'t': str(tenant_id)}
-    ).fetchone().c
-    return f"PT-{datetime.utcnow().strftime('%Y%m%d')}-{count + 1:03d}"
+    ).fetchone()
+    return f"PT-{result.max_seq + 1}"
 
 
 # ============================================================================
@@ -193,8 +199,8 @@ def handle_payment_terms(pt_id, tenant_id, employee_id):
             update_fields = []
             params = {'id': pt_id, 't': str(tenant_id)}
 
-            for field in ['customer_name', 'customer_address', 'customer_phone', 'date', 'notes', 'status']:
-                if field in data:
+            for field in ['customer_name', 'customer_address', 'customer_phone', 'date', 'notes', 'status', 'pt_number']:
+                if field in data and data[field] is not None and data[field] != '':
                     update_fields.append(f"{field} = :{field}")
                     params[field] = data[field]
 
@@ -269,151 +275,101 @@ def download_payment_terms_pdf(pt_id):
         if isinstance(rows_data, str):
             rows_data = json.loads(rows_data)
 
-        FILL   = (230, 230, 230)
-        YELLOW = (255, 255, 180)
-        GREEN  = (180, 230, 180)
-        RED    = (220, 50,  50)
-        lh     = 7
-
         pdf = PDF('P', 'mm', 'A4')
-        pdf.doc_title = 'PAYMENT TERMS'
+        pdf.doc_title = 'Payment Terms'
         pdf.alias_nb_pages()
         pdf.add_page()
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=22)
 
-        # ── Coloured info bars ─────────────────────────────────────────────
-        pdf.set_fill_color(*GREEN)
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Bacs details:', 1, 1, 'L', 1)
-        pdf.set_fill_color(*YELLOW)
-        pdf.set_font('Arial', '', 9)
-        pdf.cell(0, 5, 'Please use your name and/or road name as reference:', 1, 1, 'L', 1)
-        pdf.ln(1)
-
-        pdf.set_font('Arial', '', 9)
-        pdf.cell(0, 5, 'Acc name : Atelier Luxe Interiors LTD', 0, 1, 'L')
-        pdf.cell(0, 5, 'Bank : ClearBank', 0, 1, 'L')
-        pdf.cell(0, 5, 'Sort Code: 04 06 05', 0, 1, 'L')
-        pdf.cell(0, 5, 'Acc No: 31621197', 0, 1, 'L')
-        pdf.ln(5)
-
-        # ── Customer info table ────────────────────────────────────────────
+        # ── Customer section (2-column) ────────────────────────────────────
         cust_name    = row.customer_name    or row.client_company_name or 'N/A'
         cust_address = row.customer_address or row.client_address      or 'N/A'
-        cust_phone   = row.customer_phone   or row.client_phone        or 'N/A'
+        cust_phone   = row.customer_phone   or row.client_phone        or ''
+        pt_date      = row.date.strftime('%d/%m/%Y') if row.date else 'N/A'
 
-        for label, value in [('NAME', cust_name), ('ADDRESS', cust_address), ('PHONE NO.', cust_phone)]:
-            pdf.set_font('Arial', 'B', 10)
-            pdf.set_fill_color(*FILL)
-            pdf.cell(35, lh, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(155, lh, value, 1, 1, 'L', 0)
+        left_rows  = [cust_name, cust_address]
+        if cust_phone:
+            left_rows.append(cust_phone)
+        right_rows = [('PT No', row.pt_number or 'N/A'), ('Date', pt_date)]
+        pdf.draw_two_col_customer('Bill To', left_rows, 'Document Details', right_rows)
 
-        pdf.ln(8)
+        # ── BACS note ─────────────────────────────────────────────────────
+        pdf.set_font('Arial', '', 7.5)
+        pdf.set_text_color(100, 100, 100)
+        pdf.cell(0, 4, 'BACS: Atelier Luxe Interiors LTD  \xb7  ClearBank  \xb7  Sort: 04-06-05  \xb7  Acc: 31621197  \xb7  Ref: your name / road', 0, 1, 'L')
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(6)
 
         # ── Payments table ────────────────────────────────────────────────
         col_labels = ['', 'AMOUNT DUE', 'AMOUNT PAID', 'DATE', 'SIGNED']
-        col_widths = [52, 38, 38, 32, 30]  # total = 190
+        col_widths = [52, 38, 38, 32, 30]
 
-        # Header row
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 9)
-        for i, (label, width) in enumerate(zip(col_labels, col_widths)):
-            # "AMOUNT PAID" header in red like the image
-            if label == 'AMOUNT PAID':
-                pdf.set_text_color(*RED)
-            else:
-                pdf.set_text_color(0, 0, 0)
-            pdf.cell(width, 8, label, 1, 0, 'C', 1)
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln()
+        # Header
+        pdf.draw_table_header(col_labels, col_widths)
+        pdf.ln(2)
 
-        # Payment rows
-        pdf.set_font('Arial', '', 9)
+        # Data rows
         default_rows = [
-            {'label': 'Deposit',                     'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
-            {'label': '6 wks Prior to\ncommencement of\nworks', 'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
-            {'label': 'On Completion',               'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
+            {'label': 'Deposit',                                          'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
+            {'label': '6 wks Prior to\ncommencement of works',            'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
+            {'label': 'On Completion',                                    'amount_due': '', 'amount_paid': '', 'date': '', 'signed': ''},
         ]
 
-        # Merge saved data into default rows
         for i, default in enumerate(default_rows):
             if i < len(rows_data):
                 saved = rows_data[i]
-                default['amount_due']  = f"£{float(saved.get('amount_due',  0) or 0):.2f}" if saved.get('amount_due')  else ''
-                default['amount_paid'] = f"£{float(saved.get('amount_paid', 0) or 0):.2f}" if saved.get('amount_paid') else ''
+                default['amount_due']  = f"\xa3{float(saved.get('amount_due',  0) or 0):.2f}" if saved.get('amount_due')  else ''
+                default['amount_paid'] = f"\xa3{float(saved.get('amount_paid', 0) or 0):.2f}" if saved.get('amount_paid') else ''
                 default['date']        = saved.get('date', '')
                 default['signed']      = saved.get('signed', '')
 
         for r in default_rows:
             label_lines = r['label'].split('\n')
             row_h = max(8, len(label_lines) * 6)
-
             x0, y0 = pdf.get_x(), pdf.get_y()
-
-            # Label cell (left column)
-            pdf.cell(col_widths[0], row_h, '', 1, 0, 'L')
-            pdf.cell(col_widths[1], row_h, r['amount_due'],  1, 0, 'C')
-            # Amount paid in red
-            pdf.set_text_color(*RED)
-            pdf.cell(col_widths[2], row_h, r['amount_paid'], 1, 0, 'C')
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(col_widths[3], row_h, r['date'],        1, 0, 'C')
-            pdf.cell(col_widths[4], row_h, r['signed'],      1, 1, 'C')
-
-            # Write label text inside first cell
             pdf.set_font('Arial', '', 9)
+            pdf.set_text_color(30, 30, 30)
+            pdf.cell(col_widths[0], row_h, '', 0, 0, 'L')
+            pdf.cell(col_widths[1], row_h, r['amount_due'],  0, 0, 'C')
+            pdf.set_text_color(160, 0, 0)
+            pdf.cell(col_widths[2], row_h, r['amount_paid'], 0, 0, 'C')
+            pdf.set_text_color(30, 30, 30)
+            pdf.cell(col_widths[3], row_h, r['date'],        0, 0, 'C')
+            pdf.cell(col_widths[4], row_h, r['signed'],      0, 1, 'C')
             for line_idx, line in enumerate(label_lines):
                 pdf.set_xy(x0 + 2, y0 + 1 + line_idx * 6)
                 pdf.cell(col_widths[0] - 4, 6, line, 0, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
+            pdf.set_draw_color(220, 220, 220)
+            pdf.set_line_width(0.2)
+            pdf.line(x0, pdf.get_y(), x0 + sum(col_widths), pdf.get_y())
 
-        # Totals row
+        # Totals row (thick rule then row)
         total_due  = float(row.total_amount_due  or 0)
         total_paid = float(row.total_amount_paid or 0)
 
-        pdf.set_font('Arial', 'B', 10)
-        pdf.set_fill_color(*FILL)
-        pdf.cell(col_widths[0], 8, 'TOTAL', 1, 0, 'L', 1)
-        pdf.cell(col_widths[1], 8, f"£{total_due:.2f}",  1, 0, 'C', 1)
-        pdf.set_text_color(*RED)
-        pdf.cell(col_widths[2], 8, f"£{total_paid:.2f}", 1, 0, 'C', 1)
+        pdf.set_fill_color(23, 23, 23)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font('Arial', 'B', 9)
+        pdf.cell(col_widths[0], 7, 'TOTAL', 0, 0, 'L', fill=True)
+        pdf.cell(col_widths[1], 7, f'\xa3{total_due:.2f}',  0, 0, 'C', fill=True)
+        pdf.cell(col_widths[2], 7, f'\xa3{total_paid:.2f}', 0, 0, 'C', fill=True)
+        pdf.cell(col_widths[3], 7, '', 0, 0, 'C', fill=True)
+        pdf.cell(col_widths[4], 7, '', 0, 1, 'C', fill=True)
+        pdf.set_fill_color(255, 255, 255)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(col_widths[3], 8, '', 1, 0, 'C', 1)
-        pdf.cell(col_widths[4], 8, '', 1, 1, 'C', 1)
 
-        pdf.ln(6)
+        pdf.ln(8)
 
         # ── Footer text ────────────────────────────────────────────────────
-        pdf.set_x(10)
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
-        pdf.ln(3)
-
-        pdf.set_x(10)
-        pdf.set_text_color(*RED)
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'We can not confirm or guarantee a fitting date, only give a week commencing', 0, 1, 'L')
-        pdf.set_x(10)
-        pdf.cell(0, 5, 'date once the deposit has been paid.', 0, 1, 'L')
+        pdf.set_font('Arial', '', 8.5)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 5, 'Only BACS or Cash will be accepted on Delivery and Completion.', 0, 1, 'L')
+        pdf.cell(0, 5, 'We cannot confirm or guarantee a fitting date; only give a week commencing date once the deposit has been paid.', 0, 1, 'L')
         pdf.set_text_color(0, 0, 0)
         pdf.ln(6)
 
-        pdf.set_x(10)
-        pdf.set_text_color(*RED)
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell(0, 6, 'Please sign here to confirm.', 0, 1, 'L')
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(6)
-
-        pdf.set_font('Arial', '', 9)
-        pdf.set_x(10)
-        pdf.cell(45, 6, 'Customer Signature:', 0, 0, 'L')
-        pdf.cell(145, 6, '', 'B', 1, 'L')
-        pdf.ln(4)
-        pdf.set_x(10)
-        pdf.cell(45, 6, 'Date:', 0, 0, 'L')
-        pdf.cell(80, 6, '', 'B', 1, 'L')
+        pdf.draw_signature_lines(['Customer Signature', 'Date'])
 
         out  = pdf.output(dest='S')
         if isinstance(out, str):

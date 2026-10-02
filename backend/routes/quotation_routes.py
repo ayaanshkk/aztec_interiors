@@ -232,21 +232,18 @@ def create_quotation(tenant_id, employee_id):
         if not client:
             return jsonify({'error': 'Client not found'}), 404
         
-        # Generate reference number
-        today_str = datetime.utcnow().strftime('%Y%m%d')
+        # Generate reference number — per-tenant sequential, no date prefix
         seq_query = text("""
             SELECT COALESCE(MAX(
-                CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-\\d{8}-(\\d+)$', '\\1'), reference_number) AS INTEGER)
+                CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-(\\d+)$', '\\1'), reference_number) AS INTEGER)
             ), 0) as max_seq
             FROM "StreemLyne_MT"."Quotations"
             WHERE tenant_id = :tenant_id
-              AND reference_number LIKE :pattern
         """)
         max_seq = session.execute(seq_query, {
             'tenant_id': str(tenant_id),
-            'pattern': f'Q-{today_str}-%'
         }).fetchone().max_seq
-        ref_num = f"Q-{today_str}-{max_seq + 1:03d}"
+        ref_num = data.get('reference_number') or f"Q-{max_seq + 1}"
         
         # Calculate total from items
         items_data = data.get('items', [])
@@ -260,13 +257,17 @@ def create_quotation(tenant_id, employee_id):
             INSERT INTO "StreemLyne_MT"."Quotations"
             (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
-             carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts, filler_type)
+             carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts, filler_type,
+             additional_terms, additional_notes,
+             signature_type, signature_image, signature_text, signature_name, signature_date)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
-                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts, :filler_type)
+                    :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts, :filler_type,
+                    :additional_terms, :additional_notes,
+                    :signature_type, :signature_image, :signature_text, :signature_name, :signature_date)
             RETURNING quotation_id
         """)
-        
+
         result = session.execute(insert_query, {
             'tenant_id': str(tenant_id),
             'client_id': int(data['client_id']),
@@ -290,7 +291,13 @@ def create_quotation(tenant_id, employee_id):
             'room_name': data.get('room_name', ''),
             'section_discounts': json.dumps(data.get('section_discounts', {})),
             'filler_type': data.get('filler_type') or data.get('filler_door_type', 'Basic Slab'),
-
+            'additional_terms': json.dumps(data.get('additional_terms', [])),
+            'additional_notes': data.get('additional_notes', ''),
+            'signature_type': data.get('signature_type', 'none'),
+            'signature_image': data.get('signature_image'),
+            'signature_text': data.get('signature_text'),
+            'signature_name': data.get('signature_name', ''),
+            'signature_date': data.get('signature_date', ''),
         })
         
         quotation_id = result.fetchone().quotation_id
@@ -445,9 +452,18 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         print(f"🚪 Door Type: {door_type}")
         print(f"🏠 Room Type: {room_type}")
         
-        # Generate reference
-        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-        ref_num = f"Q-{timestamp}-{form_submission_id}"
+        # Generate reference — per-tenant sequential
+        checklist_seq = session.execute(
+            text("""
+                SELECT COALESCE(MAX(
+                    CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-(\\d+)$', '\\1'), reference_number) AS INTEGER)
+                ), 0) as max_seq
+                FROM "StreemLyne_MT"."Quotations"
+                WHERE tenant_id = :tenant_id
+            """),
+            {'tenant_id': str(tenant_id)}
+        ).fetchone().max_seq
+        ref_num = f"Q-{checklist_seq + 1}"
         
         # Create quotation
         carcass_colour = (form_data.get('cabinet_color') or '').strip()
@@ -1436,6 +1452,13 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'section_discounts': section_discounts,
                 'status': quote.status,
                 'notes': quote.notes,
+                'additional_terms': json.loads(getattr(quote, 'additional_terms', None) or '[]') if isinstance(getattr(quote, 'additional_terms', None), str) else (getattr(quote, 'additional_terms', None) or []),
+                'additional_notes': getattr(quote, 'additional_notes', None) or '',
+                'signature_type': getattr(quote, 'signature_type', None) or 'none',
+                'signature_image': getattr(quote, 'signature_image', None) or '',
+                'signature_text': getattr(quote, 'signature_text', None) or '',
+                'signature_name': getattr(quote, 'signature_name', None) or '',
+                'signature_date': getattr(quote, 'signature_date', None) or '',
                 'section_discounts': (json.loads(quote.section_discounts) if isinstance(quote.section_discounts, str) else quote.section_discounts) if getattr(quote, 'section_discounts', None) else {},
                 'created_at': quote.created_at.isoformat() if quote.created_at else None,
                 'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
@@ -1477,6 +1500,27 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'notes' in data:
                 update_fields.append("notes = :notes")
                 params['notes'] = data['notes']
+            if 'additional_terms' in data:
+                update_fields.append("additional_terms = :additional_terms")
+                params['additional_terms'] = json.dumps(data['additional_terms'])
+            if 'additional_notes' in data:
+                update_fields.append("additional_notes = :additional_notes")
+                params['additional_notes'] = data['additional_notes']
+            if 'signature_type' in data:
+                update_fields.append("signature_type = :signature_type")
+                params['signature_type'] = data['signature_type']
+            if 'signature_image' in data:
+                update_fields.append("signature_image = :signature_image")
+                params['signature_image'] = data['signature_image']
+            if 'signature_text' in data:
+                update_fields.append("signature_text = :signature_text")
+                params['signature_text'] = data['signature_text']
+            if 'signature_name' in data:
+                update_fields.append("signature_name = :signature_name")
+                params['signature_name'] = data['signature_name']
+            if 'signature_date' in data:
+                update_fields.append("signature_date = :signature_date")
+                params['signature_date'] = data['signature_date']
             if 'door_type' in data:
                 update_fields.append("door_type = :door_type")
                 params['door_type'] = data['door_type']
@@ -1504,6 +1548,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'section_discounts' in data:
                 update_fields.append("section_discounts = :section_discounts")
                 params['section_discounts'] = json.dumps(data.get('section_discounts', {}))
+            if 'reference_number' in data and data['reference_number']:
+                update_fields.append("reference_number = :reference_number")
+                params['reference_number'] = data['reference_number']
             
             # ✅ UPDATE ITEMS
             if 'items' in data:
@@ -2698,83 +2745,45 @@ def download_quotation_pdf(quotation_id):
         # ── PDF setup ─────────────────────────────────────────────────────
         from .pdf_helpers import PDF
 
-        FILL   = (230, 230, 230)
-        YELLOW = (255, 255, 180)
-        GREEN  = (180, 230, 180)
-        lh     = 6
+        SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles',
+                    'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
         pdf = PDF('P', 'mm', 'A4')
-        pdf.doc_title = 'QUOTATION'
+        pdf.doc_title = 'Quotation'
         pdf.alias_nb_pages()
-        pdf.set_auto_page_break(auto=True, margin=20)
+        pdf.set_auto_page_break(auto=True, margin=22)
         pdf.add_page()
 
-        # ── Registration + bank details ───────────────────────────────────
-        pdf.set_fill_color(*GREEN)
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Registered to England No 5246881', 1, 1, 'C', 1)
-        pdf.ln(1)
-
-        pdf.set_fill_color(*YELLOW)
-        pdf.set_font('Arial', '', 9)
-        pdf.cell(0, 5,
-            'Acc name: Atelier Luxe Interiors LTD  |  Bank: ClearBank  |  Sort Code: 04 06 05  |  Acc No: 31621197',
-            1, 1, 'C', 1)
-        pdf.ln(1)
-
-        pdf.set_fill_color(*FILL)
-        pdf.cell(0, 5, 'Please use your name and/or road name as reference', 1, 1, 'C', 1)
-        pdf.ln(4)
-
-        # ── Customer info ─────────────────────────────────────────────────
+        # ── Customer section (2-column) ────────────────────────────────────
         cust_name    = quotation.customer_name    or quotation.client_company_name or 'N/A'
         cust_address = quotation.customer_address or quotation.client_address      or 'N/A'
-        cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or 'N/A'
+        cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or ''
         date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
-
-
         room_name_val = getattr(quotation, 'room_name', None) or ''
-        header_rows = [
-            ('DATE:',             date_str),
-            ('NAME:',             cust_name),
-            ('ADDRESS:',          cust_address),
-            ('TEL:',              cust_phone),
-        ]
-        if room_name_val:
-            header_rows.append(('ROOM NAME:', room_name_val))
-        header_rows += [
-            ('CARCASS COLOUR:',   getattr(quotation, 'carcass_colour', None) or 'N/A'),
-            ('DOOR COLOUR:',      getattr(quotation, 'door_colour', None) or 'N/A'),
-            ('PANELWORK COLOUR:', getattr(quotation, 'panelwork_colour', None) or 'N/A'),
-            ('DOOR STYLE:',       getattr(quotation, 'door_style', None) or 'N/A'),
-        ]
-        for label, value in header_rows:
-            value = (value or '').encode('latin-1', errors='ignore').decode('latin-1')
-            # Calculate lines needed for value
-            pdf.set_font('Arial', '', 9)
-            chars_per_line = int(143 / 2.1)
-            num_lines = max(1, -(-len(value) // chars_per_line))
-            row_h = max(lh, num_lines * lh)
 
-            x0, y0 = pdf.get_x(), pdf.get_y()
-            pdf.set_font('Arial', 'B', 9)
-            pdf.set_fill_color(*FILL)
-            pdf.cell(45, row_h, label, 1, 0, 'L', 1)
-            pdf.set_font('Arial', '', 9)
-            # Draw border cell at full height
-            pdf.cell(145, row_h, '', 1, 1, 'L')
-            # Write value with multi_cell inside the value box
-            pdf.set_xy(x0 + 46, y0 + 1)
-            pdf.multi_cell(143, lh, value, 0, 'L')
-            pdf.set_xy(x0, y0 + row_h)
-            
-        pdf.ln(5)
+        right_rows = [('Quote No', quotation.reference_number or 'N/A'), ('Date', date_str)]
+        if room_name_val:
+            right_rows.append(('Room Name', room_name_val))
+        for attr, label in [
+            ('carcass_colour',   'Carcass Colour'),
+            ('door_colour',      'Door Colour'),
+            ('panelwork_colour', 'Panelwork'),
+            ('door_style',       'Door Style'),
+        ]:
+            v = getattr(quotation, attr, None)
+            if v and v != 'N/A':
+                right_rows.append((label, v))
+
+        left_rows = [cust_name, cust_address]
+        if cust_phone and cust_phone != 'N/A':
+            left_rows.append(cust_phone)
+
+        pdf.draw_two_col_customer('Bill To', left_rows, 'Quotation Details', right_rows)
+        pdf.ln(3)
 
         # ── Items table ───────────────────────────────────────────────────
-        headers = ['ITEM',  'DESCRIPTION', 'COLOUR', 'QTY']
-        widths  = [35,       118,            22,       15]
-
-        SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles', 'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
+        headers = ['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY']
+        widths  = [28, 115, 25, 22]
 
         valid_items = [
             i for i in items
@@ -2787,7 +2796,6 @@ def download_quotation_pdf(quotation_id):
             if pid:
                 sub_map.setdefault(pid, []).append(i)
 
-        pdf.set_font('Arial', '', 9)
         subtotal_after_section_discounts = 0.0
 
         def draw_row(name, desc, color, qty, amount, discount_pct=0, discounted_amt=None, indent=False):
@@ -2797,62 +2805,59 @@ def download_quotation_pdf(quotation_id):
                     clean_desc = clean_desc[:-len(suffix)].strip()
             clean_desc = clean_desc.encode('latin-1', errors='ignore').decode('latin-1')
             clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
-            display_name = ('   - ' + clean_name) if indent else clean_name
+            display_name = ('  \x96 ' + clean_name) if indent else clean_name
             line_h = 5
-            # Calculate how many lines the description needs
-            pdf.set_font('Arial', '', 9)
             desc_width = widths[1] - 2
-            # Estimate lines needed
-            chars_per_line = int(desc_width / 2.1)
-            num_lines = max(1, -(-len(clean_desc) // chars_per_line))  # ceiling division
+            chars_per_line = int(desc_width / 2.05)
+            num_lines = max(1, -(-len(clean_desc) // chars_per_line))
             row_h = max(8, num_lines * line_h + 2)
             x0, y0 = pdf.get_x(), pdf.get_y()
-            # Draw border cells at fixed height
-            pdf.cell(widths[0], row_h, display_name[:22], 1, 0, 'L')
-            pdf.cell(widths[1], row_h, '', 1, 0, 'L')
-            pdf.cell(widths[2], row_h, color or '', 1, 0, 'C')
-            pdf.cell(widths[3], row_h, str(int(qty or 1)), 1, 1, 'C')
-            # Write description with multi_cell inside the description box
+            if indent:
+                pdf.set_text_color(80, 80, 80)
+            pdf.set_font('Arial', '', 9)
+            _name = display_name[:24]
+            while _name and pdf.get_string_width(_name) > widths[0] - 1:
+                _name = _name[:-1]
+            pdf.cell(widths[0], row_h, _name, 0, 0, 'L')
+            pdf.cell(widths[1], row_h, '', 0, 0, 'L')
+            pdf.cell(widths[2], row_h, (color or '')[:16], 0, 0, 'C')
+            pdf.cell(widths[3], row_h, str(int(qty or 1)), 0, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
+            pdf.set_font('Arial', '', 8.5)
             pdf.multi_cell(desc_width, line_h, clean_desc, 0, 'L')
             pdf.set_xy(x0, y0 + row_h)
+            pdf.set_draw_color(220, 220, 220)
+            pdf.set_line_width(0.2)
+            pdf.line(x0, pdf.get_y(), x0 + sum(widths), pdf.get_y())
+            pdf.set_text_color(0, 0, 0)
             raw = float(amount or 0) * int(qty or 1)
             if discounted_amt is not None and float(discounted_amt) > 0:
                 return float(discounted_amt)
             return raw
 
-        def draw_section_header(section_name):
-            pdf.set_font('Arial', 'B', 10)
-            pdf.cell(0, 7, section_name, 0, 1, 'L')
-            pdf.set_fill_color(*FILL)
-            pdf.set_font('Arial', 'B', 9)
-            for h, w in zip(headers, widths):
-                pdf.cell(w, 8, h, 1, 0, 'C', 1)
-            pdf.ln()
-            pdf.set_font('Arial', '', 9)
-
         ROW_H = 8
-        PAGE_BOTTOM = pdf.h - 35
+        PAGE_BOTTOM = pdf.h - 30
 
         for section in SECTIONS:
             section_items = [i for i in top_level if (getattr(i, 'section', None) or 'Furniture') == section]
             if not section_items:
                 continue
 
-            header_h = 7 + 8
-            # Estimate space needed: header + at least 3 rows (or all items if fewer)
-            min_rows_to_keep_together = min(len(section_items), 3)
-            space_needed = header_h + (ROW_H * min_rows_to_keep_together)
-            if pdf.get_y() + space_needed > pdf.h - 35:
+            if pdf.get_y() + 20 + ROW_H > PAGE_BOTTOM:
                 pdf.add_page()
-            draw_section_header(section)
 
-            section_raw = 0.0
-            section_subtotal = 0.0  # after per-item discounts
+            pdf.ln(4)
+            pdf.draw_section_label(section)
+            pdf.ln(2)
+            pdf.draw_table_header(headers, widths)
+
+            section_raw      = 0.0
+            section_subtotal = 0.0
 
             for item in section_items:
                 if pdf.get_y() + ROW_H * 2 > PAGE_BOTTOM:
                     pdf.add_page()
+                    pdf.draw_table_header(headers, widths)
 
                 lt = draw_row(
                     item.item_name or '',
@@ -2863,11 +2868,12 @@ def download_quotation_pdf(quotation_id):
                     discount_pct=float(item.discount_percent or 0),
                     discounted_amt=item.discounted_amount,
                 )
-                section_raw += round(float(item.amount or 0) * int(item.quantity or 1), 2)
+                section_raw      += round(float(item.amount or 0) * int(item.quantity or 1), 2)
                 section_subtotal += round(lt, 2)
                 for sub in sub_map.get(item.item_id, []):
                     if pdf.get_y() + ROW_H > PAGE_BOTTOM:
                         pdf.add_page()
+                        pdf.draw_table_header(headers, widths)
                     slt = draw_row(
                         sub.item_name or '',
                         sub.description or '',
@@ -2878,86 +2884,76 @@ def download_quotation_pdf(quotation_id):
                         discounted_amt=sub.discounted_amount,
                         indent=True,
                     )
-                    section_raw += round(float(sub.amount or 0) * int(sub.quantity or 1), 2)
+                    section_raw      += round(float(sub.amount or 0) * int(sub.quantity or 1), 2)
                     section_subtotal += round(slt, 2)
+
             sec_discount_amt = round(section_raw - section_subtotal, 2)
+            subtotal_after_section_discounts = round(subtotal_after_section_discounts + section_subtotal, 2)
 
-            sec_discount_amt = section_raw - section_subtotal
-            sec_discount_pct = (sec_discount_amt / section_raw * 100) if section_raw > 0 else 0
-            subtotal_after_section_discounts = round(subtotal_after_section_discounts + round(section_subtotal, 2), 2)
+            pdf.ln(2)
+            pdf.draw_section_total_block(section, section_raw, sec_discount_amt, section_subtotal)
 
-            # ── Section totals display ────────────────────────────────────
-            pdf.ln(1)
-            sec_tx = 120
-
-            pdf.set_font('Arial', '', 8)
-            pdf.set_x(sec_tx)
-            pdf.cell(45, 5, f'{section} Subtotal:', 0, 0, 'R')
-            pdf.cell(25, 5, f'£{section_raw:.2f}', 0, 1, 'R')
-
-            if sec_discount_amt > 0.005:
-                pdf.set_font('Arial', '', 8)
-                pdf.set_x(sec_tx)
-                pdf.cell(45, 5, f'Section Discount ({sec_discount_pct:.1f}%):', 0, 0, 'R')
-                pdf.set_text_color(200, 0, 0)
-                pdf.cell(25, 5, f'-£{sec_discount_amt:.2f}', 0, 1, 'R')
-                pdf.set_text_color(0, 0, 0)
-
-            pdf.set_font('Arial', 'B', 8)
-            pdf.set_fill_color(220, 220, 220)
-            pdf.set_x(sec_tx)
-            pdf.cell(45, 5, f'{section} Total:', 1, 0, 'R', 1)
-            pdf.cell(25, 5, f'£{section_subtotal:.2f}', 1, 1, 'R', 1)
-            pdf.ln(4)
-
-        # ── Totals ────────────────────────────────────────────────────────
-        if pdf.get_y() > pdf.h - 100:
+        # ── Grand totals ──────────────────────────────────────────────────
+        if pdf.get_y() > pdf.h - 90:
             pdf.add_page()
         pdf.ln(3)
-        discount_pct    = float(quotation.global_discount_percent) if quotation.global_discount_percent is not None else 0.0
-        discount_amount = subtotal_after_section_discounts * (discount_pct / 100)
-        subtotal_after_discount = subtotal_after_section_discounts - discount_amount
-        vat_pct    = float(quotation.vat_percentage) if quotation.vat_percentage is not None else 20.0
-        vat_amount = subtotal_after_discount * (vat_pct / 100)
-        total      = subtotal_after_discount + vat_amount
-        tx         = 105
 
-        totals_rows = [('SUB TOTAL:', f"£{subtotal_after_section_discounts:.2f}")]
+        discount_pct     = float(quotation.global_discount_percent) if quotation.global_discount_percent is not None else 0.0
+        discount_amount  = subtotal_after_section_discounts * (discount_pct / 100)
+        subtotal_after_disc = subtotal_after_section_discounts - discount_amount
+        vat_pct          = float(quotation.vat_percentage) if quotation.vat_percentage is not None else 20.0
+        vat_amount       = subtotal_after_disc * (vat_pct / 100)
+        total            = subtotal_after_disc + vat_amount
+
+        totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
         if discount_pct > 0:
-            totals_rows.append((f'DISCOUNT ({discount_pct:.0f}%):', f"-£{discount_amount:.2f}"))
-        totals_rows.append((f'VAT ({vat_pct:.0f}%):', f"£{vat_amount:.2f}"))
+            totals_rows.append((f'Discount ({discount_pct:.0f}%)', f'-\xa3{discount_amount:.2f}'))
+        totals_rows.append((f'VAT ({vat_pct:.0f}%)', f'\xa3{vat_amount:.2f}'))
 
-        for label, value in totals_rows:
-            pdf.set_x(tx)
-            pdf.set_font('Arial', '', 10)
-            pdf.cell(50, lh, label, 0, 0, 'R')
-            pdf.set_font('Arial', 'B', 10)
-            pdf.cell(35, lh, value, 0, 1, 'R')
+        pdf.draw_grand_totals(totals_rows, 'Total', f'\xa3{total:.2f}')
 
-        pdf.set_x(tx)
-        pdf.set_fill_color(*FILL)
-        pdf.set_font('Arial', 'B', 12)
-        pdf.cell(50, 8, 'TOTAL:', 'T', 0, 'R', 1)
-        pdf.cell(35, 8, f"£{total:.2f}", 'T', 1, 'R', 1)
-        pdf.ln(8)
+        # ── Notes ─────────────────────────────────────────────────────────
+        if pdf.get_y() + 35 > pdf.h - 20:
+            pdf.add_page()
 
-        # ── Payment terms ─────────────────────────────────────────────────
-        pdf.set_font('Arial', 'B', 9)
-        pdf.cell(0, 5, 'Only Bacs or Cash will be accepted on Delivery and Completion', 0, 1, 'L')
-        pdf.cell(0, 5, 'NOTE: If you wish to proceed with this quote, full payment is required upfront.', 0, 1, 'L')
+        pdf.set_font('Arial', '', 8.5)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 5, 'Only BACS or Cash will be accepted on Delivery and Completion.', 0, 1, 'L')
+        pdf.cell(0, 5, 'If you wish to proceed, full payment is required upfront.', 0, 1, 'L')
+
+        # Additional terms (optional)
+        additional_terms_raw = getattr(quotation, 'additional_terms', None)
+        if additional_terms_raw:
+            try:
+                extra_terms = json.loads(additional_terms_raw) if isinstance(additional_terms_raw, str) else additional_terms_raw
+            except Exception:
+                extra_terms = []
+            extra_terms = [t for t in (extra_terms or []) if t and str(t).strip()]
+            for term in extra_terms:
+                pdf.cell(0, 5, pdf._enc(str(term)), 0, 1, 'L')
+
+        pdf.set_text_color(0, 0, 0)
         pdf.ln(4)
 
-        pdf.set_text_color(200, 0, 0)
-        pdf.cell(0, 5, 'Please sign here to confirm.', 0, 1, 'L')
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(6)
+        # Additional notes (optional)
+        additional_notes = getattr(quotation, 'additional_notes', None) or ''
+        if additional_notes.strip():
+            pdf.set_font('Arial', 'B', 8.5)
+            pdf.set_text_color(80, 80, 80)
+            pdf.cell(0, 5, 'Notes', 0, 1, 'L')
+            pdf.set_font('Arial', '', 8.5)
+            for line in additional_notes.strip().splitlines():
+                pdf.multi_cell(0, 5, pdf._enc(line or ''), 0, 'L')
+            pdf.set_text_color(0, 0, 0)
+            pdf.ln(4)
 
-        # ── Signature section ─────────────────────────────────────────────
-        pdf.set_font('Arial', '', 9)
-        for label in ['Customer Signature:', 'Customer Name:', 'Date:']:
-            pdf.cell(45, 6, label, 0, 0, 'L')
-            pdf.cell(145, 6, '', 'B', 1, 'L')
-            pdf.ln(2)
+        pdf.draw_signature_data(
+            sig_type=getattr(quotation, 'signature_type',  None) or 'none',
+            sig_image=getattr(quotation, 'signature_image', None) or '',
+            sig_text=getattr(quotation, 'signature_text',  None) or '',
+            sig_name=getattr(quotation, 'signature_name',  None) or '',
+            sig_date=getattr(quotation, 'signature_date',  None) or '',
+        )
 
         # ── Return PDF ────────────────────────────────────────────────────
         out  = pdf.output(dest='S')
