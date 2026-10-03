@@ -1334,5 +1334,133 @@ def delete_document(document_id, tenant_id, employee_id):
         session.rollback()
         current_app.logger.error(f"Error deleting document: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ==========================================
+# LETTERHEAD ENDPOINTS
+# ==========================================
+
+@customer_bp.route('/api/letterheads', methods=['POST'])
+@token_required
+@require_tenant
+def save_letterhead(tenant_id, employee_id):
+    """Save or update a letterhead."""
+    session = SessionLocal()
+    try:
+        data       = request.get_json(silent=True) or {}
+        letter_id  = data.get('id')          # present on update
+        client_id  = data.get('client_id')
+        raw_status = data.get('status', 'draft')
+        # Map frontend 'saved' to the DB-allowed value 'submitted'
+        status = 'submitted' if raw_status == 'saved' else 'draft'
+        subject    = data.get('subject', '')
+        payload    = {
+            'date':      data.get('date', ''),
+            'subject':   subject,
+            'body':      data.get('body', ''),
+            'recipient': data.get('recipient', {}),
+        }
+        form_name  = f"Letterhead – {data.get('recipient', {}).get('name', '') or 'Untitled'}"
+
+        if letter_id:
+            session.execute(text("""
+                UPDATE "StreemLyne_MT"."Customer_Form_Submissions"
+                SET form_data = :form_data,
+                    form_name = :form_name,
+                    submission_status = :status
+                WHERE form_submission_id = :id
+                  AND tenant_id = :tid
+            """), {
+                'form_data': json.dumps(payload),
+                'form_name': form_name,
+                'status':    status,
+                'id':        int(letter_id),
+                'tid':       str(tenant_id),
+            })
+            session.commit()
+            return jsonify({'id': int(letter_id), 'status': raw_status}), 200
+        else:
+            row = session.execute(text("""
+                INSERT INTO "StreemLyne_MT"."Customer_Form_Submissions"
+                (tenant_id, client_id, form_type, form_name, form_data,
+                 token_used, submitted_by, submission_status)
+                VALUES (:tid, :client_id, 'letterhead', :form_name, :form_data,
+                        '', :submitted_by, :status)
+                RETURNING form_submission_id
+            """), {
+                'tid':          str(tenant_id),
+                'client_id':    int(client_id) if client_id else None,
+                'form_name':    form_name,
+                'form_data':    json.dumps(payload),
+                'submitted_by': str(employee_id),
+                'status':       status,
+            }).fetchone()
+            session.commit()
+            return jsonify({'id': row.form_submission_id, 'status': raw_status}), 201
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error saving letterhead: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@customer_bp.route('/api/letterheads', methods=['GET'])
+@token_required
+@require_tenant
+def list_letterheads(tenant_id, employee_id):
+    """List all letterheads for this tenant, optionally filtered by client_id."""
+    session = SessionLocal()
+    client_id = request.args.get('client_id')
+    try:
+        params = {'tid': str(tenant_id)}
+        client_filter = ""
+        if client_id:
+            client_filter = " AND fs.client_id = :client_id"
+            params['client_id'] = int(client_id)
+        rows = session.execute(text(f"""
+            SELECT fs.form_submission_id, fs.client_id, fs.form_name,
+                   fs.form_data, fs.submission_status, fs.created_at,
+                   c.client_company_name
+            FROM "StreemLyne_MT"."Customer_Form_Submissions" fs
+            LEFT JOIN "StreemLyne_MT"."Client_Master" c
+                   ON c.client_id = fs.client_id AND c.tenant_id = fs.tenant_id
+            WHERE fs.tenant_id = :tid AND fs.form_type = 'letterhead'{client_filter}
+            ORDER BY fs.created_at DESC
+        """), params).fetchall()
+
+        return jsonify([{
+            'id':          r.form_submission_id,
+            'client_id':   r.client_id,
+            'form_name':   r.form_name,
+            'status':      'saved' if r.submission_status == 'submitted' else 'draft',
+            'created_at':  r.created_at.isoformat() if r.created_at else None,
+            'customer':    r.client_company_name or '',
+            'data':        (r.form_data if isinstance(r.form_data, dict) else json.loads(r.form_data)) if r.form_data else {},
+        } for r in rows]), 200
+    except Exception as e:
+        current_app.logger.exception(f"Error listing letterheads: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@customer_bp.route('/api/letterheads/<int:letter_id>', methods=['DELETE'])
+@token_required
+@require_tenant
+def delete_letterhead(tenant_id, employee_id, letter_id):
+    """Delete a letterhead."""
+    session = SessionLocal()
+    try:
+        session.execute(text("""
+            DELETE FROM "StreemLyne_MT"."Customer_Form_Submissions"
+            WHERE form_submission_id = :id AND tenant_id = :tid AND form_type = 'letterhead'
+        """), {'id': letter_id, 'tid': str(tenant_id)})
+        session.commit()
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error deleting letterhead: {e}")
+        return jsonify({'error': str(e)}), 500
     finally:
         session.close()
