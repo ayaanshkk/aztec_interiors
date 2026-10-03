@@ -74,12 +74,12 @@ def get_customers(tenant_id, employee_id):
         print(f"🔍 User role for employee_id {employee_id}: {user_role}")
         
         # ✅ Build WHERE clause with Production Team filter
-        where_conditions = ["c.tenant_id = :tenant_id", "c.is_deleted = false"]
-        
+        where_conditions = ["c.tenant_id = :tenant_id", "c.is_deleted = false", "LOWER(COALESCE(c.stage,'')) != 'rejected'"]
+
         # ✅ Production Team can only see customers from "Accepted" stage onwards
         if user_role == "Production Team":
             where_conditions.append("""
-                c.stage IN ('Accepted', 'Ordered', 'Production', 'Delivery', 'Installation', 'Complete', 'Remedial', 'Rejected')
+                c.stage IN ('Accepted', 'Ordered', 'Production', 'Delivery', 'Installation', 'Complete', 'Remedial')
             """)
             print(f"✅ Applied Production Team filter: stages from Accepted onwards")
         
@@ -257,9 +257,8 @@ def get_customer(tenant_id, employee_id, customer_id):
                  ORDER BY p2.created_at DESC
                  LIMIT 1) as latest_project_stage
             FROM "StreemLyne_MT"."Client_Master" c
-            WHERE c.client_id = :client_id 
-              AND c.tenant_id = :tenant_id 
-              AND c.is_deleted = false
+            WHERE c.client_id = :client_id
+              AND c.tenant_id = :tenant_id
         """)
         
         client = session.execute(client_query, {
@@ -599,20 +598,21 @@ def get_recycle_bin(tenant_id, employee_id):
     session = SessionLocal()
     try:
         rows = session.execute(text("""
-            SELECT c.client_id, c.client_company_name, c.contact_name,
+            SELECT c.client_id, c.client_company_name, c.client_contact_name,
                    c.client_phone, c.client_email, c.address, c.stage,
                    c.deleted_at, e.employee_name AS assigned_to
             FROM "StreemLyne_MT"."Client_Master" c
-            LEFT JOIN "StreemLyne_MT"."Employee_Details" e
+            LEFT JOIN "StreemLyne_MT"."Employee_Master" e
                    ON e.employee_id = c.assigned_employee_id
-            WHERE c.tenant_id = :tid AND c.is_deleted = true
-            ORDER BY c.deleted_at DESC NULLS LAST
+            WHERE c.tenant_id = :tid
+              AND (c.is_deleted = true OR LOWER(COALESCE(c.stage, '')) = 'rejected')
+            ORDER BY c.deleted_at DESC NULLS LAST, c.client_id DESC
         """), {'tid': str(tenant_id)}).fetchall()
 
         return jsonify([{
             'id':           r.client_id,
-            'name':         r.client_company_name or r.contact_name or '',
-            'contact_name': r.contact_name or '',
+            'name':         r.client_company_name or r.client_contact_name or '',
+            'contact_name': r.client_contact_name or '',
             'phone':        r.client_phone or '',
             'email':        r.client_email or '',
             'address':      r.address or '',
@@ -636,7 +636,9 @@ def restore_customer(tenant_id, employee_id, customer_id):
     try:
         session.execute(text("""
             UPDATE "StreemLyne_MT"."Client_Master"
-            SET is_deleted = false, deleted_at = NULL
+            SET is_deleted = false,
+                deleted_at = NULL,
+                stage = CASE WHEN LOWER(COALESCE(stage, '')) = 'rejected' THEN 'Lead' ELSE stage END
             WHERE client_id = :cid AND tenant_id = :tid
         """), {'cid': customer_id, 'tid': str(tenant_id)})
         session.commit()
@@ -658,7 +660,8 @@ def permanent_delete_customer(tenant_id, employee_id, customer_id):
     try:
         session.execute(text("""
             DELETE FROM "StreemLyne_MT"."Client_Master"
-            WHERE client_id = :cid AND tenant_id = :tid AND is_deleted = true
+            WHERE client_id = :cid AND tenant_id = :tid
+              AND (is_deleted = true OR LOWER(COALESCE(stage, '')) = 'rejected')
         """), {'cid': customer_id, 'tid': str(tenant_id)})
         session.commit()
         return jsonify({'success': True}), 200
