@@ -349,6 +349,102 @@ def submit_customer_form():
     finally:
         session.close()
 
+@form_token_bp.route('/save-draft', methods=['POST'])
+def save_checklist_draft():
+    """Save a checklist as a draft — creates/finds the customer if name+phone provided."""
+    session = SessionLocal()
+    try:
+        data      = request.get_json(silent=True) or {}
+        form_data = data.get('formData', {})
+        if not form_data:
+            return jsonify({'success': False, 'error': 'Missing form data'}), 400
+
+        tenant_id = '7'
+        client_id = data.get('customerId') or form_data.get('customer_id')
+
+        customer_name  = (form_data.get('customer_name') or '').strip()
+        customer_phone = (form_data.get('customer_phone') or '').strip()
+
+        # Create/find customer if name is provided and no ID yet
+        if not client_id and customer_name:
+            existing = None
+            if customer_phone:
+                existing = session.execute(
+                    text("""
+                        SELECT client_id FROM "StreemLyne_MT"."Client_Master"
+                        WHERE tenant_id = :tid AND client_phone = :phone
+                          AND (is_deleted IS NULL OR is_deleted = FALSE)
+                        LIMIT 1
+                    """),
+                    {'tid': str(tenant_id), 'phone': customer_phone}
+                ).fetchone()
+
+            if existing:
+                client_id = existing.client_id
+            else:
+                row = session.execute(
+                    text("""
+                        INSERT INTO "StreemLyne_MT"."Client_Master"
+                        (tenant_id, client_company_name, client_phone, address, post_code,
+                         client_type, created_at, is_deleted)
+                        VALUES (:tid, :name, :phone, :addr, :postcode,
+                                'walk_in', CURRENT_TIMESTAMP, FALSE)
+                        RETURNING client_id
+                    """),
+                    {
+                        'tid':     str(tenant_id),
+                        'name':    customer_name,
+                        'phone':   customer_phone,
+                        'addr':    (form_data.get('customer_address') or '').strip(),
+                        'postcode':(form_data.get('customer_postcode') or form_data.get('postcode') or '').strip(),
+                    }
+                ).fetchone()
+                client_id = row.client_id
+                session.flush()
+
+        if not client_id:
+            return jsonify({'success': False, 'error': 'Customer name is required to save a draft'}), 400
+
+        # Map form_type
+        raw_type  = form_data.get('form_type', 'general')
+        form_type = {
+            'kitchen':  'kitchen_checklist',
+            'bedroom':  'bedroom_checklist',
+            'remedial': 'remedial_checklist',
+        }.get(raw_type, raw_type)
+
+        result = session.execute(
+            text("""
+                INSERT INTO "StreemLyne_MT"."Customer_Form_Submissions"
+                (tenant_id, client_id, form_type, form_data, token_used,
+                 submitted_by, submission_status)
+                VALUES (:tid, :cid, :ftype, :fdata, '', 'Draft', 'draft')
+                RETURNING form_submission_id
+            """),
+            {
+                'tid':   str(tenant_id),
+                'cid':   int(client_id),
+                'ftype': form_type,
+                'fdata': json.dumps(form_data),
+            }
+        )
+        form_id = result.fetchone().form_submission_id
+        session.commit()
+
+        return jsonify({
+            'success':            True,
+            'customer_id':        client_id,
+            'form_submission_id': form_id,
+        }), 201
+
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Draft save failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        session.close()
+
+
 @form_token_bp.route('/form-submissions', methods=['GET'])
 @token_required
 @require_tenant
@@ -367,13 +463,14 @@ def get_form_submissions(tenant_id, employee_id):
         where_clause = " AND ".join(where_conditions)
 
         query = text(f"""
-            SELECT 
+            SELECT
                 fs.form_submission_id,
                 fs.client_id,
                 fs.form_type,
                 fs.form_data,
                 fs.submitted_at,
                 fs.created_at,
+                fs.submission_status,
                 c.client_company_name
             FROM "StreemLyne_MT"."Customer_Form_Submissions" fs
             LEFT JOIN "StreemLyne_MT"."Client_Master" c ON fs.client_id = c.client_id
@@ -399,6 +496,7 @@ def get_form_submissions(tenant_id, employee_id):
                 'form_type': form_data.get('form_type', s.form_type or 'unknown'),
                 'room': form_data.get('room', ''),
                 'form_data': form_data,
+                'submission_status': getattr(s, 'submission_status', 'submitted') or 'submitted',
                 'created_at': (s.submitted_at or s.created_at).isoformat() if (s.submitted_at or s.created_at) else None,
             })
 
@@ -439,11 +537,12 @@ def handle_form_submission(submission_id, tenant_id, employee_id):
             ).fetchone()
 
             return jsonify({
-                'id':            submission.form_submission_id,
-                'client_id':     submission.client_id,
-                'customer_name': client.client_company_name if client else 'N/A',
-                'form_data':     submission.form_data,
-                'submitted_at':  submission.submitted_at.isoformat() if submission.submitted_at else None,
+                'id':               submission.form_submission_id,
+                'client_id':        submission.client_id,
+                'customer_name':    client.client_company_name if client else 'N/A',
+                'form_data':        submission.form_data,
+                'submission_status': getattr(submission, 'submission_status', 'submitted') or 'submitted',
+                'submitted_at':     submission.submitted_at.isoformat() if submission.submitted_at else None,
             }), 200
 
         elif request.method == 'PUT':

@@ -180,6 +180,7 @@ def get_quotations(tenant_id, employee_id):
                 'id': q.quotation_id,
                 'quotation_id': q.quotation_id,
                 'reference_number': q.reference_number,
+                'quote_reference': getattr(q, 'quote_reference', None) or '',
                 'client_id': q.client_id,
                 'customer_id': q.client_id,
                 'client_name': q.client_company_name,
@@ -245,22 +246,34 @@ def create_quotation(tenant_id, employee_id):
         }).fetchone().max_seq
         ref_num = data.get('reference_number') or f"Q-{max_seq + 1}"
         
-        # Calculate total from items
+        # Calculate grand total (item discounts → section discounts → global discount → VAT)
         items_data = data.get('items', [])
-        total = sum(
-            float(item.get('amount', 0)) * int(item.get('quantity', 1))
-            for item in items_data
-        )
+        _section_discounts = data.get('section_discounts', {}) or {}
+        if isinstance(_section_discounts, str):
+            import json as _j; _section_discounts = _j.loads(_section_discounts)
+        _global_disc = float(data.get('global_discount_percent', 0))
+        _vat_pct = float(data.get('vat_percentage', 20))
+        _sec_totals: dict = {}
+        for _item in items_data:
+            _sec = _item.get('section', 'Furniture')
+            _da = float(_item.get('discounted_amount') or (float(_item.get('amount', 0)) * int(_item.get('quantity', 1))))
+            _sec_totals[_sec] = _sec_totals.get(_sec, 0) + _da
+            for _sub in _item.get('subItems', []):
+                _sub_da = float(_sub.get('discounted_amount') or (float(_sub.get('amount', 0)) * int(_sub.get('quantity', 1))))
+                _sec_totals[_sec] = _sec_totals.get(_sec, 0) + _sub_da
+        _subtotal_sd = sum(v * (1 - float(_section_discounts.get(k, 0)) / 100) for k, v in _sec_totals.items())
+        _subtotal_gd = _subtotal_sd * (1 - _global_disc / 100)
+        total = round(_subtotal_gd * (1 + _vat_pct / 100), 2)
         
         # Create quotation
         insert_query = text("""
             INSERT INTO "StreemLyne_MT"."Quotations"
-            (tenant_id, client_id, project_id, reference_number, total, status, notes, employee_id,
+            (tenant_id, client_id, project_id, reference_number, quote_reference, total, status, notes, employee_id,
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
              carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts, filler_type,
              additional_terms, additional_notes,
              signature_type, signature_image, signature_text, signature_name, signature_date)
-            VALUES (:tenant_id, :client_id, :project_id, :reference_number, :total, :status, :notes, :employee_id,
+            VALUES (:tenant_id, :client_id, :project_id, :reference_number, :quote_reference, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
                     :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts, :filler_type,
                     :additional_terms, :additional_notes,
@@ -273,6 +286,7 @@ def create_quotation(tenant_id, employee_id):
             'client_id': int(data['client_id']),
             'project_id': data.get('project_id'),
             'reference_number': ref_num,
+            'quote_reference': data.get('quote_reference') or None,
             'total': total,
             'status': data.get('status', 'Draft'),
             'notes': data.get('notes', ''),
@@ -1426,6 +1440,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'id': quote.quotation_id,
                 'quotation_id': quote.quotation_id,
                 'reference_number': quote.reference_number,
+                'quote_reference': getattr(quote, 'quote_reference', None) or '',
                 'customer_id': str(quote.client_id),
                 'customer_name': quote.customer_name or quote.client_company_name,
                 'customer_address': quote.customer_address or quote.client_address,
@@ -1497,6 +1512,9 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'status' in data:
                 update_fields.append("status = :status")
                 params['status'] = data['status']
+            if 'quote_reference' in data:
+                update_fields.append("quote_reference = :quote_reference")
+                params['quote_reference'] = data['quote_reference'] or None
             if 'notes' in data:
                 update_fields.append("notes = :notes")
                 params['notes'] = data['notes']
@@ -1573,17 +1591,19 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     RETURNING item_id
                 """)
                 
-                # ✅ CHANGED: this is now treated as the SUBTOTAL (pre-discount, pre-VAT)
-                subtotal = 0.0
+                # Build section totals to compute grand total with all discounts + VAT
+                _upd_sec_totals: dict = {}
                 for item in data['items']:
                     # Skip completely empty items
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
-                    
+
                     item_amount = float(item.get('amount', 0))
                     item_qty = int(item.get('quantity', 1))
                     item_section = item.get('section', 'Furniture')
-                    
+                    item_da = float(item.get('discounted_amount') or (item_amount * item_qty))
+                    _upd_sec_totals[item_section] = _upd_sec_totals.get(item_section, 0) + item_da
+
                     result = session.execute(item_insert, {
                         'quotation_id': quotation_id,
                         'item_name': item.get('item', ''),
@@ -1601,15 +1621,14 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         'parent_item_id': None,
                         'section': item_section,
                     })
-                    
+
                     parent_item_id = result.fetchone().item_id
-                    subtotal += item_amount * item_qty
 
                     # Insert sub-items linked to this parent
                     for sub in item.get('subItems', []):
                         if not sub.get('item') and not sub.get('description') and not sub.get('amount'):
                             continue
-                        
+
                         sub_amount = float(sub.get('amount', 0))
                         sub_qty = int(sub.get('quantity', 1))
                         
@@ -1631,12 +1650,19 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                             'section': item_section,
                         })
                         
-                        subtotal += sub_amount * sub_qty
-                
-                # ✅ CHANGED: store the item subtotal in the 'total' column
-                # (kept as pre-VAT/pre-discount subtotal for consistency with create_quotation)
+                        sub_da = float(sub.get('discounted_amount') or (sub_amount * sub_qty))
+                        _upd_sec_totals[item_section] = _upd_sec_totals.get(item_section, 0) + sub_da
+
+                # Compute grand total: item discounts → section discounts → global discount → VAT
+                _upd_sec_disc = data.get('section_discounts', {}) or {}
+                if isinstance(_upd_sec_disc, str):
+                    import json as _j2; _upd_sec_disc = _j2.loads(_upd_sec_disc)
+                _upd_global_disc = float(data.get('global_discount_percent', 0))
+                _upd_vat = float(data.get('vat_percentage', 20))
+                _upd_subtotal_sd = sum(v * (1 - float(_upd_sec_disc.get(k, 0)) / 100) for k, v in _upd_sec_totals.items())
+                _upd_subtotal_gd = _upd_subtotal_sd * (1 - _upd_global_disc / 100)
                 update_fields.append("total = :total")
-                params['total'] = subtotal
+                params['total'] = round(_upd_subtotal_gd * (1 + _upd_vat / 100), 2)
             elif 'total' in data:
                 update_fields.append("total = :total")
                 params['total'] = data['total']
@@ -2889,9 +2915,6 @@ def download_quotation_pdf(quotation_id):
 
             sec_discount_amt = round(section_raw - section_subtotal, 2)
             subtotal_after_section_discounts = round(subtotal_after_section_discounts + section_subtotal, 2)
-
-            pdf.ln(2)
-            pdf.draw_section_total_block(section, section_raw, sec_discount_amt, section_subtotal)
 
         # ── Grand totals ──────────────────────────────────────────────────
         if pdf.get_y() > pdf.h - 90:

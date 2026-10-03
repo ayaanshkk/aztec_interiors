@@ -588,6 +588,89 @@ def delete_customer(tenant_id, employee_id, customer_id):
         session.close()
  
 # ==========================================
+# RECYCLE BIN — soft-deleted customers
+# ==========================================
+
+@customer_bp.route('/api/customers/recycle-bin', methods=['GET'])
+@token_required
+@require_tenant
+def get_recycle_bin(tenant_id, employee_id):
+    """Return all soft-deleted customers for this tenant."""
+    session = SessionLocal()
+    try:
+        rows = session.execute(text("""
+            SELECT c.client_id, c.client_company_name, c.contact_name,
+                   c.client_phone, c.client_email, c.address, c.stage,
+                   c.deleted_at, e.employee_name AS assigned_to
+            FROM "StreemLyne_MT"."Client_Master" c
+            LEFT JOIN "StreemLyne_MT"."Employee_Details" e
+                   ON e.employee_id = c.assigned_employee_id
+            WHERE c.tenant_id = :tid AND c.is_deleted = true
+            ORDER BY c.deleted_at DESC NULLS LAST
+        """), {'tid': str(tenant_id)}).fetchall()
+
+        return jsonify([{
+            'id':           r.client_id,
+            'name':         r.client_company_name or r.contact_name or '',
+            'contact_name': r.contact_name or '',
+            'phone':        r.client_phone or '',
+            'email':        r.client_email or '',
+            'address':      r.address or '',
+            'stage':        r.stage or '',
+            'deleted_at':   r.deleted_at.isoformat() if r.deleted_at else None,
+            'assigned_to':  r.assigned_to or '',
+        } for r in rows]), 200
+    except Exception as e:
+        current_app.logger.exception(f"Error fetching recycle bin: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@customer_bp.route('/api/customers/<int:customer_id>/restore', methods=['POST'])
+@token_required
+@require_tenant
+def restore_customer(tenant_id, employee_id, customer_id):
+    """Restore a soft-deleted customer."""
+    session = SessionLocal()
+    try:
+        session.execute(text("""
+            UPDATE "StreemLyne_MT"."Client_Master"
+            SET is_deleted = false, deleted_at = NULL
+            WHERE client_id = :cid AND tenant_id = :tid
+        """), {'cid': customer_id, 'tid': str(tenant_id)})
+        session.commit()
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error restoring customer: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+@customer_bp.route('/api/customers/<int:customer_id>/permanent-delete', methods=['DELETE'])
+@token_required
+@require_tenant
+def permanent_delete_customer(tenant_id, employee_id, customer_id):
+    """Permanently delete a soft-deleted customer."""
+    session = SessionLocal()
+    try:
+        session.execute(text("""
+            DELETE FROM "StreemLyne_MT"."Client_Master"
+            WHERE client_id = :cid AND tenant_id = :tid AND is_deleted = true
+        """), {'cid': customer_id, 'tid': str(tenant_id)})
+        session.commit()
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        session.rollback()
+        current_app.logger.exception(f"Error permanently deleting customer: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        session.close()
+
+
+# ==========================================
 # EMPLOYEE/SALESPERSON LIST ENDPOINT
 # ==========================================
  

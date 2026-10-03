@@ -176,7 +176,8 @@ def create_invoice(tenant_id, employee_id):
                  room_name, carcass_colour, door_colour, panelwork_colour, door_style,
                  deposit_paid, total_remaining, door_type, room_type, section_discounts, global_discount_percent, filler_type,
                  additional_terms, additional_notes,
-                 signature_type, signature_image, signature_text, signature_name, signature_date)
+                 signature_type, signature_image, signature_text, signature_name, signature_date,
+                 quote_reference)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
@@ -185,7 +186,8 @@ def create_invoice(tenant_id, employee_id):
                  :room_name, :carcass_colour, :door_colour, :panelwork_colour, :door_style,
                  :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts, :global_discount_percent, :filler_type,
                  :additional_terms, :additional_notes,
-                 :signature_type, :signature_image, :signature_text, :signature_name, :signature_date)
+                 :signature_type, :signature_image, :signature_text, :signature_name, :signature_date,
+                 :quote_reference)
                 RETURNING invoice_id
             """),
             {
@@ -226,6 +228,7 @@ def create_invoice(tenant_id, employee_id):
                 'signature_text':  data.get('signature_text'),
                 'signature_name':  data.get('signature_name', ''),
                 'signature_date':  data.get('signature_date', ''),
+                'quote_reference': data.get('quote_reference') or None,
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -381,6 +384,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'signature_text':  getattr(row, 'signature_text', None) or '',
                 'signature_name':  getattr(row, 'signature_name', None) or '',
                 'signature_date':  getattr(row, 'signature_date', None) or '',
+                'quote_reference': getattr(row, 'quote_reference', None) or '',
                 'created_at':       row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -423,19 +427,23 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
 
             if 'additional_terms' in data:
                 update_fields.append("additional_terms = :additional_terms")
-                params['additional_terms'] = _json2.dumps(data['additional_terms'])
+                params['additional_terms'] = json.dumps(data['additional_terms'])
 
             for sig_field in ['signature_type', 'signature_image', 'signature_text', 'signature_name', 'signature_date']:
                 if sig_field in data:
                     update_fields.append(f"{sig_field} = :{sig_field}")
                     params[sig_field] = data[sig_field]
 
+            if 'quote_reference' in data:
+                update_fields.append("quote_reference = :quote_reference")
+                params['quote_reference'] = data['quote_reference'] or None
+
             if 'filler_door_type' in data and 'filler_type' not in data:
                 update_fields.append("filler_type = :filler_type")
                 params['filler_type'] = data['filler_door_type']
                 update_fields.append("section_discounts = :section_discounts")
                 sd = data['section_discounts']
-                params['section_discounts'] = _json2.dumps(sd) if isinstance(sd, dict) else sd
+                params['section_discounts'] = json.dumps(sd) if isinstance(sd, dict) else sd
 
             if 'vat_rate' in data:
                 update_fields.append("vat_rate = :vat_rate")
@@ -493,17 +501,22 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
                     sec = item.get('section', 'Furniture')
-                    line = float(item.get('amount', 0)) * int(item.get('quantity', 1))
-                    section_totals[sec] = section_totals.get(sec, 0) + line
+                    unit = float(item.get('amount', 0))
+                    qty  = int(item.get('quantity', 1))
+                    disc = float(item.get('discount_percent', 0))
+                    line = item.get('discounted_total') or (unit * qty * (1 - disc / 100))
+                    section_totals[sec] = section_totals.get(sec, 0) + float(line)
 
                 subtotal_after_sd = sum(
                     v * (1 - float(section_discounts_for_save.get(k, 0)) / 100)
                     for k, v in section_totals.items()
                 )
 
-                vat_rate   = float(data.get('vat_rate', 20))
-                vat_amount = subtotal_after_sd * (vat_rate / 100)
-                total_amt  = subtotal_after_sd + vat_amount
+                global_disc           = float(data.get('global_discount_percent', 0))
+                subtotal_after_global = subtotal_after_sd * (1 - global_disc / 100)
+                vat_rate              = float(data.get('vat_rate', 20))
+                vat_amount            = subtotal_after_global * (vat_rate / 100)
+                total_amt             = subtotal_after_global + vat_amount
 
                 update_fields += [
                     "subtotal = :subtotal", "sub_total = :subtotal",
@@ -511,7 +524,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     "total_amount = :total_amount",
                 ]
                 params.update({
-                    'subtotal':     round(subtotal_after_sd, 2),
+                    'subtotal':     round(subtotal_after_global, 2),
                     'vat_amount':   round(vat_amount, 2),
                     'total_amount': round(total_amt, 2),
                     'vat_rate':     vat_rate,
@@ -691,7 +704,7 @@ def download_invoice_pdf(invoice_id):
 
         def draw_item_row(name, desc, color, qty, indent=False):
             clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
-            display_name = ('  – ' + clean_name) if indent else clean_name
+            display_name = ('  - ' + clean_name) if indent else clean_name
             clean_desc = (desc or '').strip()
             for suffix in [' - Standard', '- Standard', ' - Carcass Only', '- Carcass Only']:
                 if clean_desc.endswith(suffix):
@@ -762,9 +775,6 @@ def download_invoice_pdf(invoice_id):
 
             sec_discount_amt = round(section_raw - section_subtotal, 2)
             subtotal_after_section_discounts = round(subtotal_after_section_discounts + section_subtotal, 2)
-
-            pdf.ln(2)
-            pdf.draw_section_total_block(section, section_raw, sec_discount_amt, section_subtotal)
 
         # ── Grand totals ──────────────────────────────────────────────────
         if pdf.get_y() > pdf.h - 90:
@@ -994,7 +1004,7 @@ def create_proforma(tenant_id, employee_id):
                 'door_type':        data.get('door_type', 'Carcass Only'),
                 'room_type':        data.get('room_type', 'Kitchen'),
                 'filler_type':      data.get('filler_type') or data.get('filler_door_type', 'Basic Slab'),
-                'additional_terms': _json2.dumps(data.get('additional_terms', [])),
+                'additional_terms': json.dumps(data.get('additional_terms', [])),
                 'additional_notes': data.get('additional_notes', ''),
                 'signature_type':  data.get('signature_type', 'none'),
                 'signature_image': data.get('signature_image'),
@@ -1081,7 +1091,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 'filler_door_type': getattr(row, 'filler_type', None) or 'Basic Slab',
                 'door_type':        getattr(row, 'door_type', None) or 'Carcass Only',
                 'room_type':        getattr(row, 'room_type', None) or 'Kitchen',
-                'additional_terms': _json2.loads(getattr(row, 'additional_terms', None) or '[]') if isinstance(getattr(row, 'additional_terms', None), str) else (getattr(row, 'additional_terms', None) or []),
+                'additional_terms': json.loads(getattr(row, 'additional_terms', None) or '[]') if isinstance(getattr(row, 'additional_terms', None), str) else (getattr(row, 'additional_terms', None) or []),
                 'additional_notes': getattr(row, 'additional_notes', None) or '',
                 'signature_type':  getattr(row, 'signature_type', None) or 'none',
                 'signature_image': getattr(row, 'signature_image', None) or '',
@@ -1128,7 +1138,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
 
             if 'additional_terms' in data:
                 update_fields.append("additional_terms = :additional_terms")
-                params['additional_terms'] = _json2.dumps(data['additional_terms'])
+                params['additional_terms'] = json.dumps(data['additional_terms'])
 
             for sig_field in ['signature_type', 'signature_image', 'signature_text', 'signature_name', 'signature_date']:
                 if sig_field in data:
@@ -1362,7 +1372,7 @@ def download_proforma_pdf(invoice_id):
         pf_terms_raw = getattr(row, 'additional_terms', None)
         if pf_terms_raw:
             try:
-                pf_extra_terms = _json2.loads(pf_terms_raw) if isinstance(pf_terms_raw, str) else pf_terms_raw
+                pf_extra_terms = json.loads(pf_terms_raw) if isinstance(pf_terms_raw, str) else pf_terms_raw
             except Exception:
                 pf_extra_terms = []
             for term in [t for t in (pf_extra_terms or []) if t and str(t).strip()]:

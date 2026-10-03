@@ -24,6 +24,23 @@ def create_app():
         import traceback
         traceback.print_exc()
 
+    # ---- one-time schema migrations ----
+    try:
+        from sqlalchemy import text as _text
+        _sess = SessionLocal()
+        _sess.execute(_text("""
+            ALTER TABLE "StreemLyne_MT"."Quotations"
+            ADD COLUMN IF NOT EXISTS quote_reference TEXT
+        """))
+        _sess.execute(_text("""
+            ALTER TABLE "StreemLyne_MT"."Invoice_Master"
+            ADD COLUMN IF NOT EXISTS quote_reference TEXT
+        """))
+        _sess.commit()
+        _sess.close()
+    except Exception as _e:
+        print(f"Schema migration note: {_e}")
+
     # ============================================
     # CORS - Manual only (no flask-cors, avoids duplicate headers)
     # ============================================
@@ -80,6 +97,7 @@ def create_app():
     from .routes.calendar_routes import calendar_bp
     from .routes.action_items_routes import action_items_bp
     from .routes.payment_terms_routes import payment_terms_bp
+    from .routes.financial_docs_routes import financial_docs_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api")
     app.register_blueprint(invite_bp)
@@ -100,6 +118,7 @@ def create_app():
     app.register_blueprint(quotation_bp)
     app.register_blueprint(pricelist_bp, url_prefix="/api")
     app.register_blueprint(payment_terms_bp, url_prefix="/api/form")
+    app.register_blueprint(financial_docs_bp, url_prefix="/api")
 
     # ============================================
     # HEALTH CHECK
