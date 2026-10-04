@@ -207,14 +207,13 @@ def handle_tasks(tenant_id, employee_id):
                 if emp:
                     team_member_name = emp.employee_name
             
-            # ✅ Generate sequential task number (Task-001, Task-002, etc.)
+            # Generate sequential task number globally (primary key is not scoped to tenant)
             max_task_query = text("""
                 SELECT COALESCE(MAX(CAST(SUBSTRING(task_id::TEXT FROM 6) AS INTEGER)), 0) as max_num
                 FROM "StreemLyne_MT"."Tasks_Master"
-                WHERE tenant_id = :tenant_id
-                AND task_id::TEXT ~ '^Task-[0-9]+$'
+                WHERE task_id::TEXT ~ '^Task-[0-9]+$'
             """)
-            max_result = session.execute(max_task_query, {'tenant_id': str(tenant_id)}).fetchone()
+            max_result = session.execute(max_task_query).fetchone()
             next_task_num = (max_result.max_num if max_result and max_result.max_num else 0) + 1
             task_id = f"Task-{next_task_num:03d}"
             

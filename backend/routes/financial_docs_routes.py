@@ -397,7 +397,7 @@ def _list_payment_terms(session, tenant_id, page, per_page, offset, search, stat
     rows = session.execute(text(f"""
         SELECT pt.pt_id, pt.pt_number,
                pt.client_id, c.client_company_name,
-               pt.room_name, pt.status, pt.created_at,
+               pt.status, pt.created_at,
                COALESCE(pt.total_amount_due, 0) AS total_amount_due
         FROM "StreemLyne_MT"."Payment_Terms_Master" pt
         INNER JOIN "StreemLyne_MT"."Client_Master" c ON pt.client_id = c.client_id
@@ -412,7 +412,7 @@ def _list_payment_terms(session, tenant_id, page, per_page, offset, search, stat
             "id":            r.pt_id,
             "doc_number":    r.pt_number or f"#{r.pt_id}",
             "customer_name": r.client_company_name or "",
-            "room":          getattr(r, "room_name", "") or "",
+            "room":          "",
             "amount":        float(r.total_amount_due or 0),
             "status":        r.status or "Draft",
             "created_at":    r.created_at.isoformat() if r.created_at else None,
@@ -509,6 +509,206 @@ def _list_receipts(session, tenant_id, page, per_page, offset, search, status, r
         "per_page": per_page,
         "rooms":    list({d["room"] for d in data if d["room"]}),
     }), 200
+
+
+# ── Dashboard financial stats ─────────────────────────────────────────────────
+
+@financial_docs_bp.route("/financial-docs/dashboard-stats", methods=["GET"])
+@token_required
+@require_tenant
+def financial_dashboard_stats(tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        # Quotes: sent-to-customer and confirmed counts + values
+        quote_rows = session.execute(text("""
+            WITH item_subs AS (
+                SELECT qi.quotation_id,
+                       SUM(CASE WHEN COALESCE(qi.discount_percent,0) > 0
+                                THEN COALESCE(qi.discounted_amount, qi.amount*qi.quantity)
+                                ELSE qi.amount*qi.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Quotation_Items" qi
+                GROUP BY qi.quotation_id
+            )
+            SELECT q.status,
+                   COUNT(*) AS cnt,
+                   COALESCE(SUM(CAST(NULLIF(q.quote_reference, '') AS NUMERIC)), 0) AS ref_sum,
+                   COALESCE(ROUND(CAST(SUM(
+                       COALESCE(its.item_sub, 0)
+                       * (1 - COALESCE(q.global_discount_percent, 0) / 100.0)
+                       * (1 + COALESCE(q.vat_percentage, 20) / 100.0)
+                   ) AS NUMERIC), 2), 0) AS total_value
+            FROM "StreemLyne_MT"."Quotations" q
+            LEFT JOIN item_subs its ON its.quotation_id = q.quotation_id
+            WHERE q.tenant_id = :tid
+            GROUP BY q.status
+        """), {"tid": str(tenant_id)}).fetchall()
+
+        quote_sent = next((r for r in quote_rows if r.status and "sent" in r.status.lower()), None)
+        quote_confirmed = next((r for r in quote_rows if r.status and "confirm" in r.status.lower()), None)
+
+        # All quotes for modal (sent + confirmed)
+        sent_docs = session.execute(text("""
+            SELECT q.quotation_id AS id, q.reference_number AS doc_number,
+                   c.client_company_name AS customer_name, q.status, q.created_at,
+                   COALESCE(q.quote_reference, '') AS doc_reference,
+                   COALESCE((
+                       SELECT SUM(CASE WHEN COALESCE(qi.discount_percent,0) > 0
+                                  THEN COALESCE(qi.discounted_amount, qi.amount*qi.quantity)
+                                  ELSE qi.amount*qi.quantity END)
+                       FROM "StreemLyne_MT"."Quotation_Items" qi WHERE qi.quotation_id = q.quotation_id
+                   ), 0) * (1 - COALESCE(q.global_discount_percent,0)/100.0) * (1 + COALESCE(q.vat_percentage,20)/100.0) AS total
+            FROM "StreemLyne_MT"."Quotations" q
+            INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
+            WHERE q.tenant_id = :tid AND (LOWER(q.status) LIKE '%sent%' OR LOWER(q.status) LIKE '%confirm%')
+            ORDER BY q.created_at DESC
+        """), {"tid": str(tenant_id)}).fetchall()
+
+        # Invoices: monthly earnings (invoice total grouped by month)
+        monthly_rows = session.execute(text("""
+            WITH item_subs AS (
+                SELECT d.invoice_id,
+                       SUM(CASE WHEN COALESCE(d.discount_percent,0) > 0
+                                THEN COALESCE(d.discounted_amount, d.amount*d.quantity)
+                                ELSE d.amount*d.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Invoice_Details" d
+                GROUP BY d.invoice_id
+            )
+            SELECT TO_CHAR(i.created_at, 'YYYY-MM') AS month,
+                   COUNT(*) AS cnt,
+                   ROUND(CAST(SUM(
+                       COALESCE(its.item_sub,0)
+                       * (1 - COALESCE(i.global_discount_percent,0)/100.0)
+                       * (1 + COALESCE(i.vat_rate,20)/100.0)
+                   ) AS NUMERIC), 2) AS invoice_total,
+                   COALESCE(SUM(CAST(NULLIF(i.quote_reference,'') AS NUMERIC)), 0) AS ref_total
+            FROM "StreemLyne_MT"."Invoice_Master" i
+            LEFT JOIN item_subs its ON its.invoice_id = i.invoice_id
+            WHERE i.tenant_id = :tid AND i.status NOT LIKE 'Proforma%'
+            GROUP BY TO_CHAR(i.created_at, 'YYYY-MM')
+            ORDER BY month DESC
+            LIMIT 24
+        """), {"tid": str(tenant_id)}).fetchall()
+
+        # All invoices for monthly modal
+        invoice_docs = session.execute(text("""
+            WITH item_subs AS (
+                SELECT d.invoice_id,
+                       SUM(CASE WHEN COALESCE(d.discount_percent,0) > 0
+                                THEN COALESCE(d.discounted_amount, d.amount*d.quantity)
+                                ELSE d.amount*d.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Invoice_Details" d
+                GROUP BY d.invoice_id
+            )
+            SELECT i.invoice_id AS id, i.invoice_number AS doc_number,
+                   c.client_company_name AS customer_name,
+                   i.status, i.created_at,
+                   COALESCE(i.quote_reference, '') AS doc_reference,
+                   TO_CHAR(i.created_at, 'YYYY-MM') AS month,
+                   ROUND(CAST(
+                       COALESCE(its.item_sub,0)
+                       * (1 - COALESCE(i.global_discount_percent,0)/100.0)
+                       * (1 + COALESCE(i.vat_rate,20)/100.0)
+                   AS NUMERIC), 2) AS total
+            FROM "StreemLyne_MT"."Invoice_Master" i
+            INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
+            LEFT JOIN item_subs its ON its.invoice_id = i.invoice_id
+            WHERE i.tenant_id = :tid AND i.status NOT LIKE 'Proforma%'
+            ORDER BY i.created_at DESC
+        """), {"tid": str(tenant_id)}).fetchall()
+
+        # Invoice status breakdown (sent, paid partially, received)
+        inv_status_rows = session.execute(text("""
+            WITH item_subs AS (
+                SELECT d.invoice_id,
+                       SUM(CASE WHEN COALESCE(d.discount_percent,0) > 0
+                                THEN COALESCE(d.discounted_amount, d.amount*d.quantity)
+                                ELSE d.amount*d.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Invoice_Details" d
+                GROUP BY d.invoice_id
+            )
+            SELECT i.status,
+                   COUNT(*) AS cnt,
+                   COALESCE(ROUND(CAST(SUM(
+                       COALESCE(its.item_sub,0)
+                       * (1 - COALESCE(i.global_discount_percent,0)/100.0)
+                       * (1 + COALESCE(i.vat_rate,20)/100.0)
+                   ) AS NUMERIC), 2), 0) AS total_value
+            FROM "StreemLyne_MT"."Invoice_Master" i
+            LEFT JOIN item_subs its ON its.invoice_id = i.invoice_id
+            WHERE i.tenant_id = :tid AND i.status NOT LIKE 'Proforma%'
+            GROUP BY i.status
+        """), {"tid": str(tenant_id)}).fetchall()
+
+        def inv_stat(keyword):
+            r = next((x for x in inv_status_rows if x.status and keyword in x.status.lower()), None)
+            return {"count": int(r.cnt) if r else 0, "total_value": float(r.total_value or 0) if r else 0}
+
+        total_earnings = sum(float(r.invoice_total or 0) for r in monthly_rows)
+        total_ref = sum(float(r.ref_total or 0) for r in monthly_rows)
+
+        return jsonify({
+            "quotes": {
+                "sent": {
+                    "count":       int(quote_sent.cnt) if quote_sent else 0,
+                    "total_value": float(quote_sent.total_value) if quote_sent else 0,
+                    "ref_sum":     float(quote_sent.ref_sum) if quote_sent else 0,
+                },
+                "confirmed": {
+                    "count":       int(quote_confirmed.cnt) if quote_confirmed else 0,
+                    "total_value": float(quote_confirmed.total_value) if quote_confirmed else 0,
+                    "ref_sum":     float(quote_confirmed.ref_sum) if quote_confirmed else 0,
+                },
+                "docs": [
+                    {
+                        "id":            r.id,
+                        "doc_number":    r.doc_number or f"#{r.id}",
+                        "customer_name": r.customer_name or "",
+                        "status":        r.status or "",
+                        "doc_reference": r.doc_reference or "",
+                        "total":         round(float(r.total or 0), 2),
+                        "created_at":    r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in sent_docs
+                ],
+            },
+            "invoices": {
+                "sent":          inv_stat("sent"),
+                "paid_partially": inv_stat("partial"),
+                "received":      inv_stat("received"),
+                "total_earnings": round(total_earnings, 2),
+                "total_ref":      round(total_ref, 2),
+                "profit":         round(total_earnings - total_ref, 2),
+                "monthly": [
+                    {
+                        "month":         r.month,
+                        "count":         int(r.cnt),
+                        "invoice_total": float(r.invoice_total or 0),
+                        "ref_total":     float(r.ref_total or 0),
+                        "profit":        round(float(r.invoice_total or 0) - float(r.ref_total or 0), 2),
+                    }
+                    for r in monthly_rows
+                ],
+                "docs": [
+                    {
+                        "id":            r.id,
+                        "doc_number":    r.doc_number or f"#{r.id}",
+                        "customer_name": r.customer_name or "",
+                        "status":        r.status or "",
+                        "doc_reference": r.doc_reference or "",
+                        "month":         r.month,
+                        "total":         float(r.total or 0),
+                        "created_at":    r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in invoice_docs
+                ],
+            },
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error in financial_dashboard_stats: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
 
 
 # ── Inline status update ──────────────────────────────────────────────────────
