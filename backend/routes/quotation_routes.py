@@ -2986,13 +2986,12 @@ def download_quotation_pdf(quotation_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
-        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(quotation, 'signature_type',  None) or 'none',
             sig_image=getattr(quotation, 'signature_image', None) or '',
             sig_text=getattr(quotation, 'signature_text',  None) or '',
             sig_name=getattr(quotation, 'signature_name',  None) or cust_name,
-            sig_date=getattr(quotation, 'signature_date',  None) or _date.today().strftime('%d/%m/%Y'),
+            sig_date=getattr(quotation, 'signature_date',  None) or date_str,
         )
 
         # ── Return PDF ────────────────────────────────────────────────────

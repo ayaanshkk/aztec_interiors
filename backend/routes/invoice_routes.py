@@ -661,12 +661,10 @@ def download_invoice_pdf(invoice_id):
         cust_phone    = row.customer_phone   or row.client_phone        or ''
         cust_postcode = getattr(row, 'client_postcode', None) or ''
         inv_date      = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
-        due_date      = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
         right_rows = [
             ('Invoice No',  row.invoice_number or 'N/A'),
             ('Date',        inv_date),
-            ('Due Date',    due_date),
         ]
 
         spec_rows = []
@@ -844,13 +842,12 @@ def download_invoice_pdf(invoice_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
-        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(row, 'signature_type', None) or 'none',
             sig_image=getattr(row, 'signature_image', None) or '',
             sig_text=getattr(row, 'signature_text', None) or '',
             sig_name=getattr(row, 'signature_name', None) or cust_name,
-            sig_date=getattr(row, 'signature_date', None) or _date.today().strftime('%d/%m/%Y'),
+            sig_date=getattr(row, 'signature_date', None) or inv_date,
         )
 
         out = pdf.output(dest='S')
@@ -1267,12 +1264,10 @@ def download_proforma_pdf(invoice_id):
         cust_phone    = row.customer_phone   or row.client_phone        or ''
         cust_postcode = getattr(row, 'client_postcode', None) or ''
         inv_date      = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
-        due_date      = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
         right_rows = [
             ('Proforma No',  row.invoice_number or 'N/A'),
             ('Date',         inv_date),
-            ('Valid Until',  due_date),
         ]
 
         spec_rows = []
@@ -1421,13 +1416,12 @@ def download_proforma_pdf(invoice_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
-        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(row, 'signature_type', None) or 'none',
             sig_image=getattr(row, 'signature_image', None) or '',
             sig_text=getattr(row, 'signature_text', None) or '',
             sig_name=getattr(row, 'signature_name', None) or cust_name,
-            sig_date=getattr(row, 'signature_date', None) or _date.today().strftime('%d/%m/%Y'),
+            sig_date=getattr(row, 'signature_date', None) or inv_date,
         )
 
         out = pdf.output(dest='S')
