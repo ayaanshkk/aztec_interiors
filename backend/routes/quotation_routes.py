@@ -233,18 +233,18 @@ def create_quotation(tenant_id, employee_id):
         if not client:
             return jsonify({'error': 'Client not found'}), 404
         
-        # Generate reference number — per-tenant sequential, no date prefix
+        # Generate reference number — per-tenant sequential AL-QT-000001 format
         seq_query = text("""
             SELECT COALESCE(MAX(
-                CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-(\\d+)$', '\\1'), reference_number) AS INTEGER)
+                CAST(NULLIF(REGEXP_REPLACE(reference_number, '^AL-QT-(\\d+)$', '\\1'), reference_number) AS INTEGER)
             ), 0) as max_seq
             FROM "StreemLyne_MT"."Quotations"
-            WHERE tenant_id = :tenant_id
+            WHERE tenant_id = :tenant_id AND reference_number LIKE 'AL-QT-%'
         """)
         max_seq = session.execute(seq_query, {
             'tenant_id': str(tenant_id),
         }).fetchone().max_seq
-        ref_num = data.get('reference_number') or f"Q-{max_seq + 1}"
+        ref_num = data.get('reference_number') or f"AL-QT-{max_seq + 1:06d}"
         
         # Calculate grand total (item discounts → section discounts → global discount → VAT)
         items_data = data.get('items', [])
@@ -466,18 +466,18 @@ def generate_from_checklist(form_submission_id, tenant_id, employee_id):
         print(f"🚪 Door Type: {door_type}")
         print(f"🏠 Room Type: {room_type}")
         
-        # Generate reference — per-tenant sequential
+        # Generate reference — per-tenant sequential AL-QT-000001 format
         checklist_seq = session.execute(
             text("""
                 SELECT COALESCE(MAX(
-                    CAST(NULLIF(REGEXP_REPLACE(reference_number, '^Q-(\\d+)$', '\\1'), reference_number) AS INTEGER)
+                    CAST(NULLIF(REGEXP_REPLACE(reference_number, '^AL-QT-(\\d+)$', '\\1'), reference_number) AS INTEGER)
                 ), 0) as max_seq
                 FROM "StreemLyne_MT"."Quotations"
-                WHERE tenant_id = :tenant_id
+                WHERE tenant_id = :tenant_id AND reference_number LIKE 'AL-QT-%'
             """),
             {'tenant_id': str(tenant_id)}
         ).fetchone().max_seq
-        ref_num = f"Q-{checklist_seq + 1}"
+        ref_num = f"AL-QT-{checklist_seq + 1:06d}"
         
         # Create quotation
         carcass_colour = (form_data.get('cabinet_color') or '').strip()
@@ -2741,7 +2741,8 @@ def download_quotation_pdf(quotation_id):
                     q.room_name,
                     c.client_company_name,
                     c.address        AS client_address,
-                    c.client_phone   AS client_phone_num
+                    c.client_phone   AS client_phone_num,
+                    c.post_code      AS client_postcode
                 FROM "StreemLyne_MT"."Quotations" q
                 INNER JOIN "StreemLyne_MT"."Client_Master" c ON q.client_id = c.client_id
                 WHERE q.quotation_id = :qid
@@ -2774,22 +2775,28 @@ def download_quotation_pdf(quotation_id):
         SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles',
                     'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
+        qt_vat_rate = float(quotation.vat_percentage) if getattr(quotation, 'vat_percentage', None) is not None else 20.0
+
         pdf = PDF('P', 'mm', 'A4')
-        pdf.doc_title = 'Quotation'
+        pdf.doc_title   = 'Quotation'
+        pdf.include_vat = (qt_vat_rate > 0)
         pdf.alias_nb_pages()
         pdf.set_auto_page_break(auto=True, margin=22)
         pdf.add_page()
 
         # ── Customer section (2-column) ────────────────────────────────────
-        cust_name    = quotation.customer_name    or quotation.client_company_name or 'N/A'
-        cust_address = quotation.customer_address or quotation.client_address      or 'N/A'
-        cust_phone   = quotation.customer_phone   or quotation.client_phone_num    or ''
-        date_str     = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
+        cust_name     = quotation.customer_name    or quotation.client_company_name or 'N/A'
+        cust_address  = quotation.customer_address or quotation.client_address      or 'N/A'
+        cust_phone    = quotation.customer_phone   or quotation.client_phone_num    or ''
+        cust_postcode = getattr(quotation, 'client_postcode', None) or ''
+        date_str      = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
         room_name_val = getattr(quotation, 'room_name', None) or ''
 
-        right_rows = [('Quote No', quotation.reference_number or 'N/A'), ('Date', date_str)]
+        right_rows = [('Quote No', quotation.reference_number or 'N/A'), ('Date', date_str), ('VAT Reg No', '528 7517 62')]
+
+        spec_rows = []
         if room_name_val:
-            right_rows.append(('Room Name', room_name_val))
+            spec_rows.append(('Order Ref', room_name_val))
         for attr, label in [
             ('carcass_colour',   'Carcass Colour'),
             ('door_colour',      'Door Colour'),
@@ -2798,13 +2805,16 @@ def download_quotation_pdf(quotation_id):
         ]:
             v = getattr(quotation, attr, None)
             if v and v != 'N/A':
-                right_rows.append((label, v))
+                spec_rows.append((label, v))
 
         left_rows = [cust_name, cust_address]
+        if cust_postcode:
+            left_rows.append(cust_postcode)
         if cust_phone and cust_phone != 'N/A':
             left_rows.append(cust_phone)
 
         pdf.draw_two_col_customer('Bill To', left_rows, 'Quotation Details', right_rows)
+        pdf.draw_spec_strip(spec_rows)
         pdf.ln(3)
 
         # ── Items table ───────────────────────────────────────────────────
@@ -2935,14 +2945,20 @@ def download_quotation_pdf(quotation_id):
 
         pdf.draw_grand_totals(totals_rows, 'Total', f'\xa3{total:.2f}')
 
-        # ── Notes ─────────────────────────────────────────────────────────
-        if pdf.get_y() + 35 > pdf.h - 20:
+        # ── Bank details (highlighted box) ────────────────────────────────
+        if pdf.get_y() + 55 > pdf.h - 20:
             pdf.add_page()
+        pdf.draw_bank_details_box()
+        pdf.ln(4)
 
+        # ── Terms ─────────────────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 7)
+        pdf.set_text_color(130, 130, 130)
+        pdf.cell(0, 5, 'TERMS', 0, 1, 'L')
         pdf.set_font('Arial', '', 8.5)
         pdf.set_text_color(80, 80, 80)
         pdf.cell(0, 5, 'Only BACS or Cash will be accepted on Delivery and Completion.', 0, 1, 'L')
-        pdf.cell(0, 5, 'If you wish to proceed, full payment is required upfront.', 0, 1, 'L')
+        pdf.cell(0, 5, 'Payment is due within 30 days of the invoice date.', 0, 1, 'L')
 
         # Additional terms (optional)
         additional_terms_raw = getattr(quotation, 'additional_terms', None)
@@ -2970,12 +2986,13 @@ def download_quotation_pdf(quotation_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
+        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(quotation, 'signature_type',  None) or 'none',
             sig_image=getattr(quotation, 'signature_image', None) or '',
             sig_text=getattr(quotation, 'signature_text',  None) or '',
-            sig_name=getattr(quotation, 'signature_name',  None) or '',
-            sig_date=getattr(quotation, 'signature_date',  None) or '',
+            sig_name=getattr(quotation, 'signature_name',  None) or cust_name,
+            sig_date=getattr(quotation, 'signature_date',  None) or _date.today().strftime('%d/%m/%Y'),
         )
 
         # ── Return PDF ────────────────────────────────────────────────────

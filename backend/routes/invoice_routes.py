@@ -18,14 +18,14 @@ def generate_invoice_number(session, tenant_id):
     result = session.execute(
         text("""
             SELECT COALESCE(MAX(
-                CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^INV-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
+                CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^AL-INV-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
             ), 0) as max_seq
             FROM "StreemLyne_MT"."Invoice_Master"
-            WHERE tenant_id = :t AND invoice_number LIKE 'INV-%'
+            WHERE tenant_id = :t AND invoice_number LIKE 'AL-INV-%'
         """),
         {'t': str(tenant_id)}
     ).fetchone()
-    return f"INV-{result.max_seq + 1}"
+    return f"AL-INV-{result.max_seq + 1:06d}"
 
 
 def calculate_invoice_total(session, invoice_id):
@@ -619,7 +619,8 @@ def download_invoice_pdf(invoice_id):
 
         row = session.execute(
             text("""
-                SELECT i.*, c.client_company_name, c.address AS client_address, c.client_phone
+                SELECT i.*, c.client_company_name, c.address AS client_address,
+                       c.client_phone, c.post_code AS client_postcode
                 FROM "StreemLyne_MT"."Invoice_Master" i
                 INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
                 WHERE i.invoice_id = :id
@@ -645,26 +646,32 @@ def download_invoice_pdf(invoice_id):
         SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles',
                     'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
+        inv_vat_rate  = float(row.vat_rate) if getattr(row, 'vat_rate', None) is not None else 20.0
+
         pdf = PDF('P', 'mm', 'A4')
-        pdf.doc_title = 'Invoice'
+        pdf.doc_title   = 'Invoice'
+        pdf.include_vat = (inv_vat_rate > 0)
         pdf.alias_nb_pages()
         pdf.set_auto_page_break(auto=True, margin=22)
         pdf.add_page()
 
         # ── Customer section (2-column) ───────────────────────────────────
-        cust_name    = row.customer_name    or row.client_company_name or 'N/A'
-        cust_address = row.customer_address or row.client_address      or 'N/A'
-        cust_phone   = row.customer_phone   or row.client_phone        or ''
-        inv_date     = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
-        due_date     = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
+        cust_name     = row.customer_name    or row.client_company_name or 'N/A'
+        cust_address  = row.customer_address or row.client_address      or 'N/A'
+        cust_phone    = row.customer_phone   or row.client_phone        or ''
+        cust_postcode = getattr(row, 'client_postcode', None) or ''
+        inv_date      = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
+        due_date      = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
         right_rows = [
             ('Invoice No',  row.invoice_number or 'N/A'),
             ('Date',        inv_date),
             ('Due Date',    due_date),
         ]
+
+        spec_rows = []
         for field, label in [
-            ('room_name',        'Room Name'),
+            ('room_name',        'Order Ref'),
             ('carcass_colour',   'Carcass Colour'),
             ('door_colour',      'Door Colour'),
             ('panelwork_colour', 'Panelwork'),
@@ -672,20 +679,16 @@ def download_invoice_pdf(invoice_id):
         ]:
             v = getattr(row, field, None)
             if v:
-                right_rows.append((label, v))
+                spec_rows.append((label, v))
 
         left_rows = [cust_name, cust_address]
+        if cust_postcode:
+            left_rows.append(cust_postcode)
         if cust_phone:
             left_rows.append(cust_phone)
 
         pdf.draw_two_col_customer('Bill To', left_rows, 'Invoice Details', right_rows)
-
-        # ── Bank details (subtle) ─────────────────────────────────────────
-        pdf.set_font('Arial', '', 7.5)
-        pdf.set_text_color(100, 100, 100)
-        pdf.cell(0, 4, 'BACS: Atelier Luxe Interiors LTD  \xb7  ClearBank  \xb7  Sort: 04-06-05  \xb7  Acc: 31621197  \xb7  Ref: your name / road', 0, 1, 'L')
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(5)
+        pdf.draw_spec_strip(spec_rows)
 
         # ── Items by section ──────────────────────────────────────────────
         headers = ['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY']
@@ -801,10 +804,16 @@ def download_invoice_pdf(invoice_id):
         balance_value = f'\xa3{remaining:.2f}' if deposit > 0 else f'\xa3{total:.2f}'
         pdf.draw_grand_totals(totals_rows, balance_label, balance_value)
 
-        # ── Payment terms note ────────────────────────────────────────────
-        if pdf.get_y() + 40 > pdf.h - 20:
+        # ── Bank details (highlighted box) ────────────────────────────────
+        if pdf.get_y() + 55 > pdf.h - 20:
             pdf.add_page()
+        pdf.draw_bank_details_box()
+        pdf.ln(4)
 
+        # ── Terms ─────────────────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 7)
+        pdf.set_text_color(130, 130, 130)
+        pdf.cell(0, 5, 'TERMS', 0, 1, 'L')
         pdf.set_font('Arial', '', 8.5)
         pdf.set_text_color(80, 80, 80)
         pdf.cell(0, 5, 'Only BACS or Cash will be accepted on Delivery and Completion.', 0, 1, 'L')
@@ -835,12 +844,13 @@ def download_invoice_pdf(invoice_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
+        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(row, 'signature_type', None) or 'none',
             sig_image=getattr(row, 'signature_image', None) or '',
             sig_text=getattr(row, 'signature_text', None) or '',
-            sig_name=getattr(row, 'signature_name', None) or '',
-            sig_date=getattr(row, 'signature_date', None) or '',
+            sig_name=getattr(row, 'signature_name', None) or cust_name,
+            sig_date=getattr(row, 'signature_date', None) or _date.today().strftime('%d/%m/%Y'),
         )
 
         out = pdf.output(dest='S')
@@ -933,14 +943,14 @@ def create_proforma(tenant_id, employee_id):
         pro_seq = session.execute(
             text("""
                 SELECT COALESCE(MAX(
-                    CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^PRO-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
+                    CAST(NULLIF(REGEXP_REPLACE(invoice_number, '^AL-PRO-(\\d+)$', '\\1'), invoice_number) AS INTEGER)
                 ), 0) as max_seq
                 FROM "StreemLyne_MT"."Invoice_Master"
-                WHERE tenant_id = :t AND invoice_number LIKE 'PRO-%'
+                WHERE tenant_id = :t AND invoice_number LIKE 'AL-PRO-%'
             """),
             {'t': str(tenant_id)}
         ).fetchone()
-        invoice_number = data.get('invoice_number') or f"PRO-{pro_seq.max_seq + 1}"
+        invoice_number = data.get('invoice_number') or f"AL-PRO-{pro_seq.max_seq + 1:06d}"
 
         items_data   = data.get('items', [])
         subtotal     = float(data.get('subtotal', 0))
@@ -1223,7 +1233,8 @@ def download_proforma_pdf(invoice_id):
     try:
         row = session.execute(
             text("""
-                SELECT i.*, c.client_company_name, c.address AS client_address, c.client_phone
+                SELECT i.*, c.client_company_name, c.address AS client_address,
+                       c.client_phone, c.post_code AS client_postcode
                 FROM "StreemLyne_MT"."Invoice_Master" i
                 INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
                 WHERE i.invoice_id = :id
@@ -1241,26 +1252,32 @@ def download_proforma_pdf(invoice_id):
         SECTIONS = ['Furniture', 'Fillers and End Panels', 'Accessories', 'Handles',
                     'Appliances', 'Sink and Tap', 'Worktops', 'Fittings']
 
+        pf_vat_rate = float(row.vat_rate) if getattr(row, 'vat_rate', None) is not None else 20.0
+
         pdf = PDF('P', 'mm', 'A4')
-        pdf.doc_title = 'Proforma Invoice'
+        pdf.doc_title   = 'Proforma Invoice'
+        pdf.include_vat = (pf_vat_rate > 0)
         pdf.alias_nb_pages()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=22)
 
         # ── Customer section (2-column) ───────────────────────────────────
-        cust_name    = row.customer_name    or row.client_company_name or 'N/A'
-        cust_address = row.customer_address or row.client_address      or 'N/A'
-        cust_phone   = row.customer_phone   or row.client_phone        or ''
-        inv_date     = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
-        due_date     = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
+        cust_name     = row.customer_name    or row.client_company_name or 'N/A'
+        cust_address  = row.customer_address or row.client_address      or 'N/A'
+        cust_phone    = row.customer_phone   or row.client_phone        or ''
+        cust_postcode = getattr(row, 'client_postcode', None) or ''
+        inv_date      = row.invoice_date.strftime('%d/%m/%Y') if row.invoice_date else 'N/A'
+        due_date      = row.due_date.strftime('%d/%m/%Y')     if row.due_date     else 'N/A'
 
         right_rows = [
             ('Proforma No',  row.invoice_number or 'N/A'),
             ('Date',         inv_date),
             ('Valid Until',  due_date),
         ]
+
+        spec_rows = []
         for field, label in [
-            ('room_name',        'Room Name'),
+            ('room_name',        'Order Ref'),
             ('carcass_colour',   'Carcass Colour'),
             ('door_colour',      'Door Colour'),
             ('panelwork_colour', 'Panelwork'),
@@ -1268,13 +1285,16 @@ def download_proforma_pdf(invoice_id):
         ]:
             v = getattr(row, field, None)
             if v:
-                right_rows.append((label, v))
+                spec_rows.append((label, v))
 
         left_rows = [cust_name, cust_address]
+        if cust_postcode:
+            left_rows.append(cust_postcode)
         if cust_phone:
             left_rows.append(cust_phone)
 
         pdf.draw_two_col_customer('Bill To', left_rows, 'Proforma Details', right_rows)
+        pdf.draw_spec_strip(spec_rows)
 
         # ── Items by section ──────────────────────────────────────────────
         headers = ['ITEM', 'DESCRIPTION', 'COLOUR', 'QTY', 'UNIT PRICE', 'AMOUNT']
@@ -1359,12 +1379,20 @@ def download_proforma_pdf(invoice_id):
             'Total', f'\xa3{total:.2f}',
         )
 
-        # ── Notes ─────────────────────────────────────────────────────────
-        if pdf.get_y() + 35 > pdf.h - 20:
+        # ── Bank details (highlighted box) ────────────────────────────────
+        if pdf.get_y() + 55 > pdf.h - 20:
             pdf.add_page()
+        pdf.draw_bank_details_box()
+        pdf.ln(4)
 
+        # ── Terms ─────────────────────────────────────────────────────────
+        pdf.set_font('Arial', 'B', 7)
+        pdf.set_text_color(130, 130, 130)
+        pdf.cell(0, 5, 'TERMS', 0, 1, 'L')
         pdf.set_font('Arial', '', 8.5)
         pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 5, 'Only BACS or Cash will be accepted on Delivery and Completion.', 0, 1, 'L')
+        pdf.cell(0, 5, 'Payment is due within 30 days of the invoice date.', 0, 1, 'L')
         pdf.cell(0, 5, 'This is a Proforma Invoice \x96 not a VAT invoice.', 0, 1, 'L')
         pdf.cell(0, 5, 'Payment is required before goods are dispatched or work commences.', 0, 1, 'L')
 
@@ -1393,12 +1421,13 @@ def download_proforma_pdf(invoice_id):
             pdf.set_text_color(0, 0, 0)
             pdf.ln(4)
 
+        from datetime import date as _date
         pdf.draw_signature_data(
             sig_type=getattr(row, 'signature_type', None) or 'none',
             sig_image=getattr(row, 'signature_image', None) or '',
             sig_text=getattr(row, 'signature_text', None) or '',
-            sig_name=getattr(row, 'signature_name', None) or '',
-            sig_date=getattr(row, 'signature_date', None) or '',
+            sig_name=getattr(row, 'signature_name', None) or cust_name,
+            sig_date=getattr(row, 'signature_date', None) or _date.today().strftime('%d/%m/%Y'),
         )
 
         out = pdf.output(dest='S')

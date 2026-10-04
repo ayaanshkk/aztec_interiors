@@ -29,7 +29,8 @@ class PDF(FPDF):
     def __init__(self, *args, **kwargs):
         self.show_header = kwargs.pop('show_header', True)
         super().__init__(*args, **kwargs)
-        self.doc_title = ''
+        self.doc_title   = ''
+        self.include_vat = True  # set to False when vat_rate == 0
 
     # ── Page header ────────────────────────────────────────────────────────────
 
@@ -69,12 +70,15 @@ class PDF(FPDF):
         self.cell(right_w, 5, 'Atelier Luxe Interiors Ltd', 0, 2, 'R')
         self.set_font('Arial', '', 8)
         self.set_text_color(*_MID)
-        for line in [
+        lines = [
             '127c Barkby Road, Leicester, LE4 9LG',
             'M: 07821 328849',
             'E: accounts@atelierluxe.co.uk',
             'Registered in England No. 17200862',
-        ]:
+        ]
+        if self.include_vat:
+            lines.append('VAT Reg No: 528 7517 62')
+        for line in lines:
             self.cell(right_w, 4, self._enc(line), 0, 2, 'R')
 
         # Thick black rule below header — sits below whichever side is taller
@@ -139,8 +143,8 @@ class PDF(FPDF):
     def draw_two_col_customer(self, left_title, left_rows, right_title, right_rows):
         """
         Draw a 2-column customer section.
-        left_rows  : list of plain strings (name, address, phone, …)
-        right_rows : list of (label, value) tuples
+        left_rows  : list of plain strings (name, address, postcode, phone, …)
+        right_rows : list of (label, value) tuples (doc no, date, order ref, colours, …)
         """
         left_x  = 10
         right_x = 110
@@ -165,8 +169,6 @@ class PDF(FPDF):
             else:
                 self.set_font('Arial', '', 9)
                 self.set_text_color(*_DARK)
-            # Rule below cell
-            y_before = self.get_y()
             self.cell(col_w, row_h, text[:55], 0, 1, 'L')
             self.set_draw_color(*_RULE)
             self.set_line_width(0.2)
@@ -197,13 +199,89 @@ class PDF(FPDF):
 
         right_end_y = self.get_y()
 
-        # Move past both columns + separator
-        end_y = max(left_end_y, right_end_y) + 6
+        # Move past both columns (no separator — spec strip follows directly)
+        end_y = max(left_end_y, right_end_y) + 4
         self.set_y(end_y)
+        self.set_text_color(*_BLACK)
+
+    def draw_spec_strip(self, spec_rows):
+        """
+        Draw spec fields (Order Ref, colours, etc.) as a compact horizontal strip
+        spanning the full page width, between the customer block and bank details.
+        spec_rows: list of (label, value) tuples
+        """
+        if not spec_rows:
+            return
+        strip_x = 10
+        strip_w = self.w - 20
+        pad     = 3
+        row_h   = 5.5
+        strip_y = self.get_y()
+        strip_h = pad + row_h + pad
+
+        # Light grey background
+        self.set_fill_color(250, 250, 250)
         self.set_draw_color(*_RULE)
         self.set_line_width(0.2)
-        self.line(10, end_y, self.w - 10, end_y)
-        self.ln(8)
+        self.rect(strip_x, strip_y, strip_w, strip_h, 'FD')
+
+        # Spread the fields evenly across the strip
+        col_w = strip_w / len(spec_rows)
+        self.set_y(strip_y + pad)
+        for i, (label, value) in enumerate(spec_rows):
+            x = strip_x + i * col_w
+            self.set_xy(x + 2, strip_y + pad)
+            self.set_font('Arial', '', 6.5)
+            self.set_text_color(*_LIGHT)
+            self.cell(col_w - 4, row_h * 0.5, self._enc(label).upper(), 0, 2, 'L')
+            self.set_font('Arial', '', 8.5)
+            self.set_text_color(*_DARK)
+            self.cell(col_w - 4, row_h * 0.6, self._enc(value), 0, 0, 'L')
+
+        self.set_y(strip_y + strip_h + 4)
+        self.set_text_color(*_BLACK)
+
+    def draw_bank_details_box(self):
+        """Draw bank details in a compact 2-column highlighted box."""
+        box_x  = 10
+        box_w  = self.w - 20
+        pad    = 3
+        row_h  = 5.0
+        # Left column: 3 rows | Right column: 3 rows (same height)
+        left_rows  = [
+            ('BACS Payment', 'Atelier Luxe Interiors LTD'),
+            ('Bank',         'ClearBank'),
+            ('Reference',    'Your name / road'),
+        ]
+        right_rows = [
+            ('Sort Code',  '04-06-05'),
+            ('Account No', '31621197'),
+        ]
+        n_rows = max(len(left_rows), len(right_rows))
+        box_h  = pad + n_rows * row_h + pad
+        box_y  = self.get_y()
+
+        self.set_fill_color(245, 245, 245)
+        self.set_draw_color(210, 210, 210)
+        self.set_line_width(0.3)
+        self.rect(box_x, box_y, box_w, box_h, 'FD')
+
+        col_w   = box_w / 2
+        label_w = 28
+
+        for col_i, rows in enumerate([left_rows, right_rows]):
+            col_x = box_x + col_i * col_w
+            for row_i, (label, value) in enumerate(rows):
+                y = box_y + pad + row_i * row_h
+                self.set_xy(col_x + pad, y)
+                self.set_font('Arial', '', 6.5)
+                self.set_text_color(*_LIGHT)
+                self.cell(label_w, row_h, label.upper(), 0, 0, 'L')
+                self.set_font('Arial', '', 8.5)
+                self.set_text_color(*_DARK)
+                self.cell(col_w - label_w - pad * 2, row_h, value, 0, 0, 'L')
+
+        self.set_y(box_y + box_h + 4)
         self.set_text_color(*_BLACK)
 
     def draw_section_label(self, name):
@@ -330,44 +408,57 @@ class PDF(FPDF):
         self.cell(0, 5, 'AUTHORISATION', 0, 1, 'L')
         self.set_text_color(0, 0, 0)
         self.ln(2)
+        self.set_draw_color(*_RULE)
 
-        # Signature
+        # Row 1: Customer Name (full width)
         self.set_font('Arial', '', 9)
         self.set_text_color(*_MID)
-        self.cell(45, 6, 'Customer Signature:', 0, 0, 'L')
-        self.set_draw_color(*_RULE)
+        self.cell(45, 6, 'Customer Name:', 0, 0, 'L')
+        self.set_text_color(30, 30, 30) if sig_name else self.set_text_color(*_MID)
+        self.cell(145, 6, self._enc(sig_name) if sig_name else '', 'B', 1, 'L')
+        self.ln(4)
+
+        # Row 2: Customer Signature (left ~60%) | Date (right ~40%)
+        self.set_font('Arial', '', 9)
+        self.set_text_color(*_MID)
+        label_w  = 45
+        sig_w    = 95
+        gap      = 10
+        date_lbl = 15
+        date_w   = self.w - 10 - label_w - sig_w - gap - date_lbl - 10
+
+        self.cell(label_w, 6, 'Customer Signature:', 0, 0, 'L')
         sig_x = self.get_x()
         sig_y = self.get_y()
+
         if sig_type == 'draw' and sig_image and sig_image.startswith('data:image'):
             try:
                 _, b64data = sig_image.split(',', 1)
                 tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
                 tmp.write(base64.b64decode(b64data))
                 tmp.close()
-                self.image(tmp.name, x=sig_x, y=sig_y - 2, w=145, h=14)
+                self.image(tmp.name, x=sig_x, y=sig_y - 2, w=sig_w, h=14)
                 _os.unlink(tmp.name)
-                self.ln(8)
+                self.line(sig_x, sig_y + 6, sig_x + sig_w, sig_y + 6)
+                self.set_xy(sig_x + sig_w + gap, sig_y)
             except Exception:
-                self.cell(145, 6, '', 'B', 1, 'L')
+                self.cell(sig_w, 6, '', 'B', 0, 'L')
+                self.set_x(self.get_x() + gap)
         elif sig_type == 'type' and sig_text:
             self.set_font('Helvetica', 'I', 14)
             self.set_text_color(26, 26, 46)
-            self.cell(145, 8, self._enc(sig_text), 'B', 1, 'L')
+            self.cell(sig_w, 8, self._enc(sig_text), 'B', 0, 'L')
+            self.set_font('Arial', '', 9)
+            self.set_text_color(*_MID)
+            self.set_x(self.get_x() + gap)
         else:
-            self.cell(145, 6, '', 'B', 1, 'L')
-        self.ln(2)
+            self.cell(sig_w, 6, '', 'B', 0, 'L')
+            self.set_x(self.get_x() + gap)
 
-        # Name
+        # Date — same row
         self.set_font('Arial', '', 9)
         self.set_text_color(*_MID)
-        self.cell(45, 6, 'Customer Name:', 0, 0, 'L')
-        self.set_text_color(30, 30, 30) if sig_name else self.set_text_color(*_MID)
-        self.cell(145, 6, self._enc(sig_name) if sig_name else '', 'B', 1, 'L')
-        self.ln(2)
-
-        # Date
-        self.set_text_color(*_MID)
-        self.cell(45, 6, 'Date:', 0, 0, 'L')
+        self.cell(date_lbl, 6, 'Date:', 0, 0, 'L')
         self.set_text_color(30, 30, 30) if sig_date else self.set_text_color(*_MID)
-        self.cell(145, 6, self._enc(sig_date) if sig_date else '', 'B', 1, 'L')
+        self.cell(date_w, 6, self._enc(sig_date) if sig_date else '', 'B', 1, 'L')
         self.set_text_color(*_BLACK)
