@@ -2833,6 +2833,8 @@ def download_quotation_pdf(quotation_id):
                 sub_map.setdefault(pid, []).append(i)
 
         subtotal_after_section_discounts = 0.0
+        total_raw_before_discounts       = 0.0
+        total_section_discount_amt       = 0.0
 
         def draw_row(name, desc, color, qty, amount, discount_pct=0, discounted_amt=None, indent=False):
             clean_desc = (desc or '').strip()
@@ -2925,6 +2927,8 @@ def download_quotation_pdf(quotation_id):
 
             sec_discount_amt = round(section_raw - section_subtotal, 2)
             subtotal_after_section_discounts = round(subtotal_after_section_discounts + section_subtotal, 2)
+            total_raw_before_discounts       = round(total_raw_before_discounts + section_raw, 2)
+            total_section_discount_amt       = round(total_section_discount_amt + sec_discount_amt, 2)
 
         # ── Grand totals ──────────────────────────────────────────────────
         if pdf.get_y() > pdf.h - 90:
@@ -2938,7 +2942,11 @@ def download_quotation_pdf(quotation_id):
         vat_amount       = subtotal_after_disc * (vat_pct / 100)
         total            = subtotal_after_disc + vat_amount
 
-        totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
+        if total_section_discount_amt > 0.005:
+            totals_rows = [('Subtotal', f'\xa3{total_raw_before_discounts:.2f}')]
+            totals_rows.append(('Discount Applied', f'-\xa3{total_section_discount_amt:.2f}'))
+        else:
+            totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
         if discount_pct > 0:
             totals_rows.append((f'Discount ({discount_pct:.0f}%)', f'-\xa3{discount_amount:.2f}'))
         totals_rows.append((f'VAT ({vat_pct:.0f}%)', f'\xa3{vat_amount:.2f}'))
