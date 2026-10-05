@@ -711,6 +711,134 @@ def financial_dashboard_stats(tenant_id, employee_id):
         session.close()
 
 
+# ── Admin insights (revenue by job type, confirmation rate, outstanding) ──────
+
+@financial_docs_bp.route("/financial-docs/admin-insights", methods=["GET"])
+@token_required
+@require_tenant
+def admin_insights(tenant_id, employee_id):
+    session = SessionLocal()
+    try:
+        tid = str(tenant_id)
+
+        # 1. Revenue by room/job type — confirmed quotations grouped by room_name
+        job_revenue_rows = session.execute(text("""
+            WITH item_subs AS (
+                SELECT qi.quotation_id,
+                       SUM(CASE WHEN COALESCE(qi.discount_percent,0) > 0
+                                THEN COALESCE(qi.discounted_amount, qi.amount*qi.quantity)
+                                ELSE qi.amount*qi.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Quotation_Items" qi
+                GROUP BY qi.quotation_id
+            )
+            SELECT
+                COALESCE(NULLIF(TRIM(q.room_name), ''), 'Other') AS job_type,
+                COUNT(*) AS quote_count,
+                COALESCE(ROUND(CAST(SUM(
+                    COALESCE(its.item_sub, 0)
+                    * (1 - COALESCE(q.global_discount_percent, 0) / 100.0)
+                    * (1 + COALESCE(q.vat_percentage, 20) / 100.0)
+                ) AS NUMERIC), 2), 0) AS total_value
+            FROM "StreemLyne_MT"."Quotations" q
+            LEFT JOIN item_subs its ON its.quotation_id = q.quotation_id
+            WHERE q.tenant_id = :tid
+              AND (LOWER(q.status) LIKE '%confirm%' OR LOWER(q.status) LIKE '%sent%')
+            GROUP BY COALESCE(NULLIF(TRIM(q.room_name), ''), 'Other')
+            ORDER BY total_value DESC
+        """), {"tid": tid}).fetchall()
+
+        # 2. Quote confirmation rate
+        quote_totals = session.execute(text("""
+            SELECT
+                COUNT(*) AS total_quotes,
+                SUM(CASE WHEN LOWER(status) LIKE '%sent%' THEN 1 ELSE 0 END) AS sent,
+                SUM(CASE WHEN LOWER(status) LIKE '%confirm%' THEN 1 ELSE 0 END) AS confirmed,
+                SUM(CASE WHEN LOWER(status) NOT LIKE '%draft%' THEN 1 ELSE 0 END) AS non_draft
+            FROM "StreemLyne_MT"."Quotations"
+            WHERE tenant_id = :tid
+        """), {"tid": tid}).fetchone()
+
+        sent_count      = int(quote_totals.sent or 0)
+        confirmed_count = int(quote_totals.confirmed or 0)
+        total_quotes    = int(quote_totals.total_quotes or 0)
+        non_draft       = int(quote_totals.non_draft or 0)
+        confirmation_rate = round((confirmed_count / sent_count * 100) if sent_count > 0 else 0, 1)
+
+        # 3. Overdue invoices — sent or partially paid, issued 30+ days ago
+        overdue_rows = session.execute(text("""
+            WITH item_subs AS (
+                SELECT d.invoice_id,
+                       SUM(CASE WHEN COALESCE(d.discount_percent,0) > 0
+                                THEN COALESCE(d.discounted_amount, d.amount*d.quantity)
+                                ELSE d.amount*d.quantity END) AS item_sub
+                FROM "StreemLyne_MT"."Invoice_Details" d
+                GROUP BY d.invoice_id
+            )
+            SELECT
+                i.invoice_id AS id,
+                i.invoice_number AS doc_number,
+                c.client_company_name AS customer_name,
+                i.status,
+                i.created_at,
+                (CURRENT_DATE - i.created_at::date) AS days_overdue,
+                ROUND(CAST(
+                    COALESCE(its.item_sub, 0)
+                    * (1 - COALESCE(i.global_discount_percent, 0) / 100.0)
+                    * (1 + COALESCE(i.vat_rate, 20) / 100.0)
+                AS NUMERIC), 2) AS total
+            FROM "StreemLyne_MT"."Invoice_Master" i
+            INNER JOIN "StreemLyne_MT"."Client_Master" c ON i.client_id = c.client_id
+            LEFT JOIN item_subs its ON its.invoice_id = i.invoice_id
+            WHERE i.tenant_id = :tid
+              AND i.status NOT LIKE 'Proforma%'
+              AND LOWER(i.status) NOT IN ('draft', 'received', 'paid', 'cancelled', 'rejected')
+              AND i.created_at::date <= CURRENT_DATE - INTERVAL '30 days'
+            ORDER BY i.created_at ASC
+        """), {"tid": tid}).fetchall()
+
+        overdue_total = sum(float(r.total or 0) for r in overdue_rows)
+
+        return jsonify({
+            "revenue_by_job_type": [
+                {
+                    "job_type":    r.job_type,
+                    "quote_count": int(r.quote_count),
+                    "total_value": float(r.total_value),
+                }
+                for r in job_revenue_rows
+            ],
+            "confirmation_rate": {
+                "rate":       confirmation_rate,
+                "sent":       sent_count,
+                "confirmed":  confirmed_count,
+                "total":      total_quotes,
+                "non_draft":  non_draft,
+            },
+            "overdue_invoices": {
+                "count":       len(overdue_rows),
+                "total_value": round(overdue_total, 2),
+                "docs": [
+                    {
+                        "id":           r.id,
+                        "doc_number":   r.doc_number or f"#{r.id}",
+                        "customer_name":r.customer_name or "",
+                        "status":       r.status or "",
+                        "total":        float(r.total or 0),
+                        "days_overdue": int(r.days_overdue or 0),
+                        "created_at":   r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in overdue_rows
+                ],
+            },
+        }), 200
+
+    except Exception as e:
+        current_app.logger.error(f"Error in admin_insights: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        session.close()
+
+
 # ── Inline status update ──────────────────────────────────────────────────────
 
 @financial_docs_bp.route("/financial-docs/<int:doc_id>/status", methods=["PATCH"])
