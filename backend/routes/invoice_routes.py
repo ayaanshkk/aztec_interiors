@@ -177,7 +177,7 @@ def create_invoice(tenant_id, employee_id):
                  deposit_paid, total_remaining, door_type, room_type, section_discounts, global_discount_percent, filler_type,
                  additional_terms, additional_notes,
                  signature_type, signature_image, signature_text, signature_name, signature_date,
-                 quote_reference)
+                 quote_reference, show_ex_vat_total)
                 VALUES
                 (:tenant_id, :client_id, :project_id, :invoice_number, :invoice_date, :due_date,
                  :status, :notes, :customer_name, :customer_address, :customer_phone, :customer_email,
@@ -187,7 +187,7 @@ def create_invoice(tenant_id, employee_id):
                  :deposit_paid, :total_remaining, :door_type, :room_type, :section_discounts, :global_discount_percent, :filler_type,
                  :additional_terms, :additional_notes,
                  :signature_type, :signature_image, :signature_text, :signature_name, :signature_date,
-                 :quote_reference)
+                 :quote_reference, :show_ex_vat_total)
                 RETURNING invoice_id
             """),
             {
@@ -228,7 +228,8 @@ def create_invoice(tenant_id, employee_id):
                 'signature_text':  data.get('signature_text'),
                 'signature_name':  data.get('signature_name', ''),
                 'signature_date':  data.get('signature_date', ''),
-                'quote_reference': data.get('quote_reference') or None,
+                'quote_reference':   data.get('quote_reference') or None,
+                'show_ex_vat_total': bool(data.get('show_ex_vat_total', True)),
             }
         )
         invoice_id = result.fetchone().invoice_id
@@ -384,8 +385,9 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 'signature_text':  getattr(row, 'signature_text', None) or '',
                 'signature_name':  getattr(row, 'signature_name', None) or '',
                 'signature_date':  getattr(row, 'signature_date', None) or '',
-                'quote_reference': getattr(row, 'quote_reference', None) or '',
-                'created_at':       row.created_at.isoformat() if row.created_at else None,
+                'quote_reference':   getattr(row, 'quote_reference', None) or '',
+                'show_ex_vat_total': bool(getattr(row, 'show_ex_vat_total', True)),
+                'created_at':        row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
                         'id':               i.invoice_details_id,
@@ -444,6 +446,10 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                 update_fields.append("section_discounts = :section_discounts")
                 sd = data['section_discounts']
                 params['section_discounts'] = json.dumps(sd) if isinstance(sd, dict) else sd
+
+            if 'show_ex_vat_total' in data:
+                update_fields.append("show_ex_vat_total = :show_ex_vat_total")
+                params['show_ex_vat_total'] = bool(data['show_ex_vat_total'])
 
             if 'vat_rate' in data:
                 update_fields.append("vat_rate = :vat_rate")
@@ -702,6 +708,8 @@ def download_invoice_pdf(invoice_id):
         ROW_H       = 8
         PAGE_BOTTOM = pdf.h - 30
         subtotal_after_section_discounts = 0.0
+        total_raw_before_discounts       = 0.0
+        total_section_discount_amt       = 0.0
 
         def draw_item_row(name, desc, color, qty, indent=False):
             clean_name = (name or '').encode('latin-1', errors='ignore').decode('latin-1')
@@ -762,8 +770,14 @@ def download_invoice_pdf(invoice_id):
                 is_sub = bool(getattr(item, 'is_sub_item', False))
                 raw    = round(float(item.amount or 0) * int(item.quantity or 1), 2)
                 section_raw += raw
-                disc_amt  = getattr(item, 'discounted_total', None) or getattr(item, 'discounted_amount', None)
-                effective = round(float(disc_amt), 2) if disc_amt is not None and float(disc_amt) > 0 else raw
+                disc_pct_item   = float(getattr(item, 'discount_percent', 0) or 0)
+                disc_amount_db  = float(getattr(item, 'discounted_amount', None) or 0)
+                if disc_amount_db > 0 and disc_amount_db < raw - 0.01:
+                    effective = round(disc_amount_db, 2)
+                elif disc_pct_item > 0:
+                    effective = round(raw * (1 - disc_pct_item / 100), 2)
+                else:
+                    effective = raw
                 section_subtotal += effective
 
                 draw_item_row(
@@ -776,6 +790,8 @@ def download_invoice_pdf(invoice_id):
 
             sec_discount_amt = round(section_raw - section_subtotal, 2)
             subtotal_after_section_discounts = round(subtotal_after_section_discounts + section_subtotal, 2)
+            total_raw_before_discounts       = round(total_raw_before_discounts + section_raw, 2)
+            total_section_discount_amt       = round(total_section_discount_amt + sec_discount_amt, 2)
 
         # ── Grand totals ──────────────────────────────────────────────────
         if pdf.get_y() > pdf.h - 90:
@@ -791,9 +807,17 @@ def download_invoice_pdf(invoice_id):
         deposit              = float(row.deposit_paid or 0)
         remaining            = max(0, round(total - deposit, 2))
 
-        totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
+        show_ex_vat = bool(getattr(row, 'show_ex_vat_total', True))
+
+        if total_section_discount_amt > 0.005:
+            totals_rows = [('Subtotal', f'\xa3{total_raw_before_discounts:.2f}')]
+            totals_rows.append(('Discount Applied', f'-\xa3{total_section_discount_amt:.2f}'))
+        else:
+            totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
         if global_discount_pct > 0:
-            totals_rows.append((f'Discount ({global_discount_pct:.2f}%)', f'-\xa3{global_discount_amt:.2f}'))
+            totals_rows.append((f'Discount ({global_discount_pct:.0f}%)', f'-\xa3{global_discount_amt:.2f}'))
+        if show_ex_vat:
+            totals_rows.append(('Ex VAT Total', f'\xa3{subtotal_after_disc:.2f}'))
         totals_rows.append((f'VAT ({vat_rate:.0f}%)', f'\xa3{vat_amount:.2f}'))
         if deposit > 0:
             totals_rows.append((f'Deposit Paid', f'\xa3{deposit:.2f}'))
@@ -1103,8 +1127,9 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                 'signature_type':  getattr(row, 'signature_type', None) or 'none',
                 'signature_image': getattr(row, 'signature_image', None) or '',
                 'signature_text':  getattr(row, 'signature_text', None) or '',
-                'signature_name':  getattr(row, 'signature_name', None) or '',
-                'signature_date':  getattr(row, 'signature_date', None) or '',
+                'signature_name':    getattr(row, 'signature_name', None) or '',
+                'signature_date':    getattr(row, 'signature_date', None) or '',
+                'show_ex_vat_total': bool(getattr(row, 'show_ex_vat_total', True)),
                 'created_at': row.created_at.isoformat() if row.created_at else None,
                 'items': [
                     {
@@ -1159,6 +1184,10 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
             if 'filler_door_type' in data and 'filler_type' not in data:
                 update_fields.append("filler_type = :filler_type")
                 params['filler_type'] = data['filler_door_type']
+
+            if 'show_ex_vat_total' in data:
+                update_fields.append("show_ex_vat_total = :show_ex_vat_total")
+                params['show_ex_vat_total'] = bool(data['show_ex_vat_total'])
 
             if 'items' in data:
                 session.execute(
@@ -1365,14 +1394,16 @@ def download_proforma_pdf(invoice_id):
             pdf.add_page()
         pdf.ln(5)
 
-        vat_rate   = float(row.vat_rate) if row.vat_rate is not None else 20.0
-        vat_amount = round(subtotal * (vat_rate / 100), 2)
-        total      = round(subtotal + vat_amount, 2)
+        vat_rate    = float(row.vat_rate) if row.vat_rate is not None else 20.0
+        vat_amount  = round(subtotal * (vat_rate / 100), 2)
+        total       = round(subtotal + vat_amount, 2)
+        show_ex_vat = bool(getattr(row, 'show_ex_vat_total', True))
 
-        pdf.draw_grand_totals(
-            [('Subtotal', f'\xa3{subtotal:.2f}'), (f'VAT ({vat_rate:.0f}%)', f'\xa3{vat_amount:.2f}')],
-            'Total', f'\xa3{total:.2f}',
-        )
+        pf_totals = [('Subtotal', f'\xa3{subtotal:.2f}')]
+        if show_ex_vat:
+            pf_totals.append(('Ex VAT Total', f'\xa3{subtotal:.2f}'))
+        pf_totals.append((f'VAT ({vat_rate:.0f}%)', f'\xa3{vat_amount:.2f}'))
+        pdf.draw_grand_totals(pf_totals, 'Total', f'\xa3{total:.2f}')
 
         # ── Bank details (highlighted box) ────────────────────────────────
         if pdf.get_y() + 55 > pdf.h - 20:

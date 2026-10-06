@@ -272,12 +272,14 @@ def create_quotation(tenant_id, employee_id):
              customer_name, customer_address, customer_phone, customer_email, vat_percentage, door_type, room_type,
              carcass_colour, door_colour, panelwork_colour, door_style, room_name, section_discounts, filler_type,
              additional_terms, additional_notes,
-             signature_type, signature_image, signature_text, signature_name, signature_date)
+             signature_type, signature_image, signature_text, signature_name, signature_date,
+             show_ex_vat_total)
             VALUES (:tenant_id, :client_id, :project_id, :reference_number, :quote_reference, :total, :status, :notes, :employee_id,
                     :customer_name, :customer_address, :customer_phone, :customer_email, :vat_percentage, :door_type, :room_type,
                     :carcass_colour, :door_colour, :panelwork_colour, :door_style, :room_name, :section_discounts, :filler_type,
                     :additional_terms, :additional_notes,
-                    :signature_type, :signature_image, :signature_text, :signature_name, :signature_date)
+                    :signature_type, :signature_image, :signature_text, :signature_name, :signature_date,
+                    :show_ex_vat_total)
             RETURNING quotation_id
         """)
 
@@ -312,8 +314,9 @@ def create_quotation(tenant_id, employee_id):
             'signature_text': data.get('signature_text'),
             'signature_name': data.get('signature_name', ''),
             'signature_date': data.get('signature_date', ''),
+            'show_ex_vat_total': bool(data.get('show_ex_vat_total', True)),
         })
-        
+
         quotation_id = result.fetchone().quotation_id
         
         # Add items
@@ -1479,10 +1482,11 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                 'updated_at': quote.updated_at.isoformat() if quote.updated_at else None,
                 'items': items_result,
                 'filler_type': getattr(quote, 'filler_type', None) or 'Basic Slab',
+                'show_ex_vat_total': bool(getattr(quote, 'show_ex_vat_total', True)),
             }
-            
+
             return jsonify(result), 200
-        
+
         elif request.method == 'PUT':
             # Update quotation
             data = request.get_json()
@@ -1569,7 +1573,10 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
             if 'reference_number' in data and data['reference_number']:
                 update_fields.append("reference_number = :reference_number")
                 params['reference_number'] = data['reference_number']
-            
+            if 'show_ex_vat_total' in data:
+                update_fields.append("show_ex_vat_total = :show_ex_vat_total")
+                params['show_ex_vat_total'] = bool(data['show_ex_vat_total'])
+
             # ✅ UPDATE ITEMS
             if 'items' in data:
                 # Delete all existing items
@@ -2779,7 +2786,7 @@ def download_quotation_pdf(quotation_id):
 
         pdf = PDF('P', 'mm', 'A4')
         pdf.doc_title   = 'Quotation'
-        pdf.include_vat = (qt_vat_rate > 0)
+        pdf.include_vat = False  # VAT Reg not shown on quotations
         pdf.alias_nb_pages()
         pdf.set_auto_page_break(auto=True, margin=22)
         pdf.add_page()
@@ -2792,7 +2799,7 @@ def download_quotation_pdf(quotation_id):
         date_str      = quotation.created_at.strftime('%d/%m/%Y') if quotation.created_at else 'N/A'
         room_name_val = getattr(quotation, 'room_name', None) or ''
 
-        right_rows = [('Quote No', quotation.reference_number or 'N/A'), ('Date', date_str), ('VAT Reg No', '528 7517 62')]
+        right_rows = [('Quote No', quotation.reference_number or 'N/A'), ('Date', date_str)]
 
         spec_rows = []
         if room_name_val:
@@ -2949,6 +2956,9 @@ def download_quotation_pdf(quotation_id):
             totals_rows = [('Subtotal', f'\xa3{subtotal_after_section_discounts:.2f}')]
         if discount_pct > 0:
             totals_rows.append((f'Discount ({discount_pct:.0f}%)', f'-\xa3{discount_amount:.2f}'))
+        show_ex_vat = bool(getattr(quotation, 'show_ex_vat_total', True))
+        if show_ex_vat:
+            totals_rows.append(('Ex VAT Total', f'\xa3{subtotal_after_disc:.2f}'))
         totals_rows.append((f'VAT ({vat_pct:.0f}%)', f'\xa3{vat_amount:.2f}'))
 
         pdf.draw_grand_totals(totals_rows, 'Total', f'\xa3{total:.2f}')

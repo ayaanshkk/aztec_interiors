@@ -93,9 +93,9 @@ class PDF(FPDF):
         self.ln(6)
 
         if self.doc_title:
-            self.set_font('Arial', 'B', 11)
+            self.set_font('Arial', 'B', 16)
             self.set_text_color(*_BLACK)
-            self.cell(0, 6, self.doc_title.upper(), 0, 1, 'L')
+            self.cell(0, 8, self.doc_title.upper(), 0, 1, 'C')
             self.ln(4)
 
         self.set_text_color(*_BLACK)
@@ -230,13 +230,21 @@ class PDF(FPDF):
         self.set_y(strip_y + pad)
         for i, (label, value) in enumerate(spec_rows):
             x = strip_x + i * col_w
+            cell_w = col_w - 4
             self.set_xy(x + 2, strip_y + pad)
             self.set_font('Arial', '', 6.5)
             self.set_text_color(*_LIGHT)
-            self.cell(col_w - 4, row_h * 0.5, self._enc(label).upper(), 0, 2, 'L')
+            self.cell(cell_w, row_h * 0.5, self._enc(label).upper(), 0, 2, 'L')
             self.set_font('Arial', '', 8.5)
             self.set_text_color(*_DARK)
-            self.cell(col_w - 4, row_h * 0.6, self._enc(value), 0, 0, 'L')
+            # Truncate value to prevent overflow into adjacent column
+            encoded_val = self._enc(value)
+            original_val = encoded_val
+            while encoded_val and self.get_string_width(encoded_val) > cell_w:
+                encoded_val = encoded_val[:-1]
+            if encoded_val != original_val and encoded_val:
+                encoded_val = encoded_val[:-2] + '...'
+            self.cell(cell_w, row_h * 0.6, encoded_val, 0, 0, 'L')
 
         self.set_y(strip_y + strip_h + 4)
         self.set_text_color(*_BLACK)
