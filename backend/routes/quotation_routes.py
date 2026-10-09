@@ -2746,6 +2746,7 @@ def download_quotation_pdf(quotation_id):
                     q.panelwork_colour,
                     q.section_discounts,
                     q.room_name,
+                    q.show_ex_vat_total,
                     c.client_company_name,
                     c.address        AS client_address,
                     c.client_phone   AS client_phone_num,
