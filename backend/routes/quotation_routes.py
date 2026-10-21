@@ -256,10 +256,10 @@ def create_quotation(tenant_id, employee_id):
         _sec_totals: dict = {}
         for _item in items_data:
             _sec = _item.get('section', 'Furniture')
-            _da = float(_item.get('discounted_amount') or (float(_item.get('amount', 0)) * int(_item.get('quantity', 1))))
+            _da = float(_item.get('discounted_amount') or (float(_item.get('amount', 0)) * float(_item.get('quantity', 1))))
             _sec_totals[_sec] = _sec_totals.get(_sec, 0) + _da
             for _sub in _item.get('subItems', []):
-                _sub_da = float(_sub.get('discounted_amount') or (float(_sub.get('amount', 0)) * int(_sub.get('quantity', 1))))
+                _sub_da = float(_sub.get('discounted_amount') or (float(_sub.get('amount', 0)) * float(_sub.get('quantity', 1))))
                 _sec_totals[_sec] = _sec_totals.get(_sec, 0) + _sub_da
         _subtotal_sd = sum(v * (1 - float(_section_discounts.get(k, 0)) / 100) for k, v in _sec_totals.items())
         _subtotal_gd = _subtotal_sd * (1 - _global_disc / 100)
@@ -368,7 +368,7 @@ def create_quotation(tenant_id, employee_id):
                     'needs_manual': sub.get('needs_manual_pricing', False),
                     'pricelist_id': sub.get('price_list_item_id'),
                     'discount_percent': sub.get('discount_percent', 0),
-                    'discounted_amount': sub.get('discounted_amount', float(sub.get('amount', 0)) * int(sub.get('quantity', 1))),
+                    'discounted_amount': sub.get('discounted_amount', float(sub.get('amount', 0)) * float(sub.get('quantity', 1))),
                     'parent_item_id': parent_item_id,
                     'section': item.get('section', 'Furniture'),
                 })
@@ -1637,7 +1637,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                             continue
 
                         sub_amount = float(sub.get('amount', 0))
-                        sub_qty = int(sub.get('quantity', 1))
+                        sub_qty = float(sub.get('quantity', 1))
                         
                         session.execute(item_insert, {
                             'quotation_id': quotation_id,
@@ -2867,7 +2867,9 @@ def download_quotation_pdf(quotation_id):
             pdf.cell(widths[0], row_h, _name, 0, 0, 'L')
             pdf.cell(widths[1], row_h, '', 0, 0, 'L')
             pdf.cell(widths[2], row_h, (color or '')[:16], 0, 0, 'C')
-            pdf.cell(widths[3], row_h, str(int(qty or 1)), 0, 1, 'C')
+            qty_val = float(qty or 1)
+            qty_str = str(int(qty_val)) if qty_val == int(qty_val) else str(qty_val)
+            pdf.cell(widths[3], row_h, qty_str, 0, 1, 'C')
             pdf.set_xy(x0 + widths[0] + 1, y0 + 1)
             pdf.set_font('Arial', '', 8.5)
             pdf.multi_cell(desc_width, line_h, clean_desc, 0, 'L')
@@ -2876,7 +2878,7 @@ def download_quotation_pdf(quotation_id):
             pdf.set_line_width(0.2)
             pdf.line(x0, pdf.get_y(), x0 + sum(widths), pdf.get_y())
             pdf.set_text_color(0, 0, 0)
-            raw = float(amount or 0) * int(qty or 1)
+            raw = float(amount or 0) * float(qty or 1)
             if discounted_amt is not None and float(discounted_amt) > 0:
                 return float(discounted_amt)
             return raw
