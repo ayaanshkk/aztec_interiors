@@ -1379,7 +1379,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                     'item_name': i.item_name,
                     'description': i.description,
                     'color': i.color,
-                    'quantity': i.quantity,
+                    'quantity': float(i.quantity) if i.quantity is not None else 1,
                     'amount': float(i.amount) if i.amount else 0,
                     'discount_type': getattr(i, 'discount_type', 'none'),
                     'discount_value': float(i.discount_value) if hasattr(i, 'discount_value') and i.discount_value else 0,
