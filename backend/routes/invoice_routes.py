@@ -239,7 +239,7 @@ def create_invoice(tenant_id, employee_id):
             if not item.get('item') and not item.get('description') and not item.get('amount'):
                 continue
             unit_price = float(item.get('amount', 0))
-            qty = int(item.get('quantity', 1))
+            qty = float(item.get('quantity', 1))
             session.execute(
                 text("""
                     INSERT INTO "StreemLyne_MT"."Invoice_Details"
@@ -465,7 +465,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
                     unit_price = float(item.get('amount', 0))
-                    qty = int(item.get('quantity', 1))
+                    qty = float(item.get('quantity', 1))
                     session.execute(
                         text("""
                             INSERT INTO "StreemLyne_MT"."Invoice_Details"
@@ -508,7 +508,7 @@ def handle_invoice(invoice_id, tenant_id, employee_id):
                         continue
                     sec = item.get('section', 'Furniture')
                     unit = float(item.get('amount', 0))
-                    qty  = int(item.get('quantity', 1))
+                    qty  = float(item.get('quantity', 1))
                     disc = float(item.get('discount_percent', 0))
                     line = item.get('discounted_total') or (unit * qty * (1 - disc / 100))
                     section_totals[sec] = section_totals.get(sec, 0) + float(line)
@@ -1051,7 +1051,7 @@ def create_proforma(tenant_id, employee_id):
             if not item.get('item') and not item.get('description') and not item.get('amount'):
                 continue
             unit_price = float(item.get('amount', 0))
-            qty = int(item.get('quantity', 1))
+            qty = float(item.get('quantity', 1))
             session.execute(
                 text("""
                     INSERT INTO "StreemLyne_MT"."Invoice_Details"
@@ -1199,7 +1199,7 @@ def handle_proforma(invoice_id, tenant_id, employee_id):
                     if not item.get('item') and not item.get('description') and not item.get('amount'):
                         continue
                     unit_price = float(item.get('amount', 0))
-                    qty = int(item.get('quantity', 1))
+                    qty = float(item.get('quantity', 1))
                     session.execute(
                         text("""
                             INSERT INTO "StreemLyne_MT"."Invoice_Details"

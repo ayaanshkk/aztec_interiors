@@ -345,7 +345,7 @@ def create_quotation(tenant_id, employee_id):
                 'needs_manual': item.get('needs_manual_pricing', False),
                 'pricelist_id': item.get('price_list_item_id'),
                 'discount_percent': item.get('discount_percent', 0),
-                'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * int(item.get('quantity', 1))),
+                'discounted_amount': item.get('discounted_amount', float(item.get('amount', 0)) * float(item.get('quantity', 1))),
                 'parent_item_id': None,
                 'section': item.get('section', 'Furniture'),
             })
@@ -1606,7 +1606,7 @@ def handle_quotation(quotation_id, tenant_id, employee_id):
                         continue
 
                     item_amount = float(item.get('amount', 0))
-                    item_qty = int(item.get('quantity', 1))
+                    item_qty = float(item.get('quantity', 1))
                     item_section = item.get('section', 'Furniture')
                     item_da = float(item.get('discounted_amount') or (item_amount * item_qty))
                     _upd_sec_totals[item_section] = _upd_sec_totals.get(item_section, 0) + item_da
